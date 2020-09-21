@@ -61,3 +61,34 @@ The most common use case would be a collector script that looks e.g. for files t
 Successfully tested on:
 
 - Debian 10
+
+### thunderstorm-collector Batch Script
+
+A Batch script for Windows.
+
+#### Requirements
+
+- curl (Download [here](https://curl.haxx.se/windows/))
+
+##### Note on Windows 10
+Windows 10 already includes a curl since build 17063, so all versions newer than version 1709 (Redstone 3) from October 2017 already meet the requirements
+
+##### Note on very old Windows versions
+
+The last version of curl that works with Windows 7 / Windows 2008 R2 and earlier is v7.46.0 and can be still be downloaded from [here](https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z)
+
+#### Usage
+
+You can run it like:
+
+```bash
+thunderstorm-collector.bat
+```
+
+#### Tested On
+
+Successfully tested on:
+
+- Windows 10
+- Windows 2003
+- Windows XP
