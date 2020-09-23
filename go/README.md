@@ -1,11 +1,11 @@
 # THOR Thunderstorm Collector Executable
 
-The Thunderstorm collector executable is an open-source tool written in Golang to upload files to THOR Thunderstorm.
+The Thunderstorm collector executable is an open-source tool written in Go to upload files to THOR Thunderstorm.
 A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked, and no further dependencies on
 the target systems exist.
 
 ### Build requirements
-- Golang version 1.12 or higher
+- Go version 1.12 or higher
 - make
 
 ### Build
