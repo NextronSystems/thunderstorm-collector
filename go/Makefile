@@ -1,6 +1,6 @@
 ALLARCHS := 386 amd64 arm arm64 ppc64 ppc64le mips mipsle mips64 mips64le
 ALLOS := android darwin dragonfly freebsd linux netbsd openbsd plan9 solaris windows
-DEFAULT_TARGETS := amd64-darwin amd64-linux arm64-linux 386-linux 386-windows arm-windows amd64-netbsd amd64-openbsd amd64-freebsd amd64-solaris
+DEFAULT_TARGETS := amd64-darwin amd64-linux arm64-linux 386-linux amd64-windows 386-windows arm-windows amd64-netbsd amd64-openbsd amd64-freebsd amd64-solaris
 
 $(foreach arch, $(ALLARCHS), \
 	$(foreach os, $(ALLOS), \
