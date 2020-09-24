@@ -23,7 +23,7 @@ type Collector struct {
 	logger        *log.Logger
 	workerGroup   *sync.WaitGroup
 	filesToUpload chan infoWithPath
-	Statistics    CollectionStatistics
+	Statistics    *CollectionStatistics
 }
 
 type CollectionStatistics struct {
@@ -52,6 +52,7 @@ func (c *Collector) StartWorkers() {
 	c.debugf("Starting %d threads for uploads", c.Threads)
 	c.workerGroup = &sync.WaitGroup{}
 	c.filesToUpload = make(chan infoWithPath)
+	c.Statistics = &CollectionStatistics{}
 	for i := 0; i < c.Threads; i++ {
 		c.workerGroup.Add(1)
 		go func() {
