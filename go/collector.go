@@ -159,12 +159,20 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	}
 	defer f.Close()
 
-	var url string
-	if c.Sync {
-		url = fmt.Sprintf("%s/api/check", c.Server)
-	} else {
-		url = fmt.Sprintf("%s/api/checkAsync", c.Server)
+	var urlParams = url.Values{}
+	if c.Source != "" {
+		urlParams.Add("source", c.Source)
 	}
+
+	var apiEndpoint string
+	if c.Sync {
+		apiEndpoint = "api/checkAsync"
+	} else {
+		apiEndpoint = "api/check"
+	}
+
+	url := fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
+
 	multipartReader, multipartWriter := io.Pipe()
 	w := multipart.NewWriter(multipartWriter)
 	abspath, err := filepath.Abs(info.path)

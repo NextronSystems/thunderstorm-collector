@@ -21,6 +21,7 @@ type Config struct {
 	CAs            []string `yaml:"ca" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.\nSpecify multiple CAs by using this flag multiple times."`
 	Insecure       bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
 	Logfile        string   `yaml:"logfile" description:"Write the log to this file as well as to the console." shorthand:"l"`
+	Source         string   `yaml:"source" description:"Name for this device in the Thunderstorm log messages." shorthand:"o"`
 	Template       string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help           bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }
@@ -29,6 +30,12 @@ var DefaultConfig = Config{
 	Threads:     1,
 	MaxFileSize: 100,
 	RootPaths:   []string{getRootPath()},
+	Source:      HostnameOrBlank(),
+}
+
+func HostnameOrBlank() string {
+	hostname, _ := os.Hostname()
+	return hostname
 }
 
 func getRootPath() string {
@@ -80,7 +87,7 @@ func ParseConfig() Config {
 	}
 	config.Server = strings.TrimSuffix(config.Server, "/")
 
-	if !(strings.HasPrefix(config.Server, "http://") ||strings.HasPrefix(config.Server, "https://")) {
+	if !(strings.HasPrefix(config.Server, "http://") || strings.HasPrefix(config.Server, "https://")) {
 		fmt.Fprintln(os.Stderr, "Missing http:// or https:// prefix in Thunderstorm URL")
 		os.Exit(1)
 	}
