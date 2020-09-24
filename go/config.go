@@ -9,17 +9,17 @@ import (
 
 type Config struct {
 	MaxAgeInDays   int      `yaml:"max-age" description:"Max age of collected files; older files are ignored." shorthand:"a"`
-	RootPaths      []string `yaml:"path" description:"Root paths from where files should be collected." shorthand:"p"`
-	FileExtensions []string `yaml:"extensions" description:"File extensions that should be collected. If left empty, all files are collected." shorthand:"e"`
-	Server         string   `yaml:"thunderstorm-server" description:"Thunderstorm URL to which files should be uploaded." shorthand:"s"`
-	Sync           bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm."`
+	RootPaths      []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
+	FileExtensions []string `yaml:"extensions" description:"File extensions that should be collected. If left empty, all files are collected.\nSpecify multiple extensions by using this flag multiple times." shorthand:"e"`
+	Server         string   `yaml:"thunderstorm-server" shorthand:"s" description:"Thunderstorm URL to which files should be uploaded.\nExample: --thunderstorm-server https://my.thunderstorm:8080/"`
+	Sync           bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
 	Debug          bool     `yaml:"debug" description:"Print debugging information." hidden:"true"`
-	Threads        int      `yaml:"threads" description:"How many threads should upload information simultaneously." shorthand:"r"`
+	Threads        int      `yaml:"threads" description:"How many threads should upload files simultaneously." shorthand:"r"`
 	MaxFileSize    int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
 	Proxy          string   `yaml:"http-proxy" description:"Proxy that should be used for the connection to Thunderstorm.\nIf left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables."`
-	CAs            []string `yaml:"ca" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server."`
+	CAs            []string `yaml:"ca" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.\nSpecify multiple CAs by using this flag multiple times."`
 	Insecure       bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
-	Logfile        string   `yaml:"logfile" description:"Write the log to this file as well." shorthand:"l"`
+	Logfile        string   `yaml:"logfile" description:"Write the log to this file as well as to the console." shorthand:"l"`
 	Template       string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help           bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }
@@ -56,7 +56,7 @@ func ParseConfig() Config {
 		flags.Usage()
 		os.Exit(1)
 	}
-	if config.Help {
+	if config.Help || len(os.Args) == 1 {
 		flags.Usage()
 		os.Exit(0)
 	}
