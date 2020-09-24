@@ -91,7 +91,7 @@ func (c *Collector) CheckThunderstormUp() error {
 }
 
 func (c *Collector) Collect(root string) {
-	c.debugf("Walking through %s to find files to upload", root)
+	c.logger.Printf("Walking through %s to find files to upload", root)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -104,6 +104,7 @@ func (c *Collector) Collect(root string) {
 	if err != nil {
 		c.logger.Printf("Could not walk path %s: %v\n", root, err)
 	}
+	c.logger.Printf("Finished walking through %s", root)
 }
 
 func (c *Collector) Stop() {
