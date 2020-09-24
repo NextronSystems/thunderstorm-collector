@@ -31,11 +31,14 @@ Successfully tested on:
 
 A Batch script for Windows.
 
+Warning: The FOR loop used in the Batch script tends to [leak memory](https://stackoverflow.com/questions/6330519/memory-leak-in-batch-for-loop). We couldn't figure out a clever hack to avoid this behaviour and therefore recommend using the Go based Thunderstorm Collector on Windows systems.
+
 ### Requirements
 
 - curl (Download [here](https://curl.haxx.se/windows/))
 
 #### Note on Windows 10
+
 Windows 10 already includes a curl since build 17063, so all versions newer than version 1709 (Redstone 3) from October 2017 already meet the requirements
 
 #### Note on very old Windows versions
@@ -57,3 +60,7 @@ Successfully tested on:
 - Windows 10
 - Windows 2003
 - Windows XP
+
+## thunderstorm-collector PowerShell Script
+
+On the roadmap. Available October 2020.

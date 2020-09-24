@@ -4,35 +4,67 @@ The Thunderstorm collector executable is an open-source tool written in Go to up
 A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked, and no further dependencies on
 the target systems exist.
 
+## Usage
+
+```help
+Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
+      --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
+  -e, --extensions strings           File extensions that should be collected. If left empty, all files are collected.
+  -h, --help                         Show this help.
+      --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
+                                     If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
+      --insecure                     Don't verify the Thunderstorm certificate if HTTPS is used.
+  -l, --logfile string               Write the log to this file.
+  -a, --max-age int                  Max age of collected files; older files are ignored.
+  -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
+  -p, --path strings                 Root paths from where files should be collected. (default [C:])
+  -t, --template string              Process default scan parameters from this YAML file.
+  -r, --threads int                  How many threads should upload information simultaneously. (default 1)
+  -s, --thunderstorm-server string   Thunderstorm URL to which files should be uploaded.
+      --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm.
+```
+
+## Precompiled Binaries
+
+You can find precompiled binaries for numerous platforms in the [releases](/releases) section.
+
+## Build
+
 ### Build requirements
+
 - Go version 1.12 or higher
 - make
 
-### Build
+### Build Steps
+
 Install golang package dependencies:
-```
+
+```bash
 go get -d github.com/spf13/pflag
 go get -d gopkg.in/yaml.v3
 ```
+
 Build executables:
-```
+
+```bash
 make
 ```
 
 If you want to build executables for other platform / architecture combinations than those built in the default configuration, use:
-```
+
+```bash
 make bin/<arch>-<os>-thunderstorm-collector
 ```
 
 A full list of architectures and platforms that can be used is listed at the start of the Makefile. Note that not all combinations are supported.
 
-
 ### Execution examples
 
 Note: The following examples use the amd64-linux-thunderstorm-collector, replace
-the name of the executable with the one you are using. 
+the name of the executable with the one you are using.
 
 Upload all files that are smaller than 500 MB to thunderstorm.test using HTTP, with 10 Threads in parallel:
+
 ```
 ./amd64-linux-thunderstorm-collector -s http://thunderstorm.test:8080 -r 10 -m 500
 ```
