@@ -3,7 +3,7 @@ ALL_TARGETS := $(shell go tool dist list)
 ALLARCHS := $(sort $(subst /,,$(notdir $(ALL_TARGETS))))
 ALLOS := $(sort $(subst /,,$(dir $(ALL_TARGETS))))
 
-all: $(filter-out darwin/arm64,$(filter-out android%,$(ALL_TARGETS)))
+all: $(filter-out darwin/arm%,$(filter-out android%,$(ALL_TARGETS)))
 
 $(foreach arch, $(ALLARCHS), \
 	$(foreach os, $(ALLOS), \
