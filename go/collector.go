@@ -189,8 +189,7 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	}()
 	response, err := http.Post(url, w.FormDataContentType(), multipartReader)
 	if err != nil {
-		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
-		c.logger.Printf("Could not send file %s to thunderstorm : %v\n", info.path, err)
+		c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v\n", info.path, err)
 		time.Sleep(time.Second)
 		return true
 	}
