@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -32,7 +33,7 @@ var DefaultConfig = Config{
 
 func getRootPath() string {
 	if runtime.GOOS == "windows" {
-		return "C:"
+		return "C:\\"
 	} else {
 		return "/"
 	}
@@ -78,5 +79,15 @@ func ParseConfig() Config {
 		os.Exit(1)
 	}
 	config.Server = strings.TrimSuffix(config.Server, "/")
+
+	if !(strings.HasPrefix(config.Server, "http://") ||strings.HasPrefix(config.Server, "https://")) {
+		fmt.Fprintln(os.Stderr, "Missing http:// or https:// prefix in Thunderstorm URL")
+		os.Exit(1)
+	}
+
+	if _, err := url.Parse(config.Server); err != nil {
+		fmt.Fprintln(os.Stderr, "URL for Thunderstorm is invalid")
+		os.Exit(1)
+	}
 	return config
 }

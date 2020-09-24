@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -70,13 +71,19 @@ func (c *Collector) CheckThunderstormUp() error {
 	response, err := http.Get(fmt.Sprintf("%s/api/status", c.Server))
 	if err != nil {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
+			if opError, isOpError := urlError.Err.(*net.OpError); isOpError {
+				if opError.Op == "dial" {
+					return fmt.Errorf("%w - did you enter host and port correctly", opError)
+				}
+			}
 			return urlError.Err
 		}
 		return err
 	}
-	defer response.Body.Close()
+	body, _ := ioutil.ReadAll(response.Body)
+	response.Body.Close()
 	if response.StatusCode != 200 {
-		return fmt.Errorf("server didn't answer with an OK response code on status page, got: %d", response.StatusCode)
+		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d: %s", response.StatusCode, body)
 	}
 	c.debugf("Read status page from %s/api/status", c.Server)
 	return nil
