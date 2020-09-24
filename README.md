@@ -10,7 +10,7 @@ The collectors allow users to select files based on size, age or type.
 This repository contains two types of collectors:
 
 - [Scripts](scripts/) written in different script languages, available for Linux, Unix and Microsoft Windows
-- An [Thunderstorm Collector](go/) written in Go that can be compiled for numerous target platforms
+- A [Thunderstorm Collector](go/) written in Go that can be compiled and is pre-compiled for numerous target platforms
 
 Visit the links to the respective sub directories for a detailed README on the different collectors.
 
