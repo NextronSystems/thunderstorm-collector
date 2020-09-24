@@ -30,6 +30,7 @@ type CollectionStatistics struct {
 	uploadedFiles int64
 	skippedFiles  int64
 	uploadErrors  int64
+	fileErrors    int64
 }
 
 func NewCollector(config Config, logger *log.Logger) *Collector {
@@ -97,7 +98,7 @@ func (c *Collector) Collect(root string) {
 			return nil
 		}
 		if !info.Mode().IsDir() {
-			c.filesToUpload <- infoWithPath{info, path}
+			c.filesToUpload <- infoWithPath{info, path, 0}
 		}
 		return nil
 	})
@@ -111,13 +112,16 @@ func (c *Collector) Stop() {
 	c.debugf("Waiting for pending uploads to finish...")
 	close(c.filesToUpload)
 	c.workerGroup.Wait()
-	c.logger.Printf("Uploaded %d files, skipped %d others and failed to upload %d more.",
-		c.Statistics.uploadedFiles, c.Statistics.skippedFiles, c.Statistics.uploadErrors)
+	c.logger.Printf("Uploaded files: %d files", c.Statistics.uploadedFiles)
+	c.logger.Printf("Failed to read files: %d files", c.Statistics.fileErrors)
+	c.logger.Printf("Skipped files: %d files", c.Statistics.skippedFiles)
+	c.logger.Printf("Failed uploads: %d files", c.Statistics.uploadErrors)
 }
 
 type infoWithPath struct {
 	os.FileInfo
-	path string
+	path    string
+	retries int
 }
 
 var MB int64 = 1024 * 1024
@@ -155,7 +159,7 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	f, err := os.Open(info.path)
 	if err != nil {
 		c.logger.Printf("Could not open file %s: %v\n", info.path, err)
-		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+		atomic.AddInt64(&c.Statistics.fileErrors, 1)
 		return
 	}
 	defer f.Close()
@@ -190,9 +194,16 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	}()
 	response, err := http.Post(url, w.FormDataContentType(), multipartReader)
 	if err != nil {
-		c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v\n", info.path, err)
-		time.Sleep(time.Second)
-		return true
+		if info.retries < 3 {
+			c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v", info.path, err)
+			info.retries++
+			time.Sleep(time.Second)
+			return true
+		} else {
+			c.logger.Printf("Could not send file %s to thunderstorm, canceling it.", info.path)
+			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+			return false
+		}
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusServiceUnavailable {
