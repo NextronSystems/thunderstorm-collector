@@ -24,6 +24,51 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm.
 ```
 
+## Config Files
+
+The collectors use config files in YAML format, which can be set using the `-t`/`--template` parameter.
+
+You can use all command line parameters, but you have to use their long form. A typical config file `config.yml` could look like this:
+
+```yaml
+thunderstorm-server: my-thunderstorm.local
+max-filesize: 10
+max-age: 30
+extensions:
+    - .vbs
+    - .ps
+    - .ps1
+    - .rar
+    - .tmp
+    - .bat
+    - .chm
+    - .dll
+    - .exe
+    - .hta
+    - .js
+    - .lnk
+    - .sct
+    - .war
+    - .jsp
+    - .jspx
+    - .php
+    - .asp
+    - .aspx
+    - .log
+    - .dmp
+    - .txt
+    - .jar
+    - .job
+```
+
+In the example above, the collector is instructed to send all samples to a server with the FQDN `my-thunderstorm.local`, send only files smaller 10 Megabyte, changed or created within the last 30 days and only files with the given extensions are collected.
+
+You can then use the config file as a parameter:
+
+```bash
+./amd64-linux-thunderstorm-collector -t config.yml
+```
+
 ## Precompiled Binaries
 
 You can find precompiled binaries for numerous platforms in the [releases](/releases) section.
