@@ -68,6 +68,19 @@ func buildHttpTransport(config Config) *http.Transport {
 }
 
 func main() {
+
+	fmt.println(`   ________                __            __                `)
+	fmt.println(`  /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _  `)
+	fmt.println(`   / / / _ \/ // / _ \/ _  / -_) __(_-</ __/ _ \/ __/  ' \ `)
+	fmt.println(`  /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/ `)
+	fmt.println(`    _____     ____        __                               `)
+	fmt.println(`   / ___/__  / / /__ ____/ /____  ____                     `)
+	fmt.println(`  / /__/ _ \/ / / -_) __/ __/ _ \/ __/                     `)
+	fmt.println(`  \___/\___/_/_/\__/\__/\__/\___/_/                        `)
+	fmt.println(`                                                           `)
+	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020                  `)
+	fmt.Println(`                                                           `)
+
 	var config = ParseConfig()
 
 	http.DefaultTransport = buildHttpTransport(config)
