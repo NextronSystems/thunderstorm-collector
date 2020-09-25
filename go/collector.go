@@ -132,11 +132,20 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 		c.debugf("Skipping irregular file %s", info.path)
 		return
 	}
-	if c.MaxAgeInDays > 0 &&
-		info.ModTime().Before(time.Now().Add(-1*time.Duration(c.MaxAgeInDays)*24*time.Hour)) {
-		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping old file %s", info.path)
-		return
+	if c.MaxAgeInDays > 0 {
+		isTooOld := true
+		thresholdTime := time.Now().Add(-1 * time.Duration(c.MaxAgeInDays) * 24 * time.Hour)
+		for _, time := range getTimes(info.FileInfo) {
+			if time.After(thresholdTime) {
+				isTooOld = false
+				break
+			}
+		}
+		if isTooOld {
+			atomic.AddInt64(&c.Statistics.skippedFiles, 1)
+			c.debugf("Skipping old file %s", info.path)
+			return
+		}
 	}
 	if c.MaxFileSize > 0 &&
 		c.MaxFileSize*MB < info.Size() {
