@@ -1,8 +1,7 @@
-# THOR Thunderstorm Collector Executable
+# THOR Thunderstorm Collector
 
-The Thunderstorm collector executable is an open-source tool written in Go to upload files to THOR Thunderstorm.
-A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked, and no further dependencies on
-the target systems exist.
+Thunderstorm Collector is an open-source tool written in Go that can be used to upload files to THOR Thunderstorm.
+A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked so that no further dependencies on the target systems exist.
 
 ## Usage
 
@@ -79,6 +78,8 @@ You can find precompiled binaries for numerous platforms in the [releases](/rele
 
 - Go version 1.12 or higher
 - make
+
+[Here](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-debian-10) is an instruction on how to install Go on Debian. Install make with `sudo apt install make`.
 
 ### Build Steps
 
