@@ -1,15 +1,14 @@
-# THOR Thunderstorm Collector Executable
+# THOR Thunderstorm Collector
 
-The Thunderstorm collector executable is an open-source tool written in Go to upload files to THOR Thunderstorm.
-A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked, and no further dependencies on
-the target systems exist.
+Thunderstorm Collector is an open-source tool written in Go that can be used to upload files to THOR Thunderstorm.
+A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked so that no further dependencies on the target systems exist.
 
 ## Usage
 
 ```help
 Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
-  -e, --extensions strings           File extensions that should be collected. If left empty, all files are collected.
+  -e, --extension strings            File extensions that should be collected. If left empty, all files are collected.
   -h, --help                         Show this help.
       --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
                                      If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
@@ -24,6 +23,55 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm.
 ```
 
+## Config Files
+
+The collectors use config files in YAML format, which can be set using the `-t`/`--template` parameter.
+
+You can use all command line parameters, but you have to use their long form. A typicall custom config file `my-config.yml` could look like this:
+
+```yaml
+thunderstorm-server: my-thunderstorm.local
+max-filesize: 10
+max-age: 30
+extension:
+    - .vbs
+    - .ps
+    - .ps1
+    - .rar
+    - .tmp
+    - .bat
+    - .chm
+    - .dll
+    - .exe
+    - .hta
+    - .js
+    - .lnk
+    - .sct
+    - .war
+    - .jsp
+    - .jspx
+    - .php
+    - .asp
+    - .aspx
+    - .log
+    - .dmp
+    - .txt
+    - .jar
+    - .job
+```
+
+In the example above, the collector is instructed to send all samples to a server with the FQDN `my-thunderstorm.local`, send only files smaller 10 Megabyte, changed or created within the last 30 days and only files with the given extensions are collected.
+
+You can then use the config file as a parameter:
+
+```bash
+./amd64-linux-thunderstorm-collector -t config.yml
+```
+
+### Default Configuration
+
+The default configuration file named `config.yml` is used by default. We provide a reasonable default configuration file that doesn't select ALL files from a source system but only the ones with certain extensions and magic headers. We recommand using this file in use cases in which you consider collecting files from numerous endsystems.
+
 ## Precompiled Binaries
 
 You can find precompiled binaries for numerous platforms in the [releases](/releases) section.
@@ -34,6 +82,8 @@ You can find precompiled binaries for numerous platforms in the [releases](/rele
 
 - Go version 1.12 or higher
 - make
+
+[Here](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-debian-10) is an instruction on how to install Go on Debian. Install make with `sudo apt install make`.
 
 ### Build Steps
 

@@ -11,7 +11,7 @@ import (
 type Config struct {
 	MaxAgeInDays   int      `yaml:"max-age" description:"Max age of collected files; older files are ignored." shorthand:"a"`
 	RootPaths      []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
-	FileExtensions []string `yaml:"extensions" description:"File extensions that should be collected. If left empty, all files are collected.\nSpecify multiple extensions by using this flag multiple times." shorthand:"e"`
+	FileExtensions []string `yaml:"extension" description:"File extensions that should be collected. If left empty, all files are collected.\nSpecify multiple extensions by using this flag multiple times." shorthand:"e"`
 	Server         string   `yaml:"thunderstorm-server" shorthand:"s" description:"Thunderstorm URL to which files should be uploaded.\nExample: --thunderstorm-server https://my.thunderstorm:8080/"`
 	Sync           bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
 	Debug          bool     `yaml:"debug" description:"Print debugging information."`
