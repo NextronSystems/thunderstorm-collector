@@ -8,7 +8,7 @@ A Makefile has been added to allow for simplified creation of executables. The g
 ```help
 Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
-  -e, --extensions strings           File extensions that should be collected. If left empty, all files are collected.
+  -e, --extension strings            File extensions that should be collected. If left empty, all files are collected.
   -h, --help                         Show this help.
       --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
                                      If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
@@ -27,13 +27,13 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
 
 The collectors use config files in YAML format, which can be set using the `-t`/`--template` parameter.
 
-You can use all command line parameters, but you have to use their long form. A typical config file `config.yml` could look like this:
+You can use all command line parameters, but you have to use their long form. A typicall custom config file `my-config.yml` could look like this:
 
 ```yaml
 thunderstorm-server: my-thunderstorm.local
 max-filesize: 10
 max-age: 30
-extensions:
+extension:
     - .vbs
     - .ps
     - .ps1
