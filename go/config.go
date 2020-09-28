@@ -2,16 +2,14 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"runtime"
-	"strings"
 )
 
 type Config struct {
-	MaxAgeInDays   int      `yaml:"max-age" description:"Max age of collected files; older files are ignored." shorthand:"a"`
+	MaxAgeInDays   string   `yaml:"max-age" description:"Max age of collected files. Files with older modification date are ignored.\Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days." shorthand:"a"`
 	RootPaths      []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
-	FileExtensions []string `yaml:"extension" description:"File extensions that should be collected. If left empty, all files are collected.\nSpecify multiple extensions by using this flag multiple times." shorthand:"e"`
+	FileExtensions []string `yaml:"extension" description:"File extensions that should be collected. If left empty, all files are collected.\nSpecify multiple extensions by using this flag multiple times.\nExample: -e .exe -e .dll" shorthand:"e"`
 	Server         string   `yaml:"thunderstorm-server" shorthand:"s" description:"Thunderstorm URL to which files should be uploaded.\nExample: --thunderstorm-server https://my.thunderstorm:8080/"`
 	Sync           bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
 	Debug          bool     `yaml:"debug" description:"Print debugging information."`
@@ -67,34 +65,6 @@ func ParseConfig() Config {
 	if config.Help || len(os.Args) == 1 {
 		flags.Usage()
 		os.Exit(0)
-	}
-	if config.Server == "" {
-		fmt.Fprintln(os.Stderr, "Thunderstorm Server URL not specified")
-		os.Exit(1)
-	}
-	if config.Threads < 1 {
-		fmt.Fprintln(os.Stderr, "Thread count must be > 0")
-		os.Exit(1)
-	}
-	if config.MaxAgeInDays < 0 {
-		fmt.Fprintln(os.Stderr, "Maximum file age must be >= 0")
-		os.Exit(1)
-	}
-	if config.MaxFileSize < 1 {
-		fmt.Fprintln(os.Stderr, "Maximum file size must be >= 0")
-		flags.Usage()
-		os.Exit(1)
-	}
-	config.Server = strings.TrimSuffix(config.Server, "/")
-
-	if !(strings.HasPrefix(config.Server, "http://") || strings.HasPrefix(config.Server, "https://")) {
-		fmt.Fprintln(os.Stderr, "Missing http:// or https:// prefix in Thunderstorm URL")
-		os.Exit(1)
-	}
-
-	if _, err := url.Parse(config.Server); err != nil {
-		fmt.Fprintln(os.Stderr, "URL for Thunderstorm is invalid")
-		os.Exit(1)
 	}
 	return config
 }

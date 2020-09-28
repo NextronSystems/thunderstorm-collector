@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -11,7 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 func buildHttpTransport(config Config) *http.Transport {
@@ -67,6 +72,66 @@ func buildHttpTransport(config Config) *http.Transport {
 	return transport
 }
 
+func validateConfig(config Config) (cc CollectorConfig, err error) {
+	cc = CollectorConfig{
+		RootPaths:      config.RootPaths,
+		FileExtensions: config.FileExtensions,
+		Sync:           config.Sync,
+		Debug:          config.Debug,
+		Threads:        config.Threads,
+		Source:         config.Source,
+	}
+
+	if config.Threads < 1 {
+		return cc, errors.New("thread count must be > 0")
+	}
+
+	if config.MaxAgeInDays != "" {
+		lastChar, _ := utf8.DecodeLastRune([]byte(config.MaxAgeInDays))
+		var multiplier time.Duration
+		if !unicode.IsLetter(lastChar) {
+			multiplier = time.Hour * 24
+		} else {
+			switch lastChar {
+			case 's':
+				multiplier = time.Second
+			case 'm':
+				multiplier = time.Minute
+			case 'h':
+				multiplier = time.Hour
+			case 'd':
+				multiplier = time.Hour * 24
+			default:
+				return cc, fmt.Errorf("invalid suffix for maximum age: %s", config.MaxAgeInDays)
+			}
+			config.MaxAgeInDays = config.MaxAgeInDays[:len(config.MaxAgeInDays)-1]
+		}
+		number, err := strconv.Atoi(config.MaxAgeInDays)
+		if err != nil {
+			return cc, fmt.Errorf("could not parse maximum age %s: %w", config.MaxAgeInDays, err)
+		}
+		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
+	}
+
+	if config.MaxFileSize < 1 {
+		return cc, errors.New("maximum file size must be > 0")
+	}
+	cc.MaxFileSize = config.MaxFileSize * 1024 * 1024
+
+	if config.Server == "" {
+		return cc, errors.New("thunderstorm Server URL not specified")
+	}
+	if !(strings.HasPrefix(config.Server, "http://") || strings.HasPrefix(config.Server, "https://")) {
+		return cc, errors.New("missing http:// or https:// prefix in Thunderstorm URL")
+	}
+	if _, err := url.Parse(config.Server); err != nil {
+		return cc, errors.New("URL for Thunderstorm is invalid")
+	}
+	cc.Server = strings.TrimSuffix(config.Server, "/")
+
+	return cc, nil
+}
+
 func main() {
 
 	fmt.Println(`   ________                __            __                `)
@@ -83,6 +148,12 @@ func main() {
 
 	var config = ParseConfig()
 
+	collectorConfig, err := validateConfig(config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error while parsing arguments: %v", err)
+		os.Exit(1)
+	}
+
 	http.DefaultTransport = buildHttpTransport(config)
 
 	var output io.Writer
@@ -98,11 +169,17 @@ func main() {
 		output = os.Stdout
 	}
 	logger := log.New(output, "", log.Ldate|log.Ltime)
-	collector := NewCollector(config, logger)
+	collector := NewCollector(collectorConfig, logger)
 	if err := collector.CheckThunderstormUp(); err != nil {
 		logger.Print("Could not successfully connect to Thunderstorm")
 		logger.Print(err)
 		os.Exit(1)
+	}
+	if config.Debug {
+		if len(collectorConfig.FileExtensions) > 0 {
+			logger.Println("Collecting the following extensions:", strings.Join(collectorConfig.FileExtensions, ", "))
+		}
+		logger.Println("Collecting files younger than", collectorConfig.ThresholdTime.Format("02.01.2006 15:04:05"))
 	}
 	collector.StartWorkers()
 	for _, root := range config.RootPaths {
