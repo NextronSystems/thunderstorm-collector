@@ -68,6 +68,10 @@ You can then use the config file as a parameter:
 ./amd64-linux-thunderstorm-collector -t config.yml
 ```
 
+### Default Configuration
+
+The default configuration file named `config.yml` is used by default. We provide a reasonable default configuration file that doesn't select ALL files from a source system but only the ones with certain extensions and magic headers. We recommand using this file in use cases in which you consider collecting files from numerous endsystems.
+
 ## Precompiled Binaries
 
 You can find precompiled binaries for numerous platforms in the [releases](/releases) section.
