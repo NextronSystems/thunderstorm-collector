@@ -188,9 +188,9 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 
 	var apiEndpoint string
 	if c.Sync {
-		apiEndpoint = "api/checkAsync"
-	} else {
 		apiEndpoint = "api/check"
+	} else {
+		apiEndpoint = "api/checkAsync"
 	}
 
 	url := fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
@@ -224,8 +224,9 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusServiceUnavailable {
-		retryTime, err := strconv.Atoi(response.Header.Get("Retry-After"))
-		if err == nil {
+		retryAfter := response.Header.Get("Retry-After")
+		retryTime, err := strconv.Atoi(retryAfter)
+		if err != nil {
 			retryTime = 30 // Default to 30 seconds cooldown time
 		}
 		c.logger.Printf("Thunderstorm has no free capacities for file %s, retrying in %d seconds", info.path, retryTime)
