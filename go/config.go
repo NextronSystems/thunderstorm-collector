@@ -7,9 +7,9 @@ import (
 )
 
 type Config struct {
-	MaxAgeInDays   string   `yaml:"max-age" description:"Max age of collected files. Files with older modification date are ignored.\Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days." shorthand:"a"`
+	MaxAgeInDays   string   `yaml:"max-age" description:"Max age of collected files. Files with older modification date are ignored.\nUnit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.\nExample: --max-age 10h" shorthand:"a"`
 	RootPaths      []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
-	FileExtensions []string `yaml:"extension" description:"File extensions that should be collected. If left empty, all files are collected.\nSpecify multiple extensions by using this flag multiple times.\nExample: -e .exe -e .dll" shorthand:"e"`
+	FileExtensions []string `yaml:"extension" description:"File extensions that should be collected. If left empty, file extensions are ignored.\nSpecify multiple extensions by using this flag multiple times.\nExample: -e .exe -e .dll" shorthand:"e"`
 	Server         string   `yaml:"thunderstorm-server" shorthand:"s" description:"Thunderstorm URL to which files should be uploaded.\nExample: --thunderstorm-server https://my.thunderstorm:8080/"`
 	Sync           bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
 	Debug          bool     `yaml:"debug" description:"Print debugging information."`
@@ -20,7 +20,7 @@ type Config struct {
 	Insecure       bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
 	Logfile        string   `yaml:"logfile" description:"Write the log to this file as well as to the console." shorthand:"l"`
 	Source         string   `yaml:"source" description:"Name for this device in the Thunderstorm log messages." shorthand:"o"`
-	MagicHeaders   []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
+	MagicHeaders   []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
 	Template       string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help           bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }
