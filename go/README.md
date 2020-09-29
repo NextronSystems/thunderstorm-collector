@@ -8,26 +8,40 @@ A Makefile has been added to allow for simplified creation of executables. The g
 ```help
 Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
-  -e, --extension strings            File extensions that should be collected. If left empty, all files are collected.
+                                     Specify multiple CAs by using this flag multiple times.
+      --debug                        Print debugging information.
+  -e, --extension strings            File extensions that should be collected. If left empty, file extensions are ignored.
+                                     Specify multiple extensions by using this flag multiple times.
+                                     Example: -e .exe -e .dll
   -h, --help                         Show this help.
       --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
                                      If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
       --insecure                     Don't verify the Thunderstorm certificate if HTTPS is used.
-  -l, --logfile string               Write the log to this file.
-  -a, --max-age int                  Max age of collected files; older files are ignored.
+  -l, --logfile string               Write the log to this file as well as to the console.
+      --magic strings                Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.
+                                     Specify multiple wanted Magic Headers by using this flag multiple times.
+                                     Example: --magic 4d5a --magic cffa
+  -a, --max-age string               Max age of collected files. Files with older modification date are ignored.
+                                     Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.
+                                     Example: --max-age 10h
   -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
-  -p, --path strings                 Root paths from where files should be collected. (default [C:])
+  -p, --path strings                 Root paths from where files should be collected.
+                                     Specify multiple root paths by using this flag multiple times. (default [C:])
+      --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
+  -o, --source string                Name for this device in the Thunderstorm log messages. (default "maxdebian")
+      --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
   -t, --template string              Process default scan parameters from this YAML file.
-  -r, --threads int                  How many threads should upload information simultaneously. (default 1)
-  -s, --thunderstorm-server string   Thunderstorm URL to which files should be uploaded.
-      --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm.
+  -r, --threads int                  How many threads should upload files simultaneously. (default 1)
+  -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
+                                     Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
+      --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files.
 ```
 
 ## Config Files
 
 The collectors use config files in YAML format, which can be set using the `-t`/`--template` parameter.
 
-You can use all command line parameters, but you have to use their long form. A typicall custom config file `my-config.yml` could look like this:
+You can use all command line parameters, but you have to use their long form. A typical custom config file `my-config.yml` could look like this:
 
 ```yaml
 thunderstorm-server: my-thunderstorm.local
@@ -70,7 +84,7 @@ You can then use the config file as a parameter:
 
 ### Default Configuration
 
-The default configuration file named `config.yml` is used by default. We provide a reasonable default configuration file that doesn't select ALL files from a source system but only the ones with certain extensions and magic headers. We recommand using this file in use cases in which you consider collecting files from numerous endsystems.
+The default configuration file named `config.yml` is used by default. We provide a reasonable default configuration file that doesn't select ALL files from a source system but only the ones with certain extensions and magic headers. We recommend using this file in use cases in which you consider collecting files from numerous endsystems.
 
 ## Precompiled Binaries
 
@@ -116,27 +130,27 @@ the name of the executable with the one you are using.
 Upload all files that are smaller than 500 MB to thunderstorm.test using HTTP, with 10 Threads in parallel:
 
 ```
-./amd64-linux-thunderstorm-collector -s http://thunderstorm.test:8080 -r 10 -m 500
+./amd64-linux-thunderstorm-collector -s thunderstorm.test -r 10 -m 500
 ```
 
 Upload all files that are smaller than 500 MB and changed in the last 10 days to thunderstorm.test using HTTPS:
 ```
-./amd64-linux-thunderstorm-collector -s https://thunderstorm.test:8080 -a 10 -m 500
+./amd64-linux-thunderstorm-collector -s thunderstorm.test --ssl -a 10 -m 500
 ```
 
 Upload all files from a specific directory:
 ```
-./amd64-linux-thunderstorm-collector -s http://thunderstorm.test:8080 -p /path/to/directory
+./amd64-linux-thunderstorm-collector -s thunderstorm.test -p /path/to/directory
 ```
 
 Upload using a proxy:
 ```
-./amd64-linux-thunderstorm-collector -s http://thunderstorm.test:8080 --http-proxy http://username@password:proxy.test/
+./amd64-linux-thunderstorm-collector -s thunderstorm.test --http-proxy http://username@password:proxy.test/
 ```
 
 Upload synchronously and write the results to a log file:
 ```
-./amd64-linux-thunderstorm-collector -s http://thunderstorm.test:8080 -l collector.log --upload-synchronous
+./amd64-linux-thunderstorm-collector -s thunderstorm.test -l collector.log --upload-synchronous
 ```
 
 ### Tested On
