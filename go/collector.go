@@ -30,6 +30,7 @@ type CollectorConfig struct {
 	MaxFileSize    int64
 	Source         string
 	MagicHeaders   [][]byte
+	AllFilesystems bool
 }
 type Collector struct {
 	CollectorConfig
@@ -124,7 +125,7 @@ func (c *Collector) Collect(root string) {
 		if !info.Mode().IsDir() {
 			c.filesToUpload <- infoWithPath{info, path, 0}
 		} else {
-			if SkipFilesystem(path) {
+			if !c.AllFilesystems && SkipFilesystem(path) {
 				c.logger.Printf("Skipping directory %s since it uses a pseudo or network filesystem", path)
 				return filepath.SkipDir
 			}

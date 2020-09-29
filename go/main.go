@@ -82,6 +82,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		Debug:          config.Debug,
 		Threads:        config.Threads,
 		Source:         config.Source,
+		AllFilesystems: config.AllFilesystems,
 	}
 
 	if config.Threads < 1 {
