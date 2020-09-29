@@ -88,7 +88,7 @@ The default configuration file named `config.yml` is used by default. We provide
 
 ## Precompiled Binaries
 
-You can find precompiled binaries for numerous platforms in the [releases](/releases) section.
+You can find precompiled binaries for numerous platforms in the [releases](https://github.com/NextronSystems/thunderstorm-collector/releases) section.
 
 ## Build
 
