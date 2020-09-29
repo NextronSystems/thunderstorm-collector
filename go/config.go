@@ -33,6 +33,7 @@ var DefaultConfig = Config{
 	Port:        8080,
 	RootPaths:   []string{getRootPath()},
 	Source:      HostnameOrBlank(),
+	Template:    defaultConfigFile,
 }
 
 func HostnameOrBlank() string {
@@ -52,7 +53,7 @@ var defaultConfigFile = "config.yml"
 
 func ParseConfig() Config {
 	var config = DefaultConfig
-	err := ReadTemplateFile(defaultConfigFile, &config)
+	err := ReadTemplateFile(DefaultConfig.Template, &config)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
