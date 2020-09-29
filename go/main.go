@@ -121,15 +121,19 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	cc.MaxFileSize = config.MaxFileSize * 1024 * 1024
 
 	if config.Server == "" {
-		return cc, errors.New("thunderstorm Server URL not specified")
+		return cc, errors.New("thunderstorm Server not specified")
 	}
-	if !(strings.HasPrefix(config.Server, "http://") || strings.HasPrefix(config.Server, "https://")) {
-		return cc, errors.New("missing http:// or https:// prefix in Thunderstorm URL")
+	var protocol string
+	if config.Ssl {
+		protocol = "https"
+	} else {
+		protocol = "http"
 	}
-	if _, err := url.Parse(config.Server); err != nil {
-		return cc, errors.New("URL for Thunderstorm is invalid")
+	thunderstormUrl := &url.URL{
+		Scheme: protocol,
+		Host:   fmt.Sprintf("%s:%d", config.Server, config.Port),
 	}
-	cc.Server = strings.TrimSuffix(config.Server, "/")
+	cc.Server = thunderstormUrl.String()
 
 	whitespaceRegex := regexp.MustCompile(`\s`)
 	for _, hexHeader := range config.MagicHeaders {
