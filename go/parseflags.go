@@ -85,22 +85,28 @@ func CreateFlagset(config interface{}) *flag.FlagSet {
 func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	var template string
 	var templateFlagset = flag.NewFlagSet("collect template", flag.ContinueOnError)
-	templateFlagset.StringVarP(&template, "template", "t", defaultFilename, "Process default scan parameters from this YAML file")
+	templateFlagset.StringVarP(&template, "template", "t", "", "Process default scan parameters from this YAML file")
 	templateFlagset.Usage = func() {}
 	templateFlagset.ParseErrorsWhitelist.UnknownFlags = true
 	templateFlagset.Parse(os.Args)
-	if template != "" {
-		f, err := os.Open(template)
-		if err != nil {
+	templateSpecified := template != ""
+	if !templateSpecified {
+		template = defaultFilename
+	}
+	f, err := os.Open(template)
+	if err != nil {
+		if templateSpecified {
 			return fmt.Errorf("Template file %s could not be opened: %w\n", template, err)
+		} else {
+			return nil // If we can't find the default template, don't give an error, just move on silently
 		}
-		defer f.Close()
-		decoder := yaml.NewDecoder(f)
-		decoder.KnownFields(true)
-		err = decoder.Decode(config)
-		if err != nil {
-			return fmt.Errorf("Template file %s could not be parsed: %w\n", template, err)
-		}
+	}
+	defer f.Close()
+	decoder := yaml.NewDecoder(f)
+	decoder.KnownFields(true)
+	err = decoder.Decode(config)
+	if err != nil {
+		return fmt.Errorf("Template file %s could not be parsed: %w\n", template, err)
 	}
 	return nil
 }

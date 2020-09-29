@@ -65,7 +65,7 @@ func ParseConfig() Config {
 		flags.Usage()
 		os.Exit(1)
 	}
-	if config.Help || len(os.Args) == 1 {
+	if config.Help || (len(os.Args) == 1 && config.Server == "") {
 		flags.Usage()
 		os.Exit(0)
 	}
