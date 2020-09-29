@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -128,6 +130,16 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		return cc, errors.New("URL for Thunderstorm is invalid")
 	}
 	cc.Server = strings.TrimSuffix(config.Server, "/")
+
+	whitespaceRegex := regexp.MustCompile(`\s`)
+	for _, hexHeader := range config.MagicHeaders {
+		hexHeader = whitespaceRegex.ReplaceAllString(hexHeader, "")
+		magicHeader, err := hex.DecodeString(hexHeader)
+		if err != nil {
+			return cc, fmt.Errorf("could not parse magic header %s: %w", hexHeader, err)
+		}
+		cc.MagicHeaders = append(cc.MagicHeaders, magicHeader)
+	}
 
 	return cc, nil
 }

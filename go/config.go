@@ -20,6 +20,7 @@ type Config struct {
 	Insecure       bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
 	Logfile        string   `yaml:"logfile" description:"Write the log to this file as well as to the console." shorthand:"l"`
 	Source         string   `yaml:"source" description:"Name for this device in the Thunderstorm log messages." shorthand:"o"`
+	MagicHeaders   []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
 	Template       string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help           bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }

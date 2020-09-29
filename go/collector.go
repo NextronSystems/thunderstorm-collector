@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -28,13 +29,19 @@ type CollectorConfig struct {
 	Threads        int
 	MaxFileSize    int64
 	Source         string
+	MagicHeaders   [][]byte
 }
 type Collector struct {
 	CollectorConfig
-	logger        *log.Logger
+
+	logger *log.Logger
+
 	workerGroup   *sync.WaitGroup
 	filesToUpload chan infoWithPath
-	Statistics    *CollectionStatistics
+
+	Statistics *CollectionStatistics
+
+	magicHeaderExtractionLength int
 }
 
 type CollectionStatistics struct {
@@ -45,10 +52,17 @@ type CollectionStatistics struct {
 }
 
 func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
-	return &Collector{
+	collector := &Collector{
 		CollectorConfig: config,
 		logger:          logger,
+		Statistics:      &CollectionStatistics{},
 	}
+	for _, header := range config.MagicHeaders {
+		if len(header) > collector.magicHeaderExtractionLength {
+			collector.magicHeaderExtractionLength = len(header)
+		}
+	}
+	return collector
 }
 
 // debugf calls logger.Printf if and only if debugging is enabled.
@@ -64,7 +78,6 @@ func (c *Collector) StartWorkers() {
 	c.debugf("Starting %d threads for uploads", c.Threads)
 	c.workerGroup = &sync.WaitGroup{}
 	c.filesToUpload = make(chan infoWithPath)
-	c.Statistics = &CollectionStatistics{}
 	for i := 0; i < c.Threads; i++ {
 		c.workerGroup.Add(1)
 		go func() {
@@ -168,11 +181,6 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 			break
 		}
 	}
-	if !extensionWanted && len(c.FileExtensions) > 0 {
-		c.debugf("Skipping file %s with unwanted extension", info.path)
-		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		return
-	}
 	f, err := os.Open(info.path)
 	if err != nil {
 		c.logger.Printf("Could not open file %s: %v\n", info.path, err)
@@ -180,6 +188,29 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 		return
 	}
 	defer f.Close()
+
+	var magicHeaderWanted bool
+	if len(c.MagicHeaders) > 0 && !extensionWanted {
+		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
+		readLength, err := f.ReadAt(headerBuffer, 0)
+		if err != nil {
+			c.debugf("Could not read magic header for file %s", info.path)
+		} else {
+			headerBuffer = headerBuffer[:readLength]
+			for _, magicHeader := range c.MagicHeaders {
+				if bytes.HasPrefix(headerBuffer, magicHeader) {
+					magicHeaderWanted = true
+					break
+				}
+			}
+		}
+	}
+
+	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
+		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
+		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
+		return
+	}
 
 	var urlParams = url.Values{}
 	if c.Source != "" {
