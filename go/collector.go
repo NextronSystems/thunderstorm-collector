@@ -123,6 +123,11 @@ func (c *Collector) Collect(root string) {
 		}
 		if !info.Mode().IsDir() {
 			c.filesToUpload <- infoWithPath{info, path, 0}
+		} else {
+			if SkipFilesystem(path) {
+				c.logger.Printf("Skipping directory %s since it uses a pseudo or network filesystem", path)
+				return filepath.SkipDir
+			}
 		}
 		return nil
 	})
