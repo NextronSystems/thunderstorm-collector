@@ -45,9 +45,11 @@ func getRootPath() string {
 	}
 }
 
+var defaultConfigFile = "config.yml"
+
 func ParseConfig() Config {
 	var config = DefaultConfig
-	err := ReadTemplateFile(&config)
+	err := ReadTemplateFile(defaultConfigFile, &config)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

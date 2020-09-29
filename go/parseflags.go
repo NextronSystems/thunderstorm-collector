@@ -82,10 +82,10 @@ func CreateFlagset(config interface{}) *flag.FlagSet {
 	return flags
 }
 
-func ReadTemplateFile(config interface{}) error {
+func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	var template string
 	var templateFlagset = flag.NewFlagSet("collect template", flag.ContinueOnError)
-	templateFlagset.StringVarP(&template, "template", "t", "", "Process default scan parameters from this YAML file")
+	templateFlagset.StringVarP(&template, "template", "t", defaultFilename, "Process default scan parameters from this YAML file")
 	templateFlagset.Usage = func() {}
 	templateFlagset.ParseErrorsWhitelist.UnknownFlags = true
 	templateFlagset.Parse(os.Args)

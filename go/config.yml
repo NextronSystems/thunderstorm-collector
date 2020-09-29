@@ -76,7 +76,7 @@ extension:
     - .temp
     - .plg
     - .asm
-magics:
+magic:
     - 01 06 01 00  # Job File
     - 1F 8B 08  # GZIP
     - 25 50 44 46  # PDF
