@@ -90,6 +90,19 @@ The default configuration file named `config.yml` is used by default. We provide
 
 You can find precompiled binaries for numerous platforms in the [releases](https://github.com/NextronSystems/thunderstorm-collector/releases) section.
 
+### Unsupported Versions
+
+The Go Collector does not run on:
+
+- Windows 2000
+- Windows NT
+
+You could try to use the [collector scripts](https://github.com/NextronSystems/thunderstorm-collector/tree/master/scripts) on unsupported systems.
+
+The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
+
+Note: We haven't tested all compiled binaries on the respective platforms. Please report issues with the execution.
+
 ## Build
 
 ### Build requirements
