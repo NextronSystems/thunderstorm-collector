@@ -103,6 +103,18 @@ The pre-compiled binaries for IBM AIX do not support Power7 systems. On request,
 
 Note: We haven't tested all compiled binaries on the respective platforms. Please report issues with the execution.
 
+## Performance Considerations
+
+In a THOR Thunderstorm setup, the system load moves from the end systems to the Thunderstorm server.
+
+In cases in which you don’t use the default configuration file provided with the collectors (`config.yml`) and collect all files from an end system, the Thunderstorm server requires a much higher amount of time to process the samples.
+
+E.g. A Thunderstorm server with 40 CPU Cores (40 threads) needs 1 hour and 15 minutes to process all 400,000 files sent from a Windows 10 end system. Sending all files from 200 Windows 10 end systems to a Thunderstorm server with that specs would take 10 days to process all the samples.
+
+As a rule of thumb, when using the hardware recommended in the setup guide, you can calculate with a processing speed of **130 samples per core per minute**.
+
+We highly recommend using the default configuration file named `config.yml` provided with the collectors.
+
 ## Build
 
 ### Build requirements
