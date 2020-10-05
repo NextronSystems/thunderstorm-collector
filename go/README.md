@@ -103,17 +103,11 @@ You could try to use the [collector scripts](https://github.com/NextronSystems/t
 
 In case that the pre-build collector crashes on your end system, please see the [platform requirements](https://github.com/golang/go/wiki#platform-specific-information) for the different go versions to get the last supported go version for your OS version.
 
-Using a go version <1.12, the standard Makefile will fail for the build target `all`, since it contains build targets that require Go v1.12. You can then simply build the specific collector with:
-
-```bash
-make bin/<arch>-<os>-thunderstorm-collector
-```
-
-This [page](https://golang.org/doc/install/source#environment) contains all possible `arch` and `os` values.
+This [page](https://golang.org/doc/install/source#environment) contains all possible `arch` and `os` values for the latest Go version.
 
 The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
 
-The pre-compiled binarries for FreeBSD have been built with Go 1.15, which does only support FreeBSD 11, 12 and 13. If you have to use the collector on older FreeBSD version, visit [this page](https://github.com/golang/go/wiki/FreeBSD) to get information on that last supported Go version. E.g. to build a version of the Thunderstorm Collector that runs on old Citrix Netscaler gateways, we had to use Go 1.9.7 for the FreeBSD 8.4 used on these platform. 
+The pre-compiled binaries for FreeBSD have been built with Go 1.15, which does only support FreeBSD 11, 12 and 13. If you have to use the collector on older FreeBSD version, visit [this page](https://github.com/golang/go/wiki/FreeBSD) to get information on that last supported Go version. E.g. to build a version of the Thunderstorm Collector that runs on old Citrix Netscaler gateways, we had to use Go 1.9.7 for the FreeBSD 8.4 used on these platform. 
 
 Note: We haven't tested all compiled binaries on the respective platforms. Please report issues with the execution.
 
@@ -152,7 +146,7 @@ If you want to build executables for other platform / architecture combinations 
 make bin/<arch>-<os>-thunderstorm-collector
 ```
 
-A full list of architectures and platforms that can be used can be listed using:
+A full list of architectures and platforms that can be used can be shown using:
 
 ```bash
 go tool dist list
