@@ -7,6 +7,7 @@ A Makefile has been added to allow for simplified creation of executables. The g
 
 ```help
 Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
+      --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
                                      Specify multiple CAs by using this flag multiple times.
       --debug                        Print debugging information.
@@ -26,15 +27,16 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
                                      Example: --max-age 10h
   -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
   -p, --path strings                 Root paths from where files should be collected.
-                                     Specify multiple root paths by using this flag multiple times. (default [C:])
+                                     Specify multiple root paths by using this flag multiple times. (default [C:\])
       --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
-  -o, --source string                Name for this device in the Thunderstorm log messages. (default "maxdebian")
+  -o, --source string                Name for this device in the Thunderstorm log messages. (default "DESKTOP-EEM5B52")
       --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
-  -t, --template string              Process default scan parameters from this YAML file.
+  -t, --template string              Process default scan parameters from this YAML file. (default "config.yml")
   -r, --threads int                  How many threads should upload files simultaneously. (default 1)
   -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
                                      Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
       --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files.
+      --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
 ```
 
 ## Config Files
@@ -94,21 +96,14 @@ You can find precompiled binaries for numerous platforms in the [releases](/rele
 
 ### Build requirements
 
-- Go version 1.12 or higher
+- Go version 1.12 or higher (older versions may work, but are not tested)
 - make
 
 [Here](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-debian-10) is an instruction on how to install Go on Debian. Install make with `sudo apt install make`.
 
 ### Build Steps
 
-Install golang package dependencies:
-
-```bash
-go get -d github.com/spf13/pflag
-go get -d gopkg.in/yaml.v3
-```
-
-Build executables:
+Simply call the Makefile to build all targets that Golang supports on your build environment:
 
 ```bash
 make
@@ -120,7 +115,12 @@ If you want to build executables for other platform / architecture combinations 
 make bin/<arch>-<os>-thunderstorm-collector
 ```
 
-A full list of architectures and platforms that can be used is listed at the start of the Makefile. Note that not all combinations are supported.
+A full list of architectures and platforms that can be used can be listed using:
+
+```bash
+go tool dist list
+```
+
 
 ### Execution examples
 
