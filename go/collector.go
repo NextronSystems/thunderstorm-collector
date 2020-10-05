@@ -20,17 +20,18 @@ import (
 )
 
 type CollectorConfig struct {
-	ThresholdTime  time.Time
-	RootPaths      []string
-	FileExtensions []string
-	Server         string
-	Sync           bool
-	Debug          bool
-	Threads        int
-	MaxFileSize    int64
-	Source         string
-	MagicHeaders   [][]byte
-	AllFilesystems bool
+	ThresholdTime   time.Time
+	RootPaths       []string
+	FileExtensions  []string
+	Server          string
+	Sync            bool
+	Debug           bool
+	Threads         int
+	MaxFileSize     int64
+	Source          string
+	MagicHeaders    [][]byte
+	AllFilesystems  bool
+	MinUploadPeriod time.Duration
 }
 type Collector struct {
 	CollectorConfig
@@ -43,6 +44,9 @@ type Collector struct {
 	Statistics *CollectionStatistics
 
 	magicHeaderExtractionLength int
+
+	throttleMutex sync.Mutex
+	lastScanTime  time.Time
 }
 
 type CollectionStatistics struct {
@@ -156,6 +160,25 @@ type infoWithPath struct {
 
 var MB int64 = 1024 * 1024
 
+func (c *Collector) throttle() {
+	if c.MinUploadPeriod > 0 {
+		for {
+			c.throttleMutex.Lock()
+			currentTime := time.Now()
+			timePassed := currentTime.Sub(c.lastScanTime)
+			if timePassed >= c.MinUploadPeriod {
+				c.lastScanTime = currentTime
+				c.throttleMutex.Unlock()
+				return
+			} else {
+				timeUntilNextUpload := c.MinUploadPeriod - timePassed
+				c.throttleMutex.Unlock()
+				time.Sleep(timeUntilNextUpload)
+			}
+		}
+	}
+}
+
 func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	if !info.Mode().IsRegular() {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
@@ -217,6 +240,8 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
 		return
 	}
+
+	c.throttle()
 
 	var urlParams = url.Values{}
 	if c.Source != "" {

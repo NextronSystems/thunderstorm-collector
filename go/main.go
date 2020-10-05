@@ -146,6 +146,10 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		cc.MagicHeaders = append(cc.MagicHeaders, magicHeader)
 	}
 
+	if config.UploadsPerMinute > 0 {
+		cc.MinUploadPeriod = time.Minute / time.Duration(config.UploadsPerMinute)
+	}
+
 	return cc, nil
 }
 
