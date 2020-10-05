@@ -270,17 +270,15 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 		time.Sleep(time.Second * time.Duration(retryTime))
 		return true
 	}
+	responseBody, _ := ioutil.ReadAll(response.Body)
 	if response.StatusCode != http.StatusOK {
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
-		c.logger.Printf("Received error from Thunderstorm for file %s: %v\n", info.path, err)
+		c.logger.Printf("Received error from Thunderstorm for file %s: %d %v\n", info.path, response.StatusCode, string(responseBody))
 		return
 	}
 	atomic.AddInt64(&c.Statistics.uploadedFiles, 1)
 	if c.Sync {
-		responseBody, _ := ioutil.ReadAll(response.Body)
 		c.logger.Printf("Response to file %s: %s", info.path, string(responseBody))
-	} else {
-		io.Copy(ioutil.Discard, response.Body) // Read the full response to be able to reuse the connection
 	}
 
 	if c.Debug {
