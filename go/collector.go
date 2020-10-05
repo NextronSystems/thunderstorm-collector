@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -32,6 +33,8 @@ type CollectorConfig struct {
 	MagicHeaders    [][]byte
 	AllFilesystems  bool
 	MinUploadPeriod time.Duration
+
+	MinCacheFileSize int64
 }
 type Collector struct {
 	CollectorConfig
@@ -47,6 +50,8 @@ type Collector struct {
 
 	throttleMutex sync.Mutex
 	lastScanTime  time.Time
+
+	fileHashCache *sync.Map
 }
 
 type CollectionStatistics struct {
@@ -61,6 +66,7 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 		CollectorConfig: config,
 		logger:          logger,
 		Statistics:      &CollectionStatistics{},
+		fileHashCache:   &sync.Map{},
 	}
 	for _, header := range config.MagicHeaders {
 		if len(header) > collector.magicHeaderExtractionLength {
@@ -239,6 +245,21 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
 		return
+	}
+
+	if info.Size() > c.MinCacheFileSize {
+		hashCalculator := sha256.New()
+		if _, err := io.Copy(hashCalculator, f); err == nil {
+			fileHash := string(hashCalculator.Sum(nil))
+			if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
+				c.debugf("Skipping file %s since a file with the same content was processed previously", info.path)
+				return
+			}
+		} else {
+			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
+		}
+		// Reset file descriptor after hash calculation
+		f.Seek(0, io.SeekStart)
 	}
 
 	c.throttle()

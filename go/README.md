@@ -26,6 +26,7 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
                                      Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.
                                      Example: --max-age 10h
   -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
+      --min-cache-file-size int      Upload files with at least the given size (in MB) only once, skipping them when re-encountering them. (default 100)
   -p, --path strings                 Root paths from where files should be collected.
                                      Specify multiple root paths by using this flag multiple times. (default [C:\])
       --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
