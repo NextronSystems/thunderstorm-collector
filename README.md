@@ -14,4 +14,10 @@ This repository contains two types of collectors:
 
 Visit the links to the respective sub directories for a detailed README on the different collectors.
 
+## Which Collector Should I Use?
+
+We recommend using the Thunderstorm Collector written in Go. Use the scripts in cases in which running a compiled binary is out of question. This could be the case in some very sensitive environmnts or on platforms that are unsupported (e.g. IOT devices with proprietary OS).
+
+## Write Your Own Collector
+
 If you'd like to write your own collector, you can find a Python module named `thunderstormAPI` in [this](https://github.com/NextronSystems/thunderstormAPI) repository.
