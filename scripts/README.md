@@ -63,4 +63,39 @@ Successfully tested on:
 
 ## thunderstorm-collector PowerShell Script
 
-On the roadmap. Available October 2020.
+A PowerShell script for Windows.
+
+### Requirements
+
+- PowerShell version 3
+
+### Usage
+
+You can run it like:
+
+```bash
+powershell.exe -ep bypass .\thunderstorm-collector.ps1
+```
+
+Collect files from a certain directory
+
+```bash
+powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer my-thunderstorm.local -Folder C:\ProgramData\Suspicious
+```
+
+Collect all files created within the last 24 hours from partition C:\
+
+```bash
+powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer my-thunderstorm.local -MaxAge 1
+```
+
+### Configuration
+
+Please review the configuration section in the PowerShell script for more settings.
+
+### Tested On
+
+Successfully tested on:
+
+- Windows 10
+- Windows 7
