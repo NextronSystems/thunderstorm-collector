@@ -1,0 +1,153 @@
+#!/usr/bin/perl -s 
+#
+# THOR Thunderstorm Collector
+# Florian Roth
+# v0.1
+# April 2021
+#
+# Requires LWP::UserAgent
+#   - on Linux: apt-get install libwww-perl
+#   - other: perl -MCPAN -e 'install Bundle::LWP' 
+#
+# Usage examples:
+#   $> perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
+#   $> perl thunderstorm-collector.pl -- --dir / --server thunderstorm.internal.net
+
+use Getopt::Long;
+use LWP::UserAgent;
+use File::Spec::Functions qw( catfile );
+
+use Cwd; # module for finding the current working directory 
+
+# Configuration
+our $debug = 0;
+my $targetdir = "/";
+my $server = "";
+my $port = 8080;
+my $scheme = "http";
+our $max_age = 3;       # in days
+our $max_size = 10;     # in megabytes
+our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
+our @hardSkips = ('/proc', '/dev', '/sys');
+
+# Command Line Parameters
+GetOptions("dir=s"      => \$targetdir,  # same for --dir or -d
+           "server=s"   => \$server,     # same for --server or -s
+           "port=i"     => \$port,       # same for --port or -p
+           "debug"      => \$debug       # --debug
+          );
+
+# Composed Values
+our $api_endpoint = "$scheme://$server:$port/api/checkAsync";
+our $current_date = time;
+
+sub processDir { 
+    my ($workdir) = shift; 
+    my ($startdir) = &cwd; 
+    # keep track of where we began 
+    chdir($workdir) or do { print "[ERROR] Unable to enter dir $workdir:$!\n"; return; }; 
+    opendir(DIR, ".") or do { print "[ERROR] Unable to open $workdir:$!\n"; return; }; 
+    
+    my @names = readdir(DIR) or do { print "[ERROR] Unable to read $workdir:$!\n"; return; };
+    closedir(DIR); 
+    
+    foreach my $name (@names){ 
+        next if ($name eq "."); 
+        next if ($name eq ".."); 
+
+        #print("Workdir: $workdir Name: $name\n");
+        my $filepath = catfile($workdir, $name);
+        # Hard directory skips
+        my $skipHard = 0;
+        foreach ( @hardSkips ) { 
+            $skipHard = 1 if ( $filepath eq $_ ); 
+        }
+        next if $skipHard;
+        
+
+        # Is a Directory
+        if (-d $filepath){ 
+            #print "IS DIR!\n";
+            &processDir($filepath); 
+            next; 
+        } else {
+            if ( $debug ) { print "[DEBUG] Checking $filepath ...\n"; }
+        }
+
+        # Characteristics 
+        my $size = (stat($filepath))[7];
+        my $mdate = (stat($filepath))[9];
+        #print("SIZE: $size MDATE: $mdate\n");
+
+        # Skip some files ----------------------------------------
+        # Skip Folders / elements
+        $skipRegex = 0;
+        # Regex Checks
+        foreach ( @skipElements ) { 
+            if ( $filepath =~ $_ ) {
+                if ( $debug ) { print "[DEBUG] Skipping file due to configured exclusion $filepath\n"; }
+                $skipRegex = 1;
+            } 
+        }
+        next if $skipRegex;
+        # Size
+        if ( ( $size / 1024 / 1024 ) gt $max_size ) {
+            if ( $debug ) { print "[DEBUG] Skipping file due to file size $filepath\n"; }
+            next;
+        }
+        # Age
+        #print("MDATE: $mdate CURR_DATE: $current_date\n");
+        if ( $mdate lt ( $current_date - ($max_age * 86400) ) ) {
+            if ( $debug ) { print "[DEBUG] Skipping file due to age $filepath\n"; }
+            next;
+        }       
+        
+        # Submit
+        &submitSample($filepath);
+
+        chdir($startdir) or die "Unable to change back to dir $startdir:$!\n"; 
+    } 
+} 
+
+sub submitSample {
+    my ($filepath) = shift;
+    print "[SUBMIT] Submitting $filepath ...\n";
+    eval { 
+        my $req = $ua->post($api_endpoint,
+            Content_Type => 'form-data',
+            Content => [
+                "file" => [ $filepath ],
+            ],
+        );
+        print "\nError: ", $req->status_line unless $req->is_success;
+    } or do {
+        my $error = $@ || 'Unknown failure';
+        warn "Could not submit '$filepath' - $error";
+    };
+}
+
+# MAIN ----------------------------------------------------------------
+# Default Values 
+print "==============================================================\n";
+print "    ________                __            __                  \n";
+print "   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _    \n";
+print "    / / / _ \\/ // / _ \\/ _  / -_) __(_--/ __/ _ \\/ __/  ' \\   \n";
+print "   /_/ /_//_/\\_,_/_//_/\\_,_/\\__/_/ /___/\\__/\\___/_/ /_/_/_/   \n";
+print "                                                              \n";
+print "   Florian Roth, Nextron Systems GmbH, 2021                   \n";
+print "                                                              \n";
+print "==============================================================\n";
+print "Target Directory: '$targetdir'\n";
+print "Thunderstorm Server: '$server'\n";
+print "Thunderstorm Port: '$port'\n";
+print "Using API Endpoint: $api_endpoint\n";
+print "Maximum Age of Files: $max_age\n";
+print "Maximum File Size: $max_size\n";
+print "\n";
+
+# Instanciate an object 
+our $ua = LWP::UserAgent->new;
+
+print "Starting the walk at: $targetdir ...\n";
+# Start the walk
+&processDir($targetdir);
