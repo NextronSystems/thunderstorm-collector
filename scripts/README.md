@@ -99,3 +99,36 @@ Successfully tested on:
 
 - Windows 10
 - Windows 7
+
+## thunderstorm-collector Perl Script
+
+A Perl script collector.
+
+### Requirements
+
+- Perl version 5
+- LWP::UserAgent
+
+### Usage
+
+You can run it like:
+
+```bash
+perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
+```
+
+Collect files from a certain directory
+
+```bash
+perl thunderstorm-collector.pl -- --dir /home --server thunderstorm.internal.net
+```
+
+### Configuration
+
+Please review the configuration section in the Perl script for more settings like the maximum age, maximum file size or directory exclusions.
+
+### Tested On
+
+Successfully tested on:
+
+- Debian 10
