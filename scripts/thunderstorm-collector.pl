@@ -13,6 +13,8 @@
 #   $> perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
 #   $> perl thunderstorm-collector.pl -- --dir / --server thunderstorm.internal.net
 
+use warnings;
+use strict;
 use Getopt::Long;
 use LWP::UserAgent;
 use File::Spec::Functions qw( catfile );
@@ -45,6 +47,9 @@ our $current_date = time;
 our $num_submitted = 0;
 our $num_processed = 0;
 
+# Objects
+our $ua;
+
 # Process Folders
 sub processDir { 
     my ($workdir) = shift; 
@@ -69,7 +74,6 @@ sub processDir {
         }
         next if $skipHard;
         
-
         # Is a Directory
         if (-d $filepath){ 
             #print "IS DIR!\n";
@@ -92,7 +96,7 @@ sub processDir {
 
         # Skip some files ----------------------------------------
         # Skip Folders / elements
-        $skipRegex = 0;
+        my $skipRegex = 0;
         # Regex Checks
         foreach ( @skipElements ) { 
             if ( $filepath =~ $_ ) {
@@ -158,9 +162,13 @@ print "Maximum File Size: $max_size\n";
 print "\n";
 
 # Instanciate an object 
-our $ua = LWP::UserAgent->new;
+$ua = LWP::UserAgent->new;
 
 print "Starting the walk at: $targetdir ...\n";
 # Start the walk
 &processDir($targetdir);
-print "Thunderstorm Collector Run finished (Checked: $num_processed Submitted: $num_submitted)\n";
+
+# End message
+my $end_date = time;
+my $minutes = int(( $end_date - $current_date ) / 60);
+print "Thunderstorm Collector Run finished (Checked: $num_processed Submitted: $num_submitted Minutes: $minutes)\n";
