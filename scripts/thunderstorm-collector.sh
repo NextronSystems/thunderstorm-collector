@@ -3,12 +3,12 @@
 # THOR Thunderstorm Installer
 # Florian Roth
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 # Settings ------------------------------------------------------------
 
 # Log
-LOGFILE="/var/log/thunderstorm.log"
+LOGFILE="./thunderstorm.log"
 LOG_TO_FILE=1
 LOG_TO_SYSLOG=0 # Log to syslog is set to 'off' by default
 LOG_TO_CMDLINE=1
@@ -101,7 +101,6 @@ echo "=============================================================="
 # Root check
 if [ "$(id -u)" != "0" ]; then
    log error "This script should be run as root to have access to all files on disk" 1>&2
-   exit 1
 fi
 
 echo "Writing log file to $LOGFILE ..."
