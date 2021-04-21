@@ -41,6 +41,11 @@ GetOptions("dir=s"      => \$targetdir,  # same for --dir or -d
 our $api_endpoint = "$scheme://$server:$port/api/checkAsync";
 our $current_date = time;
 
+# Stats
+our $num_submitted = 0;
+our $num_processed = 0;
+
+# Process Folders
 sub processDir { 
     my ($workdir) = shift; 
     my ($startdir) = &cwd; 
@@ -68,6 +73,9 @@ sub processDir {
         # Is a Directory
         if (-d $filepath){ 
             #print "IS DIR!\n";
+            # Skip symbolic links
+            if (-l $filepath) { next; }
+            # Process Dir
             &processDir($filepath); 
             next; 
         } else {
@@ -78,6 +86,9 @@ sub processDir {
         my $size = (stat($filepath))[7];
         my $mdate = (stat($filepath))[9];
         #print("SIZE: $size MDATE: $mdate\n");
+
+        # Count
+        $num_processed++;
 
         # Skip some files ----------------------------------------
         # Skip Folders / elements
@@ -119,6 +130,7 @@ sub submitSample {
                 "file" => [ $filepath ],
             ],
         );
+        $num_submitted++;
         print "\nError: ", $req->status_line unless $req->is_success;
     } or do {
         my $error = $@ || 'Unknown failure';
@@ -151,3 +163,4 @@ our $ua = LWP::UserAgent->new;
 print "Starting the walk at: $targetdir ...\n";
 # Start the walk
 &processDir($targetdir);
+print "Thunderstorm Collector Run finished (Checked: $num_processed Submitted: $num_submitted)\n";
