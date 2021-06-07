@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# THOR Thunderstorm Installer
+# THOR Thunderstorm Bash Collector
 # Florian Roth
 
 VERSION="0.1.1"
