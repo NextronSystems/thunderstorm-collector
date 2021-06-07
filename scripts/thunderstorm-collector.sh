@@ -2,8 +2,9 @@
 #
 # THOR Thunderstorm Bash Collector
 # Florian Roth
+# June 2021
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 
 # Settings ------------------------------------------------------------
 
@@ -19,7 +20,7 @@ USE_SSL=0
 ASYNC_MODE=1
 
 # Target selection 
-declare -a SCAN_FOLDERS=('/var' '/home');  # folders to scan 
+declare -a SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr');  # folders to scan 
 MAX_AGE=14
 MAX_FILE_SIZE=2000  # max file size to check in kilobyte, default 2 MB
 
@@ -139,7 +140,7 @@ do
             # Submit sample
             result=$(curl -s -X POST \
                      "$scheme://$THUNDERSTORM_SERVER:8080/api/$api_endpoint" \
-                     -F "file=@$file_path")
+                     --form "file=@${file_path};filename=${file_path}")
             # If not 'id' in result
             error="reason"
             if [ "${result/$error}" != "$result" ]; then
