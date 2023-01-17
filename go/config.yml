@@ -168,7 +168,7 @@ magic:
     - 0A 3C 23 0A 2E 53 # PowerShell
     - 23 75 73 61 67 65 # Python
     - EF BB BF 49 6D 70 6F 72 74 # PowerShell
-    - 70 6F 77 65 72 73;BAT # PowerShell
+    - 70 6F 77 65 72 73 # BAT PowerShell
     - EF BB BF 3C 23 0A 2E 53 59 # PowerShell
     - 3C 6A 73 70 3A 72 # JSP
     - 23 2F 75 73 72 2F # Shell
