@@ -3,7 +3,7 @@
 # THOR Thunderstorm Collector
 
 The Thunderstorm collectors allow for easy uploads of files to a THOR Thunderstorm instance.
-Information on THOR Thunderstorm can be found [here](https://www.nextron-systems.com/2020/09/25/theres-a-thunderstorm-coming/).
+Information on THOR Thunderstorm can be found [here](https://www.nextron-systems.com/2020/10/01/theres-a-thunderstorm-coming/).
 
 The different collectors allow users to select files based on size, age or type.
 
