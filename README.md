@@ -2,22 +2,21 @@
 
 # THOR Thunderstorm Collector
 
-The Thunderstorm collectors allow for easy uploads of files to a THOR Thunderstorm instance.
-Information on THOR Thunderstorm can be found [here](https://www.nextron-systems.com/2020/09/25/theres-a-thunderstorm-coming/).
+THOR Thunderstorm collectors facilitate effortless file uploads to a THOR Thunderstorm instance. More details on THOR Thunderstorm are available [here](https://www.nextron-systems.com/2020/09/25/theres-a-thunderstorm-coming/).
 
-The different collectors allow users to select files based on size, age or type.
+Users can filter files based on their size, age, extension or type.
 
-This repository contains two types of collectors:
+This repository features:
 
-- [Scripts](scripts/) written in different script languages, available for Linux, Unix and Microsoft Windows
-- A [Thunderstorm Collector](go/) written in Go that can be compiled and is pre-compiled for numerous target platforms
+- [Scripts](scripts/) in diverse scripting languages for Linux, Unix, and Microsoft Windows.
+- [Thunderstorm Collector](go/) developed in Go, pre-compiled for multiple platforms.
 
-Visit the links to the respective sub directories for a detailed README on the different collectors.
+For a comprehensive guide on each collector, refer to the linked subdirectories.
 
-## Which Collector Should I Use?
+## Which Collector Should You Choose?
 
-We recommend using the Thunderstorm Collector written in Go. Use the scripts in cases in which running a compiled binary is out of question. This could be the case in some very sensitive environmnts or on platforms that are unsupported (e.g. IOT devices with proprietary OS).
+The Thunderstorm Collector in Go is our top recommendation. Opt for the scripts only when running a compiled binary isn't feasible, as in highly-sensitive settings or on unsupported platforms like proprietary OS IOT devices.
 
-## Write Your Own Collector
+## Craft Your Own Collector
 
-If you'd like to write your own collector, you can find a Python module named `thunderstormAPI` in [this](https://github.com/NextronSystems/thunderstormAPI) repository.
+Interested in creating a unique collector? A Python module, `thunderstormAPI`, is available in [this](https://github.com/NextronSystems/thunderstormAPI) repository for your use.
