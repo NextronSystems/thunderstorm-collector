@@ -22,6 +22,9 @@ Generally the second option is preferred because it offers greater flexibility i
 
 #### 1. Changing the THOR Thunderstorm Listening Port
 
+<details>
+    <summary>Expand Details</summary>
+   
 If you choose this approach, change `server-port` in `/etc/thunderstorm/thunderstorm.yml` to your desired port (e.g. 1514).
 
 To verify the change:
@@ -35,9 +38,13 @@ And restart the service:
 ```sh
 $ systemctl restart thor-thunderstorm.service
 ```
+</details>
 
 #### 2. Configure Local Port Forwarding
 
+<details>
+    <summary>Expand Details</summary>
+   
 We are going to use the host based firewall for local port forwarding. On Debian one easy choice is `ufw` which can be installed using
 
 ```sh
@@ -73,6 +80,8 @@ Now enable and start/reload the firewall:
 sudo ufw enable
 sudo ufw reload
 ```
+</details>
+
 
 ## Configure the ESXi Host
 
