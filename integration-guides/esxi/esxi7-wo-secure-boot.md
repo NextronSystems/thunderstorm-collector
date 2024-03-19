@@ -58,7 +58,7 @@ sudo ufw allow proto tcp to any port 8080 # general purpose
 sudo ufw allow proto tcp to any port 1514 # ESXi
 ```
 
-Edit `/etc/ufw/before.rule` and insert at the very top (excluding, i.e. below the comments):
+Edit `/etc/ufw/before.rule` and insert at the very top (excluding comments, i.e. below the comments):
 ```sh
 *nat
 :PREROUTING ACCEPT [0:0]
