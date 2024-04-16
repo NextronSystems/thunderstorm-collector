@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 
+import argparse
+import http.client
 import os
+import re
+import ssl
 import sys
 import time
-import getopt
-import http.client
 import urllib.parse
-import re
 import uuid
 
 # Configuration
-debug = False
-targetdir = "/"
-server = ""
-port = 8080
-scheme = "http"
+schema = "http"
 max_age = 14  # in days
 max_size = 20  # in megabytes
-skip_elements = [r"^\/proc", r"^\/mnt", r"\.dat$", r"\.npm", r"^/vmfs/volumes/"]
+skip_elements = [
+    r"^\/proc",
+    r"^\/mnt",
+    r"\.dat$",
+    r"\.npm",
+    r"\.vmdk$",
+    r"\.vswp$",
+    r"\.nvram$",
+    r"\.vmsd$",
+    r"\.lck$",
+]
 hard_skips = ["/proc", "/dev", "/sys"]
 
 # Composed values
-api_endpoint = "{}://{}:{}/api/checkAsync".format(scheme, server, port)
 current_date = time.time()
 
 # Stats
@@ -52,7 +58,7 @@ def process_dir(workdir):
             continue
 
         # File
-        if debug:
+        if args.debug:
             print("[DEBUG] Checking {} ...".format(filepath))
 
         # Count
@@ -73,7 +79,7 @@ def skip_file(filepath):
     # Regex skips
     for pattern in skip_elements:
         if re.search(pattern, filepath):
-            if debug:
+            if args.debug:
                 print(
                     "[DEBUG] Skipping file due to configured skip_file exclusion {}".format(
                         filepath
@@ -83,14 +89,14 @@ def skip_file(filepath):
 
     # Size
     if os.path.getsize(filepath) > max_size * 1024 * 1024:
-        if debug:
+        if args.debug:
             print("[DEBUG] Skipping file due to size {}".format(filepath))
         return True
 
     # Age
     mtime = os.path.getmtime(filepath)
     if mtime < current_date - (max_age * 86400):
-        if debug:
+        if args.debug:
             print("[DEBUG] Skipping file due to age {}".format(filepath))
         return True
 
@@ -123,7 +129,14 @@ def submit_sample(filepath):
         payload += data
         payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
 
-        conn = http.client.HTTPConnection(server, port)
+        if args.tls:
+            if args.insecure:
+                context = ssl._create_unverified_context()
+            else:
+                context = ssl._create_default_https_context()
+            conn = http.client.HTTPSConnection(args.server, args.port, context=context)
+        else:
+            conn = http.client.HTTPConnection(args.server, args.port)
         conn.request("POST", api_endpoint, body=payload, headers=headers)
 
         resp = conn.getresponse()
@@ -132,7 +145,11 @@ def submit_sample(filepath):
         num_submitted += 1
 
         if resp.status != 200:
-            print("Error: {}".format(resp.text))
+            print(
+                "[ERROR] HTTP return status: {}, reason: {}".format(
+                    resp.status, resp.reason
+                )
+            )
 
     except Exception as e:
         print("Could not submit '{}' - {}".format(filepath, e))
@@ -140,36 +157,65 @@ def submit_sample(filepath):
 
 # Main
 if __name__ == "__main__":
-    # Parse command line args
-    opts, args = getopt.getopt(sys.argv[1:], "d:s:p:", ["debug"])
-    for opt, arg in opts:
-        if opt in ("-d", "--dir"):
-            targetdir = arg
-        elif opt in ("-s", "--server"):
-            server = arg
-        elif opt in ("-p", "--port"):
-            port = int(arg)
-        elif opt in ("--debug"):
-            debug = True
+    parser = argparse.ArgumentParser(
+        prog="thunderstorm-collector.py",
+        description="Tool to collect files to sent to THOR Thunderstorm. Only uses standard library functions of Python.",
+    )
+    parser.add_argument(
+        "-d",
+        "--dirs",
+        nargs="*",
+        default="/",
+        help="Directories that should be scanned. (Default: /)",
+    )
+    parser.add_argument(
+        "-s", "--server", required=True, help="FQDN/IP of the THOR Thunderstorm server."
+    )
+    parser.add_argument(
+        "-p", "--port", help="Port of the THOR Thunderstorm server. (Default: 8080)"
+    )
+    parser.add_argument(
+        "-t",
+        "--tls",
+        action="store_true",
+        help="Use TLS to connect to the THOR Thunderstorm server.",
+    )
+    parser.add_argument(
+        "-k",
+        "--insecure",
+        action="store_true",
+        help="Skip TLS verification and proceed without checking.",
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+
+    global args
+    args = parser.parse_args()
+
+    if args.tls:
+        schema = "https"
+
+    global api_endpoint
+    api_endpoint = "{}://{}:{}/api/checkAsync".format(schema, args.server, args.port)
 
     print("=" * 80)
     print("   Python Thunderstorm Collector")
     print("   Florian Roth, Nextron Systems GmbH, 2024")
     print()
     print("=" * 80)
-    print("Target Directory: {}".format(targetdir))
-    print("Thunderstorm Server: {}".format(server))
-    print("Thunderstorm Port: {}".format(port))
+    print("Target Directory: {}".format(", ".join(args.dirs)))
+    print("Thunderstorm Server: {}".format(args.server))
+    print("Thunderstorm Port: {}".format(args.port))
     print("Using API Endpoint: {}".format(api_endpoint))
     print("Maximum Age of Files: {}".format(max_age))
     print("Maximum File Size: {} MB".format(max_size))
     print("Excluded directories: {}".format(", ".join(hard_skips)))
     print()
 
-    print("Starting the walk at: {} ...".format(targetdir))
+    print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
 
     # Walk directory
-    process_dir(targetdir)
+    for dir in args.dirs:
+        process_dir(dir)
 
     # End message
     end_date = time.time()
