@@ -94,7 +94,7 @@ func (c *Collector) StartWorkers() {
 			for info := range c.filesToUpload {
 				shouldRedo := true
 				for shouldRedo {
-					shouldRedo = c.uploadToThunderstorm(info)
+					shouldRedo = c.uploadToThunderstorm(&info)
 				}
 			}
 			c.workerGroup.Done()
@@ -184,7 +184,7 @@ func (c *Collector) throttle() {
 	}
 }
 
-func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
+func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	if !info.Mode().IsRegular() {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
 		c.debugf("Skipping irregular file %s", info.path)
