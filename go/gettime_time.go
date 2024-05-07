@@ -1,4 +1,5 @@
-//+build js nacl
+//go:build js || nacl
+// +build js nacl
 
 package main
 

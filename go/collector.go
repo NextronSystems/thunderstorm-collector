@@ -78,7 +78,6 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 
 // debugf calls logger.Printf if and only if debugging is enabled.
 // Arguments are handled in the manner of fmt.Printf.
-
 func (c *Collector) debugf(format string, params ...interface{}) {
 	if c.Debug {
 		c.logger.Printf(format, params...)

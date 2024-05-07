@@ -1,4 +1,5 @@
-//+build aix android dragonfly linux darwin
+//go:build aix || android || dragonfly || linux || darwin
+// +build aix android dragonfly linux darwin
 
 package main
 
