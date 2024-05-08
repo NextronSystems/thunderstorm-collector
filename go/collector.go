@@ -36,6 +36,7 @@ type CollectorConfig struct {
 
 	MinCacheFileSize int64
 }
+
 type Collector struct {
 	CollectorConfig
 
@@ -185,36 +186,11 @@ func (c *Collector) throttle() {
 }
 
 func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
-	if !info.Mode().IsRegular() {
+	if c.isFileExcludedDueToMetadata(info) {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping irregular file %s", info.path)
 		return
 	}
-	isTooOld := true
-	for _, time := range getTimes(info.FileInfo) {
-		if time.After(c.ThresholdTime) {
-			isTooOld = false
-			break
-		}
-	}
-	if isTooOld {
-		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping old file %s", info.path)
-		return
-	}
-	if c.MaxFileSize > 0 &&
-		c.MaxFileSize*MB < info.Size() {
-		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping big file %s", info.path)
-		return
-	}
-	var extensionWanted bool
-	for _, extension := range c.FileExtensions {
-		if strings.HasSuffix(info.path, extension) {
-			extensionWanted = true
-			break
-		}
-	}
+
 	f, err := os.Open(info.path)
 	if err != nil {
 		c.logger.Printf("Could not open file %s: %v\n", info.path, err)
@@ -223,75 +199,15 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	}
 	defer f.Close()
 
-	var magicHeaderWanted bool
-	if len(c.MagicHeaders) > 0 && !extensionWanted {
-		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
-		readLength, err := f.ReadAt(headerBuffer, 0)
-		if err != nil {
-			c.debugf("Could not read magic header for file %s", info.path)
-		} else {
-			headerBuffer = headerBuffer[:readLength]
-			for _, magicHeader := range c.MagicHeaders {
-				if bytes.HasPrefix(headerBuffer, magicHeader) {
-					magicHeaderWanted = true
-					break
-				}
-			}
-		}
-	}
-
-	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
-		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
+	if c.isFileExcludedDueToContent(info, f) {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
 		return
 	}
 
-	if info.Size() > c.MinCacheFileSize {
-		hashCalculator := sha256.New()
-		if _, err := io.Copy(hashCalculator, f); err == nil {
-			fileHash := string(hashCalculator.Sum(nil))
-			if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
-				c.debugf("Skipping file %s since a file with the same content was processed previously", info.path)
-				return
-			}
-		} else {
-			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
-		}
-		// Reset file descriptor after hash calculation
-		f.Seek(0, io.SeekStart)
-	}
-
 	c.throttle()
 
-	var urlParams = url.Values{}
-	if c.Source != "" {
-		urlParams.Add("source", c.Source)
-	}
-
-	var apiEndpoint string
-	if c.Sync {
-		apiEndpoint = "api/check"
-	} else {
-		apiEndpoint = "api/checkAsync"
-	}
-
-	url := fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
-
-	multipartReader, multipartWriter := io.Pipe()
-	w := multipart.NewWriter(multipartWriter)
-	abspath, err := filepath.Abs(info.path)
-	if err != nil {
-		abspath = info.path
-	}
-	go func() {
-		fw, err := w.CreateFormFile("file", abspath)
-		if err == nil {
-			io.Copy(fw, f)
-		}
-		w.Close()
-		multipartWriter.Close()
-	}()
-	response, err := http.Post(url, w.FormDataContentType(), multipartReader)
+	contentType, formData := c.getFileContentAsFormData(f, info.path)
+	response, err := http.Post(c.thunderstormUrl(), contentType, formData)
 	if err != nil {
 		if info.retries < 3 {
 			c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v", info.path, err)
@@ -330,4 +246,114 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		c.debugf("File %s processed successfully", info.path)
 	}
 	return
+}
+
+func (c *Collector) isFileExcludedDueToMetadata(info *infoWithPath) bool {
+	if !info.Mode().IsRegular() {
+		c.debugf("Skipping irregular file %s", info.path)
+		return true
+	}
+	isTooOld := true
+	for _, time := range getTimes(info.FileInfo) {
+		if time.After(c.ThresholdTime) {
+			isTooOld = false
+			break
+		}
+	}
+	if isTooOld {
+		c.debugf("Skipping old file %s", info.path)
+		return true
+	}
+	if c.MaxFileSize > 0 &&
+		c.MaxFileSize*MB < info.Size() {
+		c.debugf("Skipping big file %s", info.path)
+		return true
+	}
+	return false
+}
+
+func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) bool {
+	var extensionWanted bool
+	for _, extension := range c.FileExtensions {
+		if strings.HasSuffix(info.path, extension) {
+			extensionWanted = true
+			break
+		}
+	}
+
+	var magicHeaderWanted bool
+	if len(c.MagicHeaders) > 0 && !extensionWanted {
+		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
+		readLength, err := f.ReadAt(headerBuffer, 0)
+		if err != nil {
+			c.debugf("Could not read magic header for file %s", info.path)
+		} else {
+			headerBuffer = headerBuffer[:readLength]
+			for _, magicHeader := range c.MagicHeaders {
+				if bytes.HasPrefix(headerBuffer, magicHeader) {
+					magicHeaderWanted = true
+					break
+				}
+			}
+		}
+	}
+
+	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
+		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
+		return true
+	}
+
+	if info.Size() > c.MinCacheFileSize {
+		hashCalculator := sha256.New()
+		if _, err := io.Copy(hashCalculator, f); err == nil {
+			fileHash := string(hashCalculator.Sum(nil))
+			if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
+				c.debugf("Skipping file %s since a file with the same content was processed previously", info.path)
+				return true
+			}
+		} else {
+			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
+		}
+		// Reset file descriptor after hash calculation
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			c.debugf("Could not reset file descriptor for file %s: %v", info.path, err)
+		}
+	}
+	return false
+}
+
+func (c *Collector) thunderstormUrl() string {
+	var urlParams = url.Values{}
+	if c.Source != "" {
+		urlParams.Add("source", c.Source)
+	}
+
+	var apiEndpoint string
+	if c.Sync {
+		apiEndpoint = "api/check"
+	} else {
+		apiEndpoint = "api/checkAsync"
+	}
+
+	return fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
+}
+
+func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (string, *io.PipeReader) {
+	multipartReader, multipartWriter := io.Pipe()
+	w := multipart.NewWriter(multipartWriter)
+	abspath, err := filepath.Abs(filename)
+	if err != nil {
+		abspath = filename
+	}
+	go func() {
+		fw, err := w.CreateFormFile("file", abspath)
+		if err == nil {
+			if _, err := io.Copy(fw, f); err != nil {
+				c.debugf("Could not copy file content of %s to form writer: %v", filename, err)
+			}
+		}
+		w.Close()
+		multipartWriter.Close()
+	}()
+	return w.FormDataContentType(), multipartReader
 }
