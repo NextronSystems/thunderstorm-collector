@@ -2,7 +2,7 @@
 
 # THOR Thunderstorm Collector
 
-THOR Thunderstorm collectors facilitate effortless file uploads to a THOR Thunderstorm instance. More details on THOR Thunderstorm are available [here](https://www.nextron-systems.com/2020/09/25/theres-a-thunderstorm-coming/).
+THOR Thunderstorm collectors facilitate effortless file uploads to a THOR Thunderstorm instance. More details on THOR Thunderstorm are available [here](https://www.nextron-systems.com/2020/10/01/theres-a-thunderstorm-coming/).
 
 Users can filter files based on their size, age, extension or type.
 
