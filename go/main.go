@@ -166,7 +166,7 @@ func main() {
 	fmt.Println(`  / /__/ _ \/ / / -_) __/ __/ _ \/ __/                     `)
 	fmt.Println(`  \___/\___/_/_/\__/\__/\__/\___/_/                        `)
 	fmt.Println(`                                                           `)
-	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020                  `)
+	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020-2024             `)
 	fmt.Println(`                                                           `)
 
 	var config = ParseConfig()
