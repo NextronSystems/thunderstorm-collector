@@ -10,6 +10,7 @@ type Config struct {
 	MaxAgeInDays     string   `yaml:"max-age" description:"Max age of collected files. Files with older modification date are ignored.\nUnit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.\nExample: --max-age 10h" shorthand:"a"`
 	RootPaths        []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
 	FileExtensions   []string `yaml:"extension" description:"File extensions that should be collected. If left empty, file extensions are ignored.\nSpecify multiple extensions by using this flag multiple times.\nExample: -e .exe -e .dll" shorthand:"e"`
+	ExcludeGlobs     []string `yaml:"exclude" description:"Paths that should be excluded. Supports globbing with ?, * and **.\nSpecify multiple excludes by using this flag multiple times.\nExample: --exclude C:\\tools --exclude C:\\Users\\**\\.git\\**"`
 	Server           string   `yaml:"thunderstorm-server" shorthand:"s" description:"FQDN or IP of the Thunderstorm Server to which files should be uploaded.\nExamples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1"`
 	Port             int      `yaml:"port" description:"Port on the Thunderstorm Server to which files should be uploaded."`
 	Ssl              bool     `yaml:"ssl" description:"If true, connect to the Thunderstorm Server using HTTPS instead of HTTP."`

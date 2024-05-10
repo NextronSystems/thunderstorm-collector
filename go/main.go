@@ -78,6 +78,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	cc = CollectorConfig{
 		RootPaths:        config.RootPaths,
 		FileExtensions:   config.FileExtensions,
+		ExcludeGlobs:     config.ExcludeGlobs,
 		Sync:             config.Sync,
 		Debug:            config.Debug,
 		Threads:          config.Threads,

@@ -18,12 +18,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bmatcuk/doublestar/v3"
 )
 
 type CollectorConfig struct {
 	ThresholdTime   time.Time
 	RootPaths       []string
 	FileExtensions  []string
+	ExcludeGlobs    []string
 	Server          string
 	Sync            bool
 	Debug           bool
@@ -56,10 +59,11 @@ type Collector struct {
 }
 
 type CollectionStatistics struct {
-	uploadedFiles int64
-	skippedFiles  int64
-	uploadErrors  int64
-	fileErrors    int64
+	uploadedFiles      int64
+	skippedFiles       int64
+	skippedDirectories int64
+	uploadErrors       int64
+	fileErrors         int64
 }
 
 func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
@@ -132,6 +136,19 @@ func (c *Collector) Collect(root string) {
 		if err != nil {
 			return nil
 		}
+		for _, glob := range c.ExcludeGlobs {
+			if match, _ := doublestar.Match(glob, path); match {
+				if info.IsDir() {
+					c.logger.Printf("Skipping directory %s due to exclusion rule %s", path, glob)
+					atomic.AddInt64(&c.Statistics.skippedDirectories, 1)
+					return filepath.SkipDir
+				} else {
+					c.logger.Printf("Skipping file %s due to exclusion rule %s", path, glob)
+					atomic.AddInt64(&c.Statistics.skippedFiles, 1)
+					return nil
+				}
+			}
+		}
 		if !info.Mode().IsDir() {
 			c.filesToUpload <- infoWithPath{info, path, 0}
 		} else {
@@ -155,6 +172,7 @@ func (c *Collector) Stop() {
 	c.logger.Printf("Uploaded files: %d files", c.Statistics.uploadedFiles)
 	c.logger.Printf("Failed to read files: %d files", c.Statistics.fileErrors)
 	c.logger.Printf("Skipped files: %d files", c.Statistics.skippedFiles)
+	c.logger.Printf("Skipped directories: %d directories", c.Statistics.skippedDirectories)
 	c.logger.Printf("Failed uploads: %d files", c.Statistics.uploadErrors)
 }
 
