@@ -118,10 +118,10 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
 	}
 
-	if config.MaxFileSize < 1 {
+	if config.MaxFileSizeMB < 1 {
 		return cc, errors.New("maximum file size must be > 0")
 	}
-	cc.MaxFileSize = config.MaxFileSize * 1024 * 1024
+	cc.MaxFileSize = config.MaxFileSizeMB * 1024 * 1024
 
 	if config.Server == "" {
 		return cc, errors.New("thunderstorm Server not specified")

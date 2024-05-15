@@ -17,7 +17,7 @@ type Config struct {
 	Sync             bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
 	Debug            bool     `yaml:"debug" description:"Print debugging information."`
 	Threads          int      `yaml:"threads" description:"How many threads should upload files simultaneously." shorthand:"r"`
-	MaxFileSize      int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
+	MaxFileSizeMB    int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
 	Proxy            string   `yaml:"http-proxy" description:"Proxy that should be used for the connection to Thunderstorm.\nIf left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables."`
 	CAs              []string `yaml:"ca" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.\nSpecify multiple CAs by using this flag multiple times."`
 	Insecure         bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
@@ -33,7 +33,7 @@ type Config struct {
 
 var DefaultConfig = Config{
 	Threads:          1,
-	MaxFileSize:      100,
+	MaxFileSizeMB:    100,
 	Port:             8080,
 	RootPaths:        []string{getRootPath()},
 	Source:           HostnameOrBlank(),

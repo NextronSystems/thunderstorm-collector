@@ -283,7 +283,7 @@ func (c *Collector) isFileExcludedDueToMetadata(info *infoWithPath) bool {
 		return true
 	}
 	if c.MaxFileSize > 0 &&
-		c.MaxFileSize*MB < info.Size() {
+		c.MaxFileSize < info.Size() {
 		c.debugf("Skipping big file %s", info.path)
 		return true
 	}
