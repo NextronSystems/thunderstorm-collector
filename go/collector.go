@@ -90,6 +90,9 @@ func (c *Collector) debugf(format string, params ...interface{}) {
 }
 
 func (c *Collector) StartWorkers() {
+	if c.Threads < 1 {
+		panic("thread count must be > 0")
+	}
 	c.debugf("Starting %d threads for uploads", c.Threads)
 	c.workerGroup = &sync.WaitGroup{}
 	c.filesToUpload = make(chan infoWithPath)
