@@ -205,8 +205,6 @@ func main() {
 		logger.Println("Collecting files younger than", collectorConfig.ThresholdTime.Format("02.01.2006 15:04:05"))
 	}
 	collector.StartWorkers()
-	for _, root := range config.RootPaths {
-		collector.Collect(root)
-	}
+	collector.Collect()
 	collector.Stop()
 }

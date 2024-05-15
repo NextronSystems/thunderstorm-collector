@@ -130,7 +130,13 @@ func (c *Collector) CheckThunderstormUp() error {
 	return nil
 }
 
-func (c *Collector) Collect(root string) {
+func (c *Collector) Collect() {
+	for _, root := range c.CollectorConfig.RootPaths {
+		c.collectPath(root)
+	}
+}
+
+func (c *Collector) collectPath(root string) {
 	c.logger.Printf("Walking through %s to find files to upload", root)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
