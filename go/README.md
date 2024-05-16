@@ -11,6 +11,9 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
                                      Specify multiple CAs by using this flag multiple times.
       --debug                        Print debugging information.
+      --exclude strings              Paths that should be excluded. Supports globbing with ?, * and **.
+                                     Specify multiple excludes by using this flag multiple times.
+                                     Example: --exclude C:\tools --exclude C:\Users\**\.git\**
   -e, --extension strings            File extensions that should be collected. If left empty, file extensions are ignored.
                                      Specify multiple extensions by using this flag multiple times.
                                      Example: -e .exe -e .dll

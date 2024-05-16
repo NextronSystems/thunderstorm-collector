@@ -10,13 +10,14 @@ type Config struct {
 	MaxAgeInDays     string   `yaml:"max-age" description:"Max age of collected files. Files with older modification date are ignored.\nUnit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.\nExample: --max-age 10h" shorthand:"a"`
 	RootPaths        []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
 	FileExtensions   []string `yaml:"extension" description:"File extensions that should be collected. If left empty, file extensions are ignored.\nSpecify multiple extensions by using this flag multiple times.\nExample: -e .exe -e .dll" shorthand:"e"`
+	ExcludeGlobs     []string `yaml:"exclude" description:"Paths that should be excluded. Supports globbing with ?, * and **.\nSpecify multiple excludes by using this flag multiple times.\nExample: --exclude C:\\tools --exclude C:\\Users\\**\\.git\\**"`
 	Server           string   `yaml:"thunderstorm-server" shorthand:"s" description:"FQDN or IP of the Thunderstorm Server to which files should be uploaded.\nExamples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1"`
 	Port             int      `yaml:"port" description:"Port on the Thunderstorm Server to which files should be uploaded."`
 	Ssl              bool     `yaml:"ssl" description:"If true, connect to the Thunderstorm Server using HTTPS instead of HTTP."`
 	Sync             bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
 	Debug            bool     `yaml:"debug" description:"Print debugging information."`
 	Threads          int      `yaml:"threads" description:"How many threads should upload files simultaneously." shorthand:"r"`
-	MaxFileSize      int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
+	MaxFileSizeMB    int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
 	Proxy            string   `yaml:"http-proxy" description:"Proxy that should be used for the connection to Thunderstorm.\nIf left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables."`
 	CAs              []string `yaml:"ca" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.\nSpecify multiple CAs by using this flag multiple times."`
 	Insecure         bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
@@ -32,7 +33,7 @@ type Config struct {
 
 var DefaultConfig = Config{
 	Threads:          1,
-	MaxFileSize:      100,
+	MaxFileSizeMB:    100,
 	Port:             8080,
 	RootPaths:        []string{getRootPath()},
 	Source:           HostnameOrBlank(),

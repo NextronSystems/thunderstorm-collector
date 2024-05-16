@@ -78,6 +78,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	cc = CollectorConfig{
 		RootPaths:        config.RootPaths,
 		FileExtensions:   config.FileExtensions,
+		ExcludeGlobs:     config.ExcludeGlobs,
 		Sync:             config.Sync,
 		Debug:            config.Debug,
 		Threads:          config.Threads,
@@ -117,10 +118,10 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
 	}
 
-	if config.MaxFileSize < 1 {
+	if config.MaxFileSizeMB < 1 {
 		return cc, errors.New("maximum file size must be > 0")
 	}
-	cc.MaxFileSize = config.MaxFileSize * 1024 * 1024
+	cc.MaxFileSize = config.MaxFileSizeMB * 1024 * 1024
 
 	if config.Server == "" {
 		return cc, errors.New("thunderstorm Server not specified")
@@ -165,7 +166,7 @@ func main() {
 	fmt.Println(`  / /__/ _ \/ / / -_) __/ __/ _ \/ __/                     `)
 	fmt.Println(`  \___/\___/_/_/\__/\__/\__/\___/_/                        `)
 	fmt.Println(`                                                           `)
-	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020                  `)
+	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020-2024             `)
 	fmt.Println(`                                                           `)
 
 	var config = ParseConfig()
@@ -204,8 +205,6 @@ func main() {
 		logger.Println("Collecting files younger than", collectorConfig.ThresholdTime.Format("02.01.2006 15:04:05"))
 	}
 	collector.StartWorkers()
-	for _, root := range config.RootPaths {
-		collector.Collect(root)
-	}
+	collector.Collect()
 	collector.Stop()
 }

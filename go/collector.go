@@ -18,12 +18,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bmatcuk/doublestar/v3"
 )
 
 type CollectorConfig struct {
 	ThresholdTime   time.Time
 	RootPaths       []string
 	FileExtensions  []string
+	ExcludeGlobs    []string
 	Server          string
 	Sync            bool
 	Debug           bool
@@ -36,6 +39,7 @@ type CollectorConfig struct {
 
 	MinCacheFileSize int64
 }
+
 type Collector struct {
 	CollectorConfig
 
@@ -55,10 +59,11 @@ type Collector struct {
 }
 
 type CollectionStatistics struct {
-	uploadedFiles int64
-	skippedFiles  int64
-	uploadErrors  int64
-	fileErrors    int64
+	uploadedFiles      int64
+	skippedFiles       int64
+	skippedDirectories int64
+	uploadErrors       int64
+	fileErrors         int64
 }
 
 func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
@@ -78,7 +83,6 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 
 // debugf calls logger.Printf if and only if debugging is enabled.
 // Arguments are handled in the manner of fmt.Printf.
-
 func (c *Collector) debugf(format string, params ...interface{}) {
 	if c.Debug {
 		c.logger.Printf(format, params...)
@@ -86,6 +90,9 @@ func (c *Collector) debugf(format string, params ...interface{}) {
 }
 
 func (c *Collector) StartWorkers() {
+	if c.Threads < 1 {
+		panic("thread count must be > 0")
+	}
 	c.debugf("Starting %d threads for uploads", c.Threads)
 	c.workerGroup = &sync.WaitGroup{}
 	c.filesToUpload = make(chan infoWithPath)
@@ -95,7 +102,7 @@ func (c *Collector) StartWorkers() {
 			for info := range c.filesToUpload {
 				shouldRedo := true
 				for shouldRedo {
-					shouldRedo = c.uploadToThunderstorm(info)
+					shouldRedo = c.uploadToThunderstorm(&info)
 				}
 			}
 			c.workerGroup.Done()
@@ -126,11 +133,30 @@ func (c *Collector) CheckThunderstormUp() error {
 	return nil
 }
 
-func (c *Collector) Collect(root string) {
+func (c *Collector) Collect() {
+	for _, root := range c.CollectorConfig.RootPaths {
+		c.collectPath(root)
+	}
+}
+
+func (c *Collector) collectPath(root string) {
 	c.logger.Printf("Walking through %s to find files to upload", root)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
+		}
+		for _, glob := range c.ExcludeGlobs {
+			if match, _ := doublestar.Match(glob, path); match {
+				if info.IsDir() {
+					c.logger.Printf("Skipping directory %s due to exclusion rule %s", path, glob)
+					atomic.AddInt64(&c.Statistics.skippedDirectories, 1)
+					return filepath.SkipDir
+				} else {
+					c.logger.Printf("Skipping file %s due to exclusion rule %s", path, glob)
+					atomic.AddInt64(&c.Statistics.skippedFiles, 1)
+					return nil
+				}
+			}
 		}
 		if !info.Mode().IsDir() {
 			c.filesToUpload <- infoWithPath{info, path, 0}
@@ -155,6 +181,7 @@ func (c *Collector) Stop() {
 	c.logger.Printf("Uploaded files: %d files", c.Statistics.uploadedFiles)
 	c.logger.Printf("Failed to read files: %d files", c.Statistics.fileErrors)
 	c.logger.Printf("Skipped files: %d files", c.Statistics.skippedFiles)
+	c.logger.Printf("Skipped directories: %d directories", c.Statistics.skippedDirectories)
 	c.logger.Printf("Failed uploads: %d files", c.Statistics.uploadErrors)
 }
 
@@ -185,37 +212,12 @@ func (c *Collector) throttle() {
 	}
 }
 
-func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
-	if !info.Mode().IsRegular() {
+func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
+	if c.isFileExcludedDueToMetadata(info) {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping irregular file %s", info.path)
 		return
 	}
-	isTooOld := true
-	for _, time := range getTimes(info.FileInfo) {
-		if time.After(c.ThresholdTime) {
-			isTooOld = false
-			break
-		}
-	}
-	if isTooOld {
-		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping old file %s", info.path)
-		return
-	}
-	if c.MaxFileSize > 0 &&
-		c.MaxFileSize*MB < info.Size() {
-		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
-		c.debugf("Skipping big file %s", info.path)
-		return
-	}
-	var extensionWanted bool
-	for _, extension := range c.FileExtensions {
-		if strings.HasSuffix(info.path, extension) {
-			extensionWanted = true
-			break
-		}
-	}
+
 	f, err := os.Open(info.path)
 	if err != nil {
 		c.logger.Printf("Could not open file %s: %v\n", info.path, err)
@@ -224,75 +226,15 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 	}
 	defer f.Close()
 
-	var magicHeaderWanted bool
-	if len(c.MagicHeaders) > 0 && !extensionWanted {
-		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
-		readLength, err := f.ReadAt(headerBuffer, 0)
-		if err != nil {
-			c.debugf("Could not read magic header for file %s", info.path)
-		} else {
-			headerBuffer = headerBuffer[:readLength]
-			for _, magicHeader := range c.MagicHeaders {
-				if bytes.HasPrefix(headerBuffer, magicHeader) {
-					magicHeaderWanted = true
-					break
-				}
-			}
-		}
-	}
-
-	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
-		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
+	if c.isFileExcludedDueToContent(info, f) {
 		atomic.AddInt64(&c.Statistics.skippedFiles, 1)
 		return
 	}
 
-	if info.Size() > c.MinCacheFileSize {
-		hashCalculator := sha256.New()
-		if _, err := io.Copy(hashCalculator, f); err == nil {
-			fileHash := string(hashCalculator.Sum(nil))
-			if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
-				c.debugf("Skipping file %s since a file with the same content was processed previously", info.path)
-				return
-			}
-		} else {
-			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
-		}
-		// Reset file descriptor after hash calculation
-		f.Seek(0, io.SeekStart)
-	}
-
 	c.throttle()
 
-	var urlParams = url.Values{}
-	if c.Source != "" {
-		urlParams.Add("source", c.Source)
-	}
-
-	var apiEndpoint string
-	if c.Sync {
-		apiEndpoint = "api/check"
-	} else {
-		apiEndpoint = "api/checkAsync"
-	}
-
-	url := fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
-
-	multipartReader, multipartWriter := io.Pipe()
-	w := multipart.NewWriter(multipartWriter)
-	abspath, err := filepath.Abs(info.path)
-	if err != nil {
-		abspath = info.path
-	}
-	go func() {
-		fw, err := w.CreateFormFile("file", abspath)
-		if err == nil {
-			io.Copy(fw, f)
-		}
-		w.Close()
-		multipartWriter.Close()
-	}()
-	response, err := http.Post(url, w.FormDataContentType(), multipartReader)
+	contentType, formData := c.getFileContentAsFormData(f, info.path)
+	response, err := http.Post(c.thunderstormUrl(), contentType, formData)
 	if err != nil {
 		if info.retries < 3 {
 			c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v", info.path, err)
@@ -331,4 +273,114 @@ func (c *Collector) uploadToThunderstorm(info infoWithPath) (redo bool) {
 		c.debugf("File %s processed successfully", info.path)
 	}
 	return
+}
+
+func (c *Collector) isFileExcludedDueToMetadata(info *infoWithPath) bool {
+	if !info.Mode().IsRegular() {
+		c.debugf("Skipping irregular file %s", info.path)
+		return true
+	}
+	isTooOld := true
+	for _, time := range getTimes(info.FileInfo) {
+		if time.After(c.ThresholdTime) {
+			isTooOld = false
+			break
+		}
+	}
+	if isTooOld {
+		c.debugf("Skipping old file %s", info.path)
+		return true
+	}
+	if c.MaxFileSize > 0 &&
+		c.MaxFileSize < info.Size() {
+		c.debugf("Skipping big file %s", info.path)
+		return true
+	}
+	return false
+}
+
+func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) bool {
+	var extensionWanted bool
+	for _, extension := range c.FileExtensions {
+		if strings.HasSuffix(info.path, extension) {
+			extensionWanted = true
+			break
+		}
+	}
+
+	var magicHeaderWanted bool
+	if len(c.MagicHeaders) > 0 && !extensionWanted {
+		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
+		readLength, err := f.ReadAt(headerBuffer, 0)
+		if err != nil {
+			c.debugf("Could not read magic header for file %s", info.path)
+		} else {
+			headerBuffer = headerBuffer[:readLength]
+			for _, magicHeader := range c.MagicHeaders {
+				if bytes.HasPrefix(headerBuffer, magicHeader) {
+					magicHeaderWanted = true
+					break
+				}
+			}
+		}
+	}
+
+	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
+		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
+		return true
+	}
+
+	if info.Size() > c.MinCacheFileSize {
+		hashCalculator := sha256.New()
+		if _, err := io.Copy(hashCalculator, f); err == nil {
+			fileHash := string(hashCalculator.Sum(nil))
+			if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
+				c.debugf("Skipping file %s since a file with the same content was processed previously", info.path)
+				return true
+			}
+		} else {
+			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
+		}
+		// Reset file descriptor after hash calculation
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			c.debugf("Could not reset file descriptor for file %s: %v", info.path, err)
+		}
+	}
+	return false
+}
+
+func (c *Collector) thunderstormUrl() string {
+	var urlParams = url.Values{}
+	if c.Source != "" {
+		urlParams.Add("source", c.Source)
+	}
+
+	var apiEndpoint string
+	if c.Sync {
+		apiEndpoint = "api/check"
+	} else {
+		apiEndpoint = "api/checkAsync"
+	}
+
+	return fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
+}
+
+func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (string, *io.PipeReader) {
+	multipartReader, multipartWriter := io.Pipe()
+	w := multipart.NewWriter(multipartWriter)
+	abspath, err := filepath.Abs(filename)
+	if err != nil {
+		abspath = filename
+	}
+	go func() {
+		fw, err := w.CreateFormFile("file", abspath)
+		if err == nil {
+			if _, err := io.Copy(fw, f); err != nil {
+				c.debugf("Could not copy file content of %s to form writer: %v", filename, err)
+			}
+		}
+		w.Close()
+		multipartWriter.Close()
+	}()
+	return w.FormDataContentType(), multipartReader
 }
