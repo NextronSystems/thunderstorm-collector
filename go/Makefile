@@ -18,6 +18,9 @@ BUILD_ENV=GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
 bin/%: $(wildcard *.go)
 	$(BUILD_ENV) go build -v -o $@ -ldflags "-w -s"
 
+test:
+	go test -cover ./...
+
 clean:
 	rm -r bin
 
