@@ -106,53 +106,69 @@ def skip_file(filepath):
 def submit_sample(filepath):
     print("[SUBMIT] Submitting {} ...".format(filepath))
 
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f"attachment; filename={filepath}",
+    }
+
     try:
-        headers = {
-            "Content-Type": "application/octet-stream",
-            "Content-Disposition": f"attachment; filename={filepath}",
-        }
 
         with open(filepath, "rb") as f:
             data = f.read()
 
-        boundary = str(uuid.uuid4())
-        headers = {
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        }
-
-        # Create multipart/form-data payload
-        payload = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{filepath}"\r\n'
-            f"Content-Type: application/octet-stream\r\n\r\n"
-        ).encode("utf-8")
-        payload += data
-        payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
-
-        if args.tls:
-            if args.insecure:
-                context = ssl._create_unverified_context()
-            else:
-                context = ssl._create_default_https_context()
-            conn = http.client.HTTPSConnection(args.server, args.port, context=context)
-        else:
-            conn = http.client.HTTPConnection(args.server, args.port)
-        conn.request("POST", api_endpoint, body=payload, headers=headers)
-
-        resp = conn.getresponse()
-
-        global num_submitted
-        num_submitted += 1
-
-        if resp.status != 200:
-            print(
-                "[ERROR] HTTP return status: {}, reason: {}".format(
-                    resp.status, resp.reason
-                )
-            )
-
     except Exception as e:
-        print("Could not submit '{}' - {}".format(filepath, e))
+        print("[ERROR] Could not read '{}' - {}".format(filepath, e))
+        return
+
+    boundary = str(uuid.uuid4())
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    }
+
+    # Create multipart/form-data payload
+    payload = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filepath}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    payload += data
+    payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    retries = 0
+    while retries < 3:
+        try:
+            if args.tls:
+                if args.insecure:
+                    context = ssl._create_unverified_context()
+                else:
+                    context = ssl._create_default_https_context()
+                conn = http.client.HTTPSConnection(args.server, args.port, context=context)
+            else:
+                conn = http.client.HTTPConnection(args.server, args.port)
+            conn.request("POST", api_endpoint, body=payload, headers=headers)
+
+            resp = conn.getresponse()
+
+        except Exception as e:
+            print("[ERROR] Could not submit '{}' - {}".format(filepath, e))
+            retries += 1
+            time.sleep(2 << retries)
+            continue
+
+        if resp.status == 503: # Service unavailable
+            retry_time = resp.headers.get("Retry-After", 30)
+            time.sleep(retry_time)
+            continue
+        elif resp.status == 200:
+            break
+        print(
+            "[ERROR] HTTP return status: {}, reason: {}".format(
+                resp.status, resp.reason
+            )
+        )
+
+    global num_submitted
+    num_submitted += 1
 
 
 # Main

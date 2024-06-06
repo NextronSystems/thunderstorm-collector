@@ -137,14 +137,31 @@ do
                 continue
             fi
             log debug "Submitting ${file_path} ..."
-            # Submit sample
-            result=$(curl -s -X POST \
-                     "$scheme://$THUNDERSTORM_SERVER:8080/api/$api_endpoint" \
-                     --form "file=@${file_path};filename=${file_path}")
-            # If not 'id' in result
-            error="reason"
-            if [ "${result/$error}" != "$result" ]; then
-                log error "$result"
+            successful=0
+
+            for retry in {1..3}; do
+                # Submit sample
+                result=$(curl -s -X POST \
+                        "$scheme://$THUNDERSTORM_SERVER:8080/api/$api_endpoint" \
+                        --form "file=@${file_path};filename=${file_path}")
+                curl_exit=$?
+                if [ $curl_exit -ne 0 ]; then
+                    log error "Upload failed with code $curl_exit"
+                    sleep $((2 << retry))
+                    continue
+                fi
+
+                # If 'reason' in result
+                if [ "${result/reason}" != "$result" ]; then
+                    log error "$result"
+                    sleep $((2 << retry))
+                    continue
+                fi
+                successful=1
+                break
+            done
+            if [ $successful -ne 1 ]; then
+                log error "Could not upload ${file_path}"
             fi
         fi
     done 
