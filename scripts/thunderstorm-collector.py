@@ -5,9 +5,7 @@ import http.client
 import os
 import re
 import ssl
-import sys
 import time
-import urllib.parse
 import uuid
 
 # Configuration
@@ -34,6 +32,11 @@ current_date = time.time()
 num_submitted = 0
 num_processed = 0
 
+# URL to use for submission
+api_endpoint = ""
+
+# Original args
+args = {}
 
 # Functions
 def process_dir(workdir):
@@ -155,6 +158,7 @@ def submit_sample(filepath):
             time.sleep(2 << retries)
             continue
 
+        # pylint: disable=no-else-continue
         if resp.status == 503: # Service unavailable
             retry_time = resp.headers.get("Retry-After", 30)
             time.sleep(retry_time)
@@ -204,13 +208,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
 
-    global args
     args = parser.parse_args()
 
     if args.tls:
         schema = "https"
 
-    global api_endpoint
     api_endpoint = "{}://{}:{}/api/checkAsync".format(schema, args.server, args.port)
 
     print("=" * 80)
@@ -230,8 +232,8 @@ if __name__ == "__main__":
     print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
 
     # Walk directory
-    for dir in args.dirs:
-        process_dir(dir)
+    for walkdir in args.dirs:
+        process_dir(walkdir)
 
     # End message
     end_date = time.time()
