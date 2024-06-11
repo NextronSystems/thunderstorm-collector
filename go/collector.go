@@ -239,7 +239,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		if info.retries < 3 {
 			c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v", info.path, err)
 			info.retries++
-			time.Sleep(time.Second)
+			time.Sleep(4 * time.Second * time.Duration(1<<info.retries))
 			return true
 		} else {
 			c.logger.Printf("Could not send file %s to thunderstorm, canceling it.", info.path)

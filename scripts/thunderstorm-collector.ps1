@@ -274,6 +274,7 @@ try {
 
         # Submitting the request
         $StatusCode = 0
+        $Retries = 0
         while ( $($StatusCode) -ne 200 ) {
             try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
@@ -291,8 +292,14 @@ try {
                     Write-Log "503: Server seems busy - retrying in $($WaitSecs) seconds"
                     Start-Sleep -Seconds $($WaitSecs)
                 } else {
-                    Write-Log "$($StatusCode): Server has problems - retrying in 3 seconds"
-                    Start-Sleep -Seconds 3
+                    if ( $Retries -eq 3) {
+                        Write-Log "$($StatusCode): Server still has problems - giving up"
+                        break
+                    }
+                    $Retries = $Retries + 1
+                    $SleepTime = 2 * [Math]::Pow(2, $Retries)
+                    Write-Log "$($StatusCode): Server has problems - retrying in $SleepTime seconds"
+                    Start-Sleep -Seconds $($SleepTime)
                 }
             }
         }

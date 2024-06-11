@@ -127,19 +127,32 @@ sub processDir {
 sub submitSample {
     my ($filepath) = shift;
     print "[SUBMIT] Submitting $filepath ...\n";
-    eval { 
-        my $req = $ua->post($api_endpoint,
-            Content_Type => 'form-data',
-            Content => [
-                "file" => [ $filepath ],
-            ],
-        );
-        $num_submitted++;
-        print "\nError: ", $req->status_line unless $req->is_success;
-    } or do {
-        my $error = $@ || 'Unknown failure';
-        warn "Could not submit '$filepath' - $error";
-    };
+    my $retry = 0;
+    for ($retry = 0; $retry < 4; $retry++) {
+        if ($retry > 0) {
+            my $sleep_time = 2 << $retry;
+            print "[SUBMIT] Waiting $sleep_time seconds to retry submitting $filepath ...\n";
+            sleep($sleep_time)
+        }
+        my $successful = 0;
+        eval {
+            my $req = $ua->post($api_endpoint,
+                Content_Type => 'form-data',
+                Content => [
+                    "file" => [ $filepath ],
+                ],
+            );
+            $successful = $req->is_success;
+            $num_submitted++;
+            print "\nError: ", $req->status_line unless $successful;
+        } or do {
+            my $error = $@ || 'Unknown failure';
+            warn "Could not submit '$filepath' - $error";
+        };
+        if ($successful) {
+            last;
+        }
+    }
 }
 
 # MAIN ----------------------------------------------------------------
