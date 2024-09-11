@@ -46,6 +46,15 @@ SET /A MAX_AGE=30
 :: Debug
 SET DEBUG=0
 
+:: Source
+SET SOURCE=
+IF "%SOURCE%"=="" (
+    FOR /F "tokens=*" %%i IN ('hostname') DO SET HOSTNAME=%%i
+)
+IF "%SOURCE%" EQ "" AND "%HOSTNAME%" NEQ "" (
+    SOURCE="?source=%HOSTNAME%"
+)
+
 :: WELCOME -------------------------------------------------------
 
 ECHO =============================================================
@@ -112,7 +121,7 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
                         :: Upload
                         ECHO Uploading %%F ..
                         :: We'll start the upload process in background to speed up the submission process 
-                        START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync
+                        START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
                     )
                 )
             )

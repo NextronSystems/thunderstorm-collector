@@ -19,6 +19,8 @@
         Server name (FQDN) or IP address of your Thunderstorm instance
     .PARAMETER ThunderstormPort 
         Port number on which the Thunderstorm service is listening (default: 8080)
+    .PARAMETER Source
+        Source of the submission (default: hostname of the system)
     .PARAMETER Folder 
         Folder to process (default: C:\)
     .PARAMETER MaxAge 
@@ -58,6 +60,10 @@ param
         [ValidateNotNullOrEmpty()] 
         [Alias('TP')]    
         [int]$ThunderstormPort = 8080,
+
+    [Parameter(HelpMessage="")]
+        [Alias('S')]
+        [string]$Source=$env:COMPUTERNAME,
 
     [Parameter(HelpMessage="Folder to process (default: C:\)")] 
         [ValidateNotNullOrEmpty()] 
