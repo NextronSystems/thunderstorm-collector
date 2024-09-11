@@ -48,12 +48,6 @@ SET DEBUG=0
 
 :: Source
 SET SOURCE=
-IF "%SOURCE%"=="" (
-    FOR /F "tokens=*" %%i IN ('hostname') DO SET HOSTNAME=%%i
-)
-IF "%SOURCE%" EQ "" AND "%HOSTNAME%" NEQ "" (
-    SOURCE="?source=%HOSTNAME%"
-)
 
 :: WELCOME -------------------------------------------------------
 
@@ -83,9 +77,19 @@ ECHO Cannot find curl in PATH or the current directory. Download it from https:/
 ECHO If you're collecting on Windows systems older than Windows Vista, use curl version 7.46.0 from https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
 EXIT /b 1
 :CHECKDONE
-ECHO Curl has been found. We're ready to go. 
+ECHO Curl has been found. We're ready to go.
 
 :: COLLECTION --------------------------------------------------
+
+:: SOURCE
+IF "%SOURCE%"=="" (
+    ECHO Getting hostname
+    FOR /F "tokens=*" %%i IN ('hostname') DO SET SOURCE=%%i
+    ECHO No Source provided, using hostname=!SOURCE!
+)
+IF "%SOURCE%" NEQ "" (
+    SET SOURCE=?source=%SOURCE%
+)
 
 :: Directory walk and upload
 ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE: %MAX_AGE% days EXTENSIONS: %RELEVANT_EXTENSIONS% 
