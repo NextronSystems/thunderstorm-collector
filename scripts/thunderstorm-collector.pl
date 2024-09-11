@@ -12,12 +12,14 @@
 # Usage examples:
 #   $> perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
 #   $> perl thunderstorm-collector.pl -- --dir / --server thunderstorm.internal.net
+#   $> perl thunderstorm-collector.pl -- --dir / --server thunderstorm.internal.net --so "My Source"
 
 use warnings;
 use strict;
 use Getopt::Long;
 use LWP::UserAgent;
 use File::Spec::Functions qw( catfile );
+use Sys::Hostname;
 
 use Cwd; # module for finding the current working directory 
 
@@ -27,20 +29,32 @@ my $targetdir = "/";
 my $server = "";
 my $port = 8080;
 my $scheme = "http";
-our $max_age = 3;       # in days
+my $source = "";
+our $max_age = 3000;       # in days
 our $max_size = 10;     # in megabytes
 our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
 our @hardSkips = ('/proc', '/dev', '/sys');
 
 # Command Line Parameters
-GetOptions("dir=s"      => \$targetdir,  # same for --dir or -d
-           "server=s"   => \$server,     # same for --server or -s
-           "port=i"     => \$port,       # same for --port or -p
-           "debug"      => \$debug       # --debug
-          );
+GetOptions(
+    "dir|d=s"      => \$targetdir,  # --dir or -d
+    "server|s=s"   => \$server,     # --server or -s
+    "port|p=i"     => \$port,       # --port or -p
+    "source|so=s"  => \$source,     # --source or -so
+    "debug"        => \$debug       # --debug
+);
+
+# Use Hostname as Source if not set
+if ( $source eq "" ) {
+    $source = hostname;
+}
+# Add Source to URL if available
+if ( $source ne "" ) {
+    $source = "?source=$source";
+}
 
 # Composed Values
-our $api_endpoint = "$scheme://$server:$port/api/checkAsync";
+our $api_endpoint = "$scheme://$server:$port/api/checkAsync$source";
 our $current_date = time;
 
 # Stats
@@ -86,7 +100,7 @@ sub processDir {
             if ( $debug ) { print "[DEBUG] Checking $filepath ...\n"; }
         }
 
-        # Characteristics 
+        # Characteristics
         my $size = (stat($filepath))[7];
         my $mdate = (stat($filepath))[9];
         #print("SIZE: $size MDATE: $mdate\n");

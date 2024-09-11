@@ -16,11 +16,16 @@ LOG_TO_CMDLINE=1
 
 # Thunderstorm Server
 THUNDERSTORM_SERVER="ygdrasil.nextron"
+THUNDERSTORM_PORT=8080
 USE_SSL=0
 ASYNC_MODE=1
 
+# Source
+HOSTNAME=$(hostname -f)
+echo "$HOSTNAME"
+
 # Target selection 
-declare -a SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr');  # folders to scan 
+declare -a SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr');  # folders to scan
 MAX_AGE=14
 MAX_FILE_SIZE=2000  # max file size to check in kilobyte, default 2 MB
 
@@ -124,6 +129,11 @@ scheme="http"
 if [[ $USE_SSL -eq 1 ]]; then
     scheme="https"
 fi
+source=""
+if [[ -n $HOSTNAME ]]; then
+    source="?source=${HOSTNAME}"
+    echo "Source: $source"
+fi
 
 # Loop over filesystem
 for scandir in "${SCAN_FOLDERS[@]}";
@@ -142,7 +152,7 @@ do
             for retry in {1..3}; do
                 # Submit sample
                 result=$(curl -s -X POST \
-                        "$scheme://$THUNDERSTORM_SERVER:8080/api/$api_endpoint" \
+                        "$scheme://$THUNDERSTORM_SERVER:$THUNDERSTORM_PORT/api/$api_endpoint$source" \
                         --form "file=@${file_path};filename=${file_path}")
                 curl_exit=$?
                 if [ $curl_exit -ne 0 ]; then
