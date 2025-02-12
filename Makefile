@@ -1,8 +1,15 @@
+# Define version if not provided by the environment
+VERSION ?= $(shell git describe --tags --always --dirty)
+VERSION := ${VERSION:refs/tags/%=%}
+
 release:
 	@rm -rf release
 	@mkdir -p release
+	@echo "Building release ${VERSION}"
 	make -C go all
-	zip release/thunderstorm-collectors.zip go/bin/* scripts/thunderstorm-collector.*
+	for f in go/bin/* scripts/thunderstorm-collector.*; do \
+		ext=$${f##*.}; if [ "$$ext" = "$$f" ]; then ext=''; else ext=".$$ext"; fi ; \
+		cp "$$f" "release/$$(basename $${f%$$ext})-${VERSION:v%=%}$${ext}"; done
 
 clean:
 	rm -r release
