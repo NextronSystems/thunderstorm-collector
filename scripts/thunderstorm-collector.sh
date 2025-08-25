@@ -22,7 +22,6 @@ ASYNC_MODE=1
 
 # Source
 HOSTNAME=$(hostname -f)
-echo "$HOSTNAME"
 
 # Target selection 
 declare -a SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr');  # folders to scan
@@ -132,7 +131,6 @@ fi
 source=""
 if [[ -n $HOSTNAME ]]; then
     source="?source=${HOSTNAME}"
-    echo "Source: $source"
 fi
 
 # Loop over filesystem

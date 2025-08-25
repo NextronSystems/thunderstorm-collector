@@ -83,7 +83,6 @@ ECHO Curl has been found. We're ready to go.
 
 :: SOURCE
 IF "%SOURCE%"=="" (
-    ECHO Getting hostname
     FOR /F "tokens=*" %%i IN ('hostname') DO SET SOURCE=%%i
     ECHO No Source provided, using hostname=!SOURCE!
 )
