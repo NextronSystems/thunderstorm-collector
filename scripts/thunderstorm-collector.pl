@@ -30,7 +30,7 @@ my $server = "";
 my $port = 8080;
 my $scheme = "http";
 my $source = "";
-our $max_age = 3000;       # in days
+our $max_age = 3;       # in days
 our $max_size = 10;     # in megabytes
 our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
 our @hardSkips = ('/proc', '/dev', '/sys');
@@ -50,6 +50,7 @@ if ( $source eq "" ) {
 }
 # Add Source to URL if available
 if ( $source ne "" ) {
+    print "[DEBUG] No source specified, using hostname: $source\n" if $debug;
     $source = "?source=$source";
 }
 
