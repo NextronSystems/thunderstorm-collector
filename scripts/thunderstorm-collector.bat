@@ -5,7 +5,7 @@ SETLOCAL EnableDelayedExpansion
 :: THOR Thunderstorm Collector
 :: Windows Batch
 :: Florian Roth
-:: v0.3
+:: v0.4
 :: 
 :: A Windows Batch script that uses a compiled Curl for Windows 
 :: to upload files to a THOR Thunderstorm server
@@ -46,6 +46,9 @@ SET /A MAX_AGE=30
 :: Debug
 SET DEBUG=0
 
+:: Source
+SET SOURCE=
+
 :: WELCOME -------------------------------------------------------
 
 ECHO =============================================================
@@ -74,9 +77,18 @@ ECHO Cannot find curl in PATH or the current directory. Download it from https:/
 ECHO If you're collecting on Windows systems older than Windows Vista, use curl version 7.46.0 from https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
 EXIT /b 1
 :CHECKDONE
-ECHO Curl has been found. We're ready to go. 
+ECHO Curl has been found. We're ready to go.
 
 :: COLLECTION --------------------------------------------------
+
+:: SOURCE
+IF "%SOURCE%"=="" (
+    FOR /F "tokens=*" %%i IN ('hostname') DO SET SOURCE=%%i
+    ECHO No Source provided, using hostname=!SOURCE!
+)
+IF "%SOURCE%" NEQ "" (
+    SET SOURCE=?source=%SOURCE%
+)
 
 :: Directory walk and upload
 ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE: %MAX_AGE% days EXTENSIONS: %RELEVANT_EXTENSIONS% 
@@ -112,7 +124,7 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
                         :: Upload
                         ECHO Uploading %%F ..
                         :: We'll start the upload process in background to speed up the submission process 
-                        START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync
+                        START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
                     )
                 )
             )

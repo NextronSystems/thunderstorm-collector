@@ -2,11 +2,11 @@
 # Script Title: THOR Thunderstorm Collector
 # Script File Name: thunderstorm-collector.ps1  
 # Author: Florian Roth 
-# Version: 0.1.0
+# Version: 0.2.0
 # Date Created: 07.10.2020  
-# Last Modified: 07.10.2020
+# Last Modified: 22.09.2025
 ################################################## 
- 
+
 #Requires -Version 3
 
 <#   
@@ -19,6 +19,8 @@
         Server name (FQDN) or IP address of your Thunderstorm instance
     .PARAMETER ThunderstormPort 
         Port number on which the Thunderstorm service is listening (default: 8080)
+    .PARAMETER Source
+        Source of the submission (default: hostname of the system)
     .PARAMETER Folder 
         Folder to process (default: C:\)
     .PARAMETER MaxAge 
@@ -46,43 +48,47 @@
 # Parameters ----------------------------------------------------------
 # #####################################################################
 
-param  
-( 
-    [Parameter( 
-        HelpMessage='Server name (FQDN) or IP address of your Thunderstorm instance')] 
-        [ValidateNotNullOrEmpty()] 
+param
+(
+    [Parameter(
+        HelpMessage='Server name (FQDN) or IP address of your Thunderstorm instance')]
+        [ValidateNotNullOrEmpty()]
         [Alias('TS')]
-        [string]$ThunderstormServer,  
+        [string]$ThunderstormServer,
 
-    [Parameter(HelpMessage="Port number on which the Thunderstorm service is listening (default: 8080)")] 
-        [ValidateNotNullOrEmpty()] 
-        [Alias('TP')]    
+    [Parameter(HelpMessage="Port number on which the Thunderstorm service is listening (default: 8080)")]
+        [ValidateNotNullOrEmpty()]
+        [Alias('TP')]
         [int]$ThunderstormPort = 8080,
 
-    [Parameter(HelpMessage="Folder to process (default: C:\)")] 
-        [ValidateNotNullOrEmpty()] 
+    [Parameter(HelpMessage="Source of the submission (default: hostname of the system)")]
+    [Alias('S')]
+        [string]$Source=$env:COMPUTERNAME,
+
+    [Parameter(HelpMessage="Folder to process (default: C:\)")]
+        [ValidateNotNullOrEmpty()]
         [Alias('F')]
         [string]$Folder = "C:\",
- 
-    [Parameter( 
-        HelpMessage='Select files based on the number of days in which the file has been create or modified (default: 0 = no age selection)')] 
-        [ValidateNotNullOrEmpty()] 
-        [Alias('MA')]       
-        [int]$MaxAge, 
 
-    [Parameter( 
-        HelpMessage='Select only files smaller than the given number in MegaBytes (default: 20MB) ')] 
-        [ValidateNotNullOrEmpty()] 
-        [Alias('MS')]       
-        [int]$MaxSize, 
+    [Parameter(
+        HelpMessage='Select files based on the number of days in which the file has been create or modified (default: 0 = no age selection)')]
+        [ValidateNotNullOrEmpty()]
+        [Alias('MA')]
+        [int]$MaxAge,
 
-    [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')] 
-        [ValidateNotNullOrEmpty()] 
-        [Alias('E')]    
-        [string[]]$Extensions, 
+    [Parameter(
+        HelpMessage='Select only files smaller than the given number in MegaBytes (default: 20MB) ')]
+        [ValidateNotNullOrEmpty()]
+        [Alias('MS')]
+        [int]$MaxSize,
 
-    [Parameter(HelpMessage='Enables debug output and skips cleanup at the end of the scan')] 
-        [ValidateNotNullOrEmpty()] 
+    [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')]
+        [ValidateNotNullOrEmpty()]
+        [Alias('E')]
+        [string[]]$Extensions,
+
+    [Parameter(HelpMessage='Enables debug output and skips cleanup at the end of the scan')]
+        [ValidateNotNullOrEmpty()]
         [Alias('D')]
         [switch]$Debugging = $False
 )
@@ -144,19 +150,19 @@ if ( $Args.Count -eq 0 -and $ThunderstormServer -eq "" ) {
 function Write-Log {
     param (
         [Parameter(Mandatory=$True, Position=0, HelpMessage="Log entry")]
-            [ValidateNotNullOrEmpty()] 
+            [ValidateNotNullOrEmpty()]
             [String]$Entry,
 
-        [Parameter(Position=1, HelpMessage="Log file to write into")] 
-            [ValidateNotNullOrEmpty()] 
-            [Alias('SS')]    
+        [Parameter(Position=1, HelpMessage="Log file to write into")]
+            [ValidateNotNullOrEmpty()]
+            [Alias('SS')]
             [IO.FileInfo]$LogFile = "thunderstorm-collector.log",
 
         [Parameter(Position=3, HelpMessage="Level")]
-            [ValidateNotNullOrEmpty()] 
+            [ValidateNotNullOrEmpty()]
             [String]$Level = "Info"
     )
-    
+
     # Indicator 
     $Indicator = "[+]"
     if ( $Level -eq "Warning" ) {
@@ -179,7 +185,7 @@ function Write-Log {
     } else {
         Write-Host "$($Indicator) $($Entry)"
     }
-    
+
     # Log File
     if ( $global:NoLog -eq $False ) {
         "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') $($env:COMPUTERNAME): $Entry" | Out-File -FilePath $LogFile -Append
@@ -219,7 +225,11 @@ if ( $AutoDetectPlatform -ne "" ) {
 }
 
 # URL Creation
-$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync"
+if ( $Source -ne "" ) {
+    Write-Log "Using Source: $($Source)"
+    $SourceParam = "?Source=$Source"
+}
+$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
 
 # ---------------------------------------------------------------------
@@ -227,19 +237,19 @@ Write-Log "Sending to URI: $($Url)" -Level "Debug"
 # ---------------------------------------------------------------------
 $ProgressPreference = "SilentlyContinue"
 try {
-    Get-ChildItem -Path $Folder -File -Recurse -ErrorAction SilentlyContinue | 
+    Get-ChildItem -Path $Folder -File -Recurse -ErrorAction SilentlyContinue |
     ForEach-Object {
         # -------------------------------------------------------------
-        # Filter ------------------------------------------------------        
+        # Filter ------------------------------------------------------
         # Size Check
         if ( ( $_.Length / 1MB ) -gt $($MaxSize) ) {
-            Write-Log "$_ skipped due to size filter" -Level "Debug" 
+            Write-Log "$_ skipped due to size filter" -Level "Debug"
             return
         }
-        # Age Check 
+        # Age Check
         if ( $($MaxAge) -gt 0 ) {
             if ( $_.LastWriteTime -lt (Get-Date).AddDays(-$($MaxAge)) ) {
-                Write-Log "$_ skipped due to age filter" -Level "Debug" 
+                Write-Log "$_ skipped due to age filter" -Level "Debug"
                 return
             }
         }
@@ -253,7 +263,7 @@ try {
 
         # -------------------------------------------------------------
         # Submission --------------------------------------------------
-        
+
         Write-Log "Processing $($_.FullName) ..." -Level "Debug"
         # Reading the file data & preparing the request
         try {
@@ -264,12 +274,12 @@ try {
         $fileEnc = [System.Text.Encoding]::GetEncoding('UTF-8').GetString($fileBytes);
         $boundary = [System.Guid]::NewGuid().ToString();
         $LF = "`r`n";
-        $bodyLines = ( 
+        $bodyLines = (
             "--$boundary",
             "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"",
             "Content-Type: application/octet-stream$LF",
             $fileEnc,
-            "--$boundary--$LF" 
+            "--$boundary--$LF"
         ) -join $LF
 
         # Submitting the request
@@ -280,7 +290,7 @@ try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
                 $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body $bodyLines
                 $StatusCode = [int]$Response.StatusCode
-            } 
+            }
             # Catch all non 200 status codes
             catch {
                 $StatusCode = $_.Exception.Response.StatusCode.value__
@@ -304,8 +314,8 @@ try {
             }
         }
      }
-} catch { 
-    Write-Log "Unknown error during Thunderstorm Collection $_" -Level "Error"   
+} catch {
+    Write-Log "Unknown error during Thunderstorm Collection $_" -Level "Error"
 }
 
 # ---------------------------------------------------------------------

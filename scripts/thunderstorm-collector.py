@@ -7,6 +7,7 @@ import re
 import ssl
 import time
 import uuid
+import socket
 
 # Configuration
 schema = "http"
@@ -206,6 +207,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip TLS verification and proceed without checking.",
     )
+    parser.add_argument(
+        "-S",
+        "--source",
+        default=socket.gethostname(),
+        help="Source identifier to be used in the Thunderstorm submission.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
 
     args = parser.parse_args()
@@ -213,7 +220,11 @@ if __name__ == "__main__":
     if args.tls:
         schema = "https"
 
-    api_endpoint = "{}://{}:{}/api/checkAsync".format(schema, args.server, args.port)
+    source = ""
+    if args.source:
+        source = f"?source={args.source}"
+
+    api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
 
     print("=" * 80)
     print("   Python Thunderstorm Collector")
@@ -227,6 +238,7 @@ if __name__ == "__main__":
     print("Maximum Age of Files: {}".format(max_age))
     print("Maximum File Size: {} MB".format(max_size))
     print("Excluded directories: {}".format(", ".join(hard_skips)))
+    print("Source Identifier: {}".format(args.source)) if args.source else None
     print()
 
     print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
