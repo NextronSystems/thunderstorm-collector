@@ -5,7 +5,7 @@ SETLOCAL EnableDelayedExpansion
 :: THOR Thunderstorm Collector
 :: Windows Batch
 :: Florian Roth
-:: v0.3
+:: v0.4
 :: 
 :: A Windows Batch script that uses a compiled Curl for Windows 
 :: to upload files to a THOR Thunderstorm server

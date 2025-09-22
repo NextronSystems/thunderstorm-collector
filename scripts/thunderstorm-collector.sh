@@ -2,9 +2,9 @@
 #
 # THOR Thunderstorm Bash Collector
 # Florian Roth
-# June 2021
+# September 2025
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # Settings ------------------------------------------------------------
 

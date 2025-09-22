@@ -2,8 +2,8 @@
 #
 # THOR Thunderstorm Collector
 # Florian Roth
-# v0.1
-# April 2021
+# v0.2
+# September 2025
 #
 # Requires LWP::UserAgent
 #   - on Linux: apt-get install libwww-perl

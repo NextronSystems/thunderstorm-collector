@@ -2,9 +2,9 @@
 # Script Title: THOR Thunderstorm Collector
 # Script File Name: thunderstorm-collector.ps1  
 # Author: Florian Roth 
-# Version: 0.1.0
+# Version: 0.2.0
 # Date Created: 07.10.2020  
-# Last Modified: 07.10.2020
+# Last Modified: 22.09.2025
 ################################################## 
 
 #Requires -Version 3
