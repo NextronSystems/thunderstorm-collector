@@ -199,8 +199,16 @@ type infoWithPath struct {
 	retries int
 }
 
-var MB int64 = 1024 * 1024
+const (
+	maxRetries       = 3               // Maximum number of retry attempts for failed uploads
+	baseRetryDelay   = 4 * time.Second // Base delay for exponential backoff
+	maxHashCacheSize = 10000           // Maximum number of entries in file hash cache before clearing
+)
 
+// throttle ensures uploads respect the minimum period between uploads.
+// It uses a mutex to coordinate between goroutines, ensuring only one upload
+// proceeds at a time when rate limiting is enabled. The sleep happens outside
+// the mutex to avoid blocking other goroutines unnecessarily.
 func (c *Collector) throttle() {
 	if c.MinUploadPeriod > 0 {
 		for {
@@ -244,10 +252,10 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	contentType, formData := c.getFileContentAsFormData(f, info.path)
 	response, err := http.Post(c.thunderstormUrl(), contentType, formData)
 	if err != nil {
-		if info.retries < 3 {
+		if info.retries < maxRetries {
 			c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v", info.path, err)
 			info.retries++
-			time.Sleep(4 * time.Second * time.Duration(1<<info.retries))
+			time.Sleep(baseRetryDelay * time.Duration(1<<info.retries))
 			return true
 		} else {
 			c.logger.Printf("Could not send file %s to thunderstorm, canceling it.", info.path)
@@ -333,6 +341,12 @@ func (c *Collector) isFileExcludedDueToMetadata(info *infoWithPath) bool {
 	return false
 }
 
+// isFileExcludedDueToContent checks if a file should be excluded based on its content.
+// The logic is:
+//   - If file extensions are specified and the file matches an extension, it's included
+//   - If extensions are specified but don't match, and magic headers are specified, check magic headers
+//   - If neither extensions nor magic headers match (and at least one is specified), exclude the file
+//   - If no extensions or magic headers are specified, include all files (content-based filtering disabled)
 func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) bool {
 	var extensionWanted bool
 	for _, extension := range c.FileExtensions {
@@ -343,6 +357,9 @@ func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) b
 	}
 
 	var magicHeaderWanted bool
+	// Only check magic headers if:
+	// 1. Magic headers are configured, AND
+	// 2. Either no extensions matched, OR no extensions are configured
 	if len(c.MagicHeaders) > 0 && !extensionWanted {
 		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
 		readLength, err := f.ReadAt(headerBuffer, 0)
@@ -359,14 +376,12 @@ func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) b
 		}
 	}
 
+	// Exclude file if filters are configured but neither extension nor magic header matched
 	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
 		c.debugf("Skipping file %s with unwanted extension and magic header", info.path)
 		return true
 	}
 
-	const (
-		maxHashCacheSize = 10000 // Maximum number of entries in hash cache
-	)
 	if info.Size() > c.MinCacheFileSize {
 		// Always reset file position after hash calculation, regardless of success/failure
 		defer func() {

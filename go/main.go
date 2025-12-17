@@ -84,7 +84,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	}
 
 	if config.Threads < 1 {
-		return cc, errors.New("thread count must be > 0")
+		return cc, errors.New("threads: count must be > 0")
 	}
 
 	if config.MaxAgeInDays != "" {
@@ -103,24 +103,24 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 			case 'd':
 				multiplier = time.Hour * 24
 			default:
-				return cc, fmt.Errorf("invalid suffix for maximum age: %s", config.MaxAgeInDays)
+				return cc, fmt.Errorf("max-age: invalid suffix '%c' in %s (supported: s, m, h, d)", lastChar, config.MaxAgeInDays)
 			}
 			config.MaxAgeInDays = config.MaxAgeInDays[:len(config.MaxAgeInDays)-1]
 		}
 		number, err := strconv.Atoi(config.MaxAgeInDays)
 		if err != nil {
-			return cc, fmt.Errorf("could not parse maximum age %s: %w", config.MaxAgeInDays, err)
+			return cc, fmt.Errorf("max-age: could not parse number from %s: %w", config.MaxAgeInDays, err)
 		}
 		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
 	}
 
 	if config.MaxFileSizeMB < 1 {
-		return cc, errors.New("maximum file size must be > 0")
+		return cc, errors.New("max-filesize: must be > 0")
 	}
 	cc.MaxFileSize = config.MaxFileSizeMB * 1024 * 1024
 
 	if config.Server == "" {
-		return cc, errors.New("thunderstorm Server not specified")
+		return cc, errors.New("thunderstorm-server: not specified")
 	}
 	var protocol string
 	if config.Ssl {
@@ -134,12 +134,16 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	}
 	cc.Server = thunderstormUrl.String()
 
+	const maxMagicHeaderLength = 1024 // Maximum magic header length in bytes
 	whitespaceRegex := regexp.MustCompile(`\s`)
 	for _, hexHeader := range config.MagicHeaders {
 		hexHeader = whitespaceRegex.ReplaceAllString(hexHeader, "")
 		magicHeader, err := hex.DecodeString(hexHeader)
 		if err != nil {
 			return cc, fmt.Errorf("could not parse magic header %s: %w", hexHeader, err)
+		}
+		if len(magicHeader) > maxMagicHeaderLength {
+			return cc, fmt.Errorf("magic header too long (max %d bytes, got %d): %s", maxMagicHeaderLength, len(magicHeader), hexHeader)
 		}
 		cc.MagicHeaders = append(cc.MagicHeaders, magicHeader)
 	}
