@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -26,20 +25,17 @@ func buildHttpTransport(config Config) *http.Transport {
 	for _, ca := range config.CAs {
 		f, err := os.Open(ca)
 		if err != nil {
-			if !caPool.AppendCertsFromPEM([]byte(ca)) {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			continue
+			fmt.Fprintf(os.Stderr, "Could not open CA file %s: %v\n", ca, err)
+			os.Exit(1)
 		}
-		b, err := ioutil.ReadAll(f)
+		b, err := io.ReadAll(f)
 		f.Close()
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintf(os.Stderr, "Could not read CA file %s: %v\n", ca, err)
 			os.Exit(1)
 		}
 		if !caPool.AppendCertsFromPEM(b) {
-			fmt.Fprintln(os.Stderr, "Could not add CA to certificate pool")
+			fmt.Fprintf(os.Stderr, "Could not add CA from file %s to certificate pool\n", ca)
 			os.Exit(1)
 		}
 	}

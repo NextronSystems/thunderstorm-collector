@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net"
@@ -55,7 +54,8 @@ type Collector struct {
 	throttleMutex sync.Mutex
 	lastScanTime  time.Time
 
-	fileHashCache *sync.Map
+	fileHashCache      *sync.Map
+	fileHashCacheCount int64 // Atomic counter for cache size
 }
 
 type CollectionStatistics struct {
@@ -124,8 +124,11 @@ func (c *Collector) CheckThunderstormUp() error {
 		}
 		return err
 	}
-	body, _ := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
+	if err != nil {
+		return fmt.Errorf("could not read response body: %w", err)
+	}
 	if response.StatusCode != 200 {
 		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d: %s", response.StatusCode, body)
 	}
@@ -159,7 +162,12 @@ func (c *Collector) collectPath(root string) {
 			}
 		}
 		if !info.Mode().IsDir() {
-			c.filesToUpload <- infoWithPath{info, path, 0}
+			// Quick metadata check before queuing to avoid unnecessary work
+			if !c.isFileExcludedDueToMetadataQuick(info) {
+				c.filesToUpload <- infoWithPath{info, path, 0}
+			} else {
+				atomic.AddInt64(&c.Statistics.skippedFiles, 1)
+			}
 		} else {
 			if !c.AllFilesystems && SkipFilesystem(path) {
 				c.logger.Printf("Skipping directory %s since it uses a pseudo or network filesystem", path)
@@ -258,7 +266,12 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		time.Sleep(time.Second * time.Duration(retryTime))
 		return true
 	}
-	responseBody, _ := ioutil.ReadAll(response.Body)
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		c.logger.Printf("Could not read response body for file %s: %v", info.path, err)
+		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+		return
+	}
 	if response.StatusCode != http.StatusOK {
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
 		c.logger.Printf("Received error from Thunderstorm for file %s: %d %v\n", info.path, response.StatusCode, string(responseBody))
@@ -275,14 +288,35 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	return
 }
 
+// isFileExcludedDueToMetadataQuick performs a quick metadata check without creating an infoWithPath
+func (c *Collector) isFileExcludedDueToMetadataQuick(info os.FileInfo) bool {
+	if !info.Mode().IsRegular() {
+		return true
+	}
+	isTooOld := true
+	for _, fileTime := range getTimes(info) {
+		if fileTime.After(c.ThresholdTime) {
+			isTooOld = false
+			break
+		}
+	}
+	if isTooOld {
+		return true
+	}
+	if c.MaxFileSize > 0 && c.MaxFileSize < info.Size() {
+		return true
+	}
+	return false
+}
+
 func (c *Collector) isFileExcludedDueToMetadata(info *infoWithPath) bool {
 	if !info.Mode().IsRegular() {
 		c.debugf("Skipping irregular file %s", info.path)
 		return true
 	}
 	isTooOld := true
-	for _, time := range getTimes(info.FileInfo) {
-		if time.After(c.ThresholdTime) {
+	for _, fileTime := range getTimes(info.FileInfo) {
+		if fileTime.After(c.ThresholdTime) {
 			isTooOld = false
 			break
 		}
@@ -330,7 +364,16 @@ func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) b
 		return true
 	}
 
+	const (
+		maxHashCacheSize = 10000 // Maximum number of entries in hash cache
+	)
 	if info.Size() > c.MinCacheFileSize {
+		// Always reset file position after hash calculation, regardless of success/failure
+		defer func() {
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				c.debugf("Could not reset file descriptor for file %s: %v", info.path, err)
+			}
+		}()
 		hashCalculator := sha256.New()
 		if _, err := io.Copy(hashCalculator, f); err == nil {
 			fileHash := string(hashCalculator.Sum(nil))
@@ -338,12 +381,18 @@ func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) b
 				c.debugf("Skipping file %s since a file with the same content was processed previously", info.path)
 				return true
 			}
+			// Check cache size and clear if too large
+			cacheSize := atomic.AddInt64(&c.fileHashCacheCount, 1)
+			if cacheSize > maxHashCacheSize {
+				// Clear cache if it exceeds maximum size
+				// Use CompareAndSwap to ensure only one goroutine clears
+				if atomic.CompareAndSwapInt64(&c.fileHashCacheCount, cacheSize, 0) {
+					c.fileHashCache = &sync.Map{}
+					c.debugf("Cleared file hash cache (exceeded %d entries)", maxHashCacheSize)
+				}
+			}
 		} else {
 			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
-		}
-		// Reset file descriptor after hash calculation
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			c.debugf("Could not reset file descriptor for file %s: %v", info.path, err)
 		}
 	}
 	return false
@@ -373,14 +422,20 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 		abspath = filename
 	}
 	go func() {
+		defer multipartWriter.Close()
 		fw, err := w.CreateFormFile("file", abspath)
-		if err == nil {
-			if _, err := io.Copy(fw, f); err != nil {
-				c.debugf("Could not copy file content of %s to form writer: %v", filename, err)
-			}
+		if err != nil {
+			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %w", err))
+			return
 		}
-		w.Close()
-		multipartWriter.Close()
+		if _, err := io.Copy(fw, f); err != nil {
+			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %w", err))
+			return
+		}
+		if err := w.Close(); err != nil {
+			multipartWriter.CloseWithError(fmt.Errorf("could not close multipart writer: %w", err))
+			return
+		}
 	}()
 	return w.FormDataContentType(), multipartReader
 }
