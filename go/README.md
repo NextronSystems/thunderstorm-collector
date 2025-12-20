@@ -164,8 +164,8 @@ Files larger than the `--min-cache-file-size` threshold are hashed using SHA256 
 
 ### Build requirements
 
-- Go version 1.16 or higher (required for `io.ReadAll` and `os.ReadFile` functions)
-  - Note: The codebase uses modern Go features and has been updated to remove deprecated `ioutil` package usage
+- Go version 1.15 or higher
+  - Note: We maintain Go 1.15 compatibility to support older systems (Windows XP, old Linux). The codebase uses `ioutil` functions which work in all Go versions, though they are deprecated in Go 1.16+.
 - make
 
 [Here](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-debian-10) is an instruction on how to install Go on Debian. Install make with `sudo apt install make`.
