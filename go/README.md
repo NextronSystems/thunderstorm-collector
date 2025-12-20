@@ -164,7 +164,7 @@ Files larger than the `--min-cache-file-size` threshold are hashed using SHA256 
 
 ### Build requirements
 
-- Go version 1.15 or higher (older versions may work, but are not tested)
+- Go version 1.16 or higher (required for `io.ReadAll` and `os.ReadFile` functions)
   - Note: The codebase uses modern Go features and has been updated to remove deprecated `ioutil` package usage
 - make
 

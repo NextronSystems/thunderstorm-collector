@@ -1,6 +1,6 @@
 module github.com/NextronSystems/thunderstorm-collector/go
 
-go 1.15
+go 1.16
 
 require (
 	github.com/bmatcuk/doublestar/v3 v3.0.0
