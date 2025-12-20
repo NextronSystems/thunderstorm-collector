@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net"
@@ -124,7 +125,7 @@ func (c *Collector) CheckThunderstormUp() error {
 		}
 		return err
 	}
-	body, err := io.ReadAll(response.Body)
+	body, err := ioutil.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil {
 		return fmt.Errorf("could not read response body: %w", err)
@@ -274,7 +275,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		time.Sleep(time.Second * time.Duration(retryTime))
 		return true
 	}
-	responseBody, err := io.ReadAll(response.Body)
+	responseBody, err := ioutil.ReadAll(response.Body)
 	if err != nil {
 		c.logger.Printf("Could not read response body for file %s: %v", info.path, err)
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)

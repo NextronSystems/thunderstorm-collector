@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime"
 	"mime/multipart"
@@ -73,7 +74,7 @@ func collectSendAndReceive(cc CollectorConfig, t *testing.T) ([]filedata, Collec
 			return
 		}
 		receivedFile := filedata{path: getFileName(part)}
-		receivedFile.content, err = io.ReadAll(part)
+		receivedFile.content, err = ioutil.ReadAll(part)
 		if err != nil {
 			t.Fatalf("Failed to read multipart file")
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -149,7 +150,7 @@ func TestUpload(t *testing.T) {
 				MagicHeaders: [][]byte{{0xff, 0xd8, 0xff}},
 			},
 			[]filedata{
-				{"nextron250.jpg", func() []byte { b, _ := os.ReadFile("testdata/nextron250.jpg"); return b }()},
+				{"nextron250.jpg", func() []byte { b, _ := ioutil.ReadFile("testdata/nextron250.jpg"); return b }()},
 			},
 			CollectionStatistics{
 				uploadedFiles: 1,

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -28,7 +29,7 @@ func buildHttpTransport(config Config) *http.Transport {
 			fmt.Fprintf(os.Stderr, "Could not open CA file %s: %v\n", ca, err)
 			os.Exit(1)
 		}
-		b, err := io.ReadAll(f)
+		b, err := ioutil.ReadAll(f)
 		f.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Could not read CA file %s: %v\n", ca, err)
