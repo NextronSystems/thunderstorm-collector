@@ -82,6 +82,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		Source:           config.Source,
 		MinCacheFileSize: config.MinCacheFileSize * 1024 * 1024,
 		AllFilesystems:   config.AllFilesystems,
+		DryRun:           config.DryRun,
 	}
 
 	if config.Threads < 1 {
@@ -120,20 +121,24 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	}
 	cc.MaxFileSize = config.MaxFileSizeMB * 1024 * 1024
 
-	if config.Server == "" {
-		return cc, errors.New("thunderstorm-server: not specified")
+	if config.Server == "" && !config.DryRun {
+		return cc, errors.New("thunderstorm-server: not specified (required unless using --dry-run)")
 	}
-	var protocol string
-	if config.Ssl {
-		protocol = "https"
+	if !config.DryRun {
+		var protocol string
+		if config.Ssl {
+			protocol = "https"
+		} else {
+			protocol = "http"
+		}
+		thunderstormUrl := &url.URL{
+			Scheme: protocol,
+			Host:   fmt.Sprintf("%s:%d", config.Server, config.Port),
+		}
+		cc.Server = thunderstormUrl.String()
 	} else {
-		protocol = "http"
+		cc.Server = "dry-run://localhost" // Placeholder for dry-run mode
 	}
-	thunderstormUrl := &url.URL{
-		Scheme: protocol,
-		Host:   fmt.Sprintf("%s:%d", config.Server, config.Port),
-	}
-	cc.Server = thunderstormUrl.String()
 
 	const maxMagicHeaderLength = 1024 // Maximum magic header length in bytes
 	whitespaceRegex := regexp.MustCompile(`\s`)
@@ -194,10 +199,14 @@ func main() {
 	}
 	logger := log.New(output, "", log.Ldate|log.Ltime)
 	collector := NewCollector(collectorConfig, logger)
-	if err := collector.CheckThunderstormUp(); err != nil {
-		logger.Print("Could not successfully connect to Thunderstorm")
-		logger.Print(err)
-		os.Exit(1)
+	if !config.DryRun {
+		if err := collector.CheckThunderstormUp(); err != nil {
+			logger.Print("Could not successfully connect to Thunderstorm")
+			logger.Print(err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Print("DRY-RUN mode: Files will be collected but not sent to Thunderstorm")
 	}
 	if config.Debug {
 		if len(collectorConfig.FileExtensions) > 0 {

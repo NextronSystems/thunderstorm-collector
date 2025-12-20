@@ -27,6 +27,7 @@ type Config struct {
 	AllFilesystems   bool     `yaml:"all-filesystems" description:"Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'"`
 	UploadsPerMinute int      `yaml:"uploads-per-minute" description:"Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays."`
 	MinCacheFileSize int64    `yaml:"min-cache-file-size" description:"Upload files with at least the given size (in MB) only once, skipping them when re-encountering them."`
+	DryRun           bool     `yaml:"dry-run" description:"Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected."`
 	Template         string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help             bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }

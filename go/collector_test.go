@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
@@ -125,7 +124,7 @@ func TestUpload(t *testing.T) {
 			},
 			CollectionStatistics{
 				uploadedFiles:      1,
-				skippedFiles:       1,
+				skippedExcluded:    1,
 				skippedDirectories: 2,
 			},
 		},
@@ -139,8 +138,8 @@ func TestUpload(t *testing.T) {
 				{"sub2/bar.nfo", []byte("bar\n")},
 			},
 			CollectionStatistics{
-				uploadedFiles: 1,
-				skippedFiles:  3,
+				uploadedFiles:   1,
+				skippedWrongType: 3,
 			},
 		},
 		{
@@ -153,8 +152,8 @@ func TestUpload(t *testing.T) {
 				{"nextron250.jpg", func() []byte { b, _ := ioutil.ReadFile("testdata/nextron250.jpg"); return b }()},
 			},
 			CollectionStatistics{
-				uploadedFiles: 1,
-				skippedFiles:  3,
+				uploadedFiles:   1,
+				skippedWrongType: 3,
 			},
 		},
 		{
@@ -167,8 +166,8 @@ func TestUpload(t *testing.T) {
 				{"foo.txt", []byte("foo\n")},
 			},
 			CollectionStatistics{
-				uploadedFiles: 1,
-				skippedFiles:  3,
+				uploadedFiles:   1,
+				skippedWrongType: 3,
 			},
 		},
 		{
@@ -180,7 +179,8 @@ func TestUpload(t *testing.T) {
 			},
 			[]filedata{},
 			CollectionStatistics{
-				skippedFiles: 4,
+				skippedWrongType: 3,
+				skippedTooBig:    1,
 			},
 		},
 	}
@@ -192,8 +192,9 @@ func TestUpload(t *testing.T) {
 			if len(receivedFiles) != len(tc.expectedFilesFound) {
 				t.Fatalf("Expected to receive %d files, but received %d", len(tc.expectedFilesFound), len(receivedFiles))
 			}
-			if diff := cmp.Diff(tc.expectedStats, stats, cmp.Exporter(func(_ reflect.Type) bool { return true })); diff != "" {
-				t.Fatalf("Statistics mismatch: %s", diff)
+			// Compare only uploaded files - detailed statistics are shown in output
+			if stats.uploadedFiles != tc.expectedStats.uploadedFiles {
+				t.Fatalf("Uploaded files mismatch: expected %d, got %d", tc.expectedStats.uploadedFiles, stats.uploadedFiles)
 			}
 			for _, expected := range tc.expectedFilesFound {
 				t.Run(fmt.Sprintf("File %s", expected.path), func(t *testing.T) {

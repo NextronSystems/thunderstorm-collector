@@ -10,7 +10,8 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
                                      Specify multiple CAs by using this flag multiple times.
-      --debug                        Print debugging information.
+      --debug                        Print debugging information. Shows detailed information about each file processed, including why files are skipped or would be sent.
+      --dry-run                      Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode.
       --exclude strings              Paths that should be excluded. Supports globbing with ?, * and **.
                                      Specify multiple excludes by using this flag multiple times.
                                      Example: --exclude C:\tools --exclude C:\Users\**\.git\**
@@ -41,6 +42,7 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
   -r, --threads int                  How many threads should upload files simultaneously. (default 1)
   -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
                                      Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
+                                     Note: Not required when using --dry-run mode.
       --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files.
       --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
 ```
@@ -222,11 +224,80 @@ Upload synchronously and write the results to a log file:
 ./amd64-linux-thunderstorm-collector -s thunderstorm.test -l collector.log --upload-synchronous
 ```
 
+Test collection without sending files (dry-run mode, no server required):
+```
+./amd64-linux-thunderstorm-collector --dry-run --debug -p /path/to/scan
+```
+
+### Collection Statistics
+
+At the end of each collection run, the collector displays comprehensive statistics:
+
+```
+=== Collection Statistics ===
+
+Files discovered during walk: 1234
+
+Exclusions:
+  - Too big (exceeds max-filesize): 45
+  - Wrong type (no matching extension/magic): 234
+  - Too old (exceeds max-age): 12
+  - Irregular file type: 3
+  - Duplicate (same content hash): 56
+  - Excluded by glob pattern: 78
+  - Skipped directories: 23
+
+Processing:
+  - Successfully uploaded: 763
+  - Read/transmission errors: 2
+
+Timing:
+  - File system walk: 2.5s
+  - Reading files: 1.2s
+  - Hashing files: 0.8s
+  - Transmitting files: 45.3s
+  - Total time: 50.1s
+```
+
+**Statistics include:**
+- Total files discovered during filesystem walk
+- Detailed breakdown of exclusions by reason (size, type, age, duplicates, etc.)
+- Processing results (successful uploads, errors)
+- Timing breakdown for different phases (walk, read, hash, transmit)
+
+**Debug Mode:**
+When `--debug` is enabled, the collector prints detailed information for every file:
+- Files that would be sent (with DRY-RUN indicator in dry-run mode)
+- Files that are skipped with specific reasons (too big, wrong type, too old, duplicate, etc.)
+
+This makes it easy to understand why files are included or excluded from collection.
+
+### Dry-Run Mode
+
+The `--dry-run` flag allows you to test collection behavior without actually sending files to Thunderstorm:
+
+**Benefits:**
+- Test collection without network connectivity
+- Preview what files would be collected before running a real scan
+- Validate configuration without sending data
+- No server connection required
+
+**Usage:**
+```bash
+./amd64-linux-thunderstorm-collector --dry-run -p /path/to/scan
+```
+
+In dry-run mode:
+- Server connection check is skipped
+- Files are discovered, filtered, and processed normally
+- No actual HTTP requests are made
+- Statistics show "would be sent (dry-run)" instead of "uploaded"
+
 ### Troubleshooting
 
 #### Common Error Messages
 
-- **"thunderstorm-server: not specified"**: The `--thunderstorm-server` parameter is required. Make sure to specify the server address.
+- **"thunderstorm-server: not specified"**: The `--thunderstorm-server` parameter is required (unless using `--dry-run`). Make sure to specify the server address or use `--dry-run` for testing.
 - **"threads: count must be > 0"**: The thread count must be at least 1. Use `-r 1` or higher.
 - **"max-filesize: must be > 0"**: The maximum file size must be greater than 0 MB.
 - **"max-age: invalid suffix"**: The max-age parameter supports suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Example: `--max-age 10h`
