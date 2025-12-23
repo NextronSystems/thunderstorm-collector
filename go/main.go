@@ -21,6 +21,8 @@ import (
 	"unicode/utf8"
 )
 
+const maxMagicHeaderLength = 1024 // Maximum magic header length in bytes
+
 func buildHttpTransport(config Config) *http.Transport {
 	caPool := x509.NewCertPool()
 	for _, ca := range config.CAs {
@@ -140,7 +142,6 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		cc.Server = "dry-run://localhost" // Placeholder for dry-run mode
 	}
 
-	const maxMagicHeaderLength = 1024 // Maximum magic header length in bytes
 	whitespaceRegex := regexp.MustCompile(`\s`)
 	for _, hexHeader := range config.MagicHeaders {
 		hexHeader = whitespaceRegex.ReplaceAllString(hexHeader, "")

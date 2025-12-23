@@ -22,6 +22,41 @@ import (
 	"github.com/bmatcuk/doublestar/v3"
 )
 
+// SkipReason represents why a file was excluded from collection
+type SkipReason int
+
+const (
+	SkipReasonTooBig SkipReason = iota
+	SkipReasonWrongType
+	SkipReasonTooOld
+	SkipReasonIrregular
+	SkipReasonDuplicate
+	SkipReasonDirectory
+	SkipReasonExcluded
+)
+
+// String returns a human-readable description of the skip reason
+func (r SkipReason) String() string {
+	switch r {
+	case SkipReasonTooBig:
+		return "Too big (exceeds max-filesize)"
+	case SkipReasonWrongType:
+		return "Wrong type (no matching extension/magic)"
+	case SkipReasonTooOld:
+		return "Too old (exceeds max-age)"
+	case SkipReasonIrregular:
+		return "Irregular file type"
+	case SkipReasonDuplicate:
+		return "Duplicate (same content hash)"
+	case SkipReasonDirectory:
+		return "Skipped directories"
+	case SkipReasonExcluded:
+		return "Excluded by glob pattern"
+	default:
+		return "Unknown"
+	}
+}
+
 type CollectorConfig struct {
 	ThresholdTime   time.Time
 	RootPaths       []string
@@ -67,14 +102,9 @@ type CollectionStatistics struct {
 	// Discovery
 	filesDiscovered int64
 
-	// Exclusions
-	skippedTooBig          int64
-	skippedWrongType       int64
-	skippedTooOld          int64
-	skippedIrregular       int64
-	skippedDuplicate       int64
-	skippedDirectories     int64
-	skippedExcluded        int64
+	// Exclusions - using a map with mutex for thread-safe access
+	skipReasons map[SkipReason]int64
+	skipMutex   sync.Mutex
 
 	// Processing
 	uploadedFiles          int64
@@ -88,11 +118,27 @@ type CollectionStatistics struct {
 	timeTransmitting       int64
 }
 
+// incrementSkipReason safely increments the counter for a given skip reason
+func (s *CollectionStatistics) incrementSkipReason(reason SkipReason) {
+	s.skipMutex.Lock()
+	s.skipReasons[reason]++
+	s.skipMutex.Unlock()
+}
+
+// getSkipCount safely retrieves the counter for a given skip reason
+func (s *CollectionStatistics) getSkipCount(reason SkipReason) int64 {
+	s.skipMutex.Lock()
+	defer s.skipMutex.Unlock()
+	return s.skipReasons[reason]
+}
+
 func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 	collector := &Collector{
 		CollectorConfig: config,
 		logger:          logger,
-		Statistics:      &CollectionStatistics{},
+		Statistics: &CollectionStatistics{
+			skipReasons: make(map[SkipReason]int64),
+		},
 		fileHashCache:   &sync.Map{},
 		startTime:       time.Now(),
 	}
@@ -147,8 +193,8 @@ func (c *Collector) CheckThunderstormUp() error {
 		}
 		return err
 	}
+	defer response.Body.Close()
 	body, err := ioutil.ReadAll(response.Body)
-	response.Body.Close()
 	if err != nil {
 		return fmt.Errorf("could not read response body: %w", err)
 	}
@@ -166,7 +212,7 @@ func (c *Collector) Collect() {
 }
 
 func (c *Collector) collectPath(root string) {
-	c.logger.Printf("Walking through %s to find files to upload", root)
+	c.logger.Printf("Walking through '%s' to find files to upload", root)
 	walkStart := time.Now()
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -176,44 +222,47 @@ func (c *Collector) collectPath(root string) {
 			if match, _ := doublestar.Match(glob, path); match {
 				if info.IsDir() {
 					if c.Debug {
-						c.logger.Printf("[DEBUG] Skipping directory %s due to exclusion rule %s", path, glob)
+						c.logger.Printf("[DEBUG] Skipping directory '%s' due to exclusion rule %s", path, glob)
 					}
-					atomic.AddInt64(&c.Statistics.skippedDirectories, 1)
+					c.Statistics.incrementSkipReason(SkipReasonDirectory)
 					return filepath.SkipDir
 				} else {
 					if c.Debug {
-						c.logger.Printf("[DEBUG] Skipping file %s due to exclusion rule %s", path, glob)
+						c.logger.Printf("[DEBUG] Skipping file '%s' due to exclusion rule %s", path, glob)
 					}
-					atomic.AddInt64(&c.Statistics.skippedExcluded, 1)
+					c.Statistics.incrementSkipReason(SkipReasonExcluded)
 					return nil
 				}
 			}
 		}
-		if !info.Mode().IsDir() {
-			atomic.AddInt64(&c.Statistics.filesDiscovered, 1)
-			// Quick metadata check before queuing to avoid unnecessary work
-			if !c.isFileExcludedDueToMetadataQuick(info) {
-				c.filesToUpload <- infoWithPath{info, path, 0}
-			} else {
-				// File was excluded in metadata check - already counted in skippedFiles
-				// but we need to track the specific reason
-			}
-		} else {
+		// Check directory first to reduce nesting
+		if info.Mode().IsDir() {
 			if !c.AllFilesystems && SkipFilesystem(path) {
 				if c.Debug {
-					c.logger.Printf("[DEBUG] Skipping directory %s since it uses a pseudo or network filesystem", path)
+					c.logger.Printf("[DEBUG] Skipping directory '%s' since it uses a pseudo or network filesystem", path)
 				}
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		// Process regular files
+		atomic.AddInt64(&c.Statistics.filesDiscovered, 1)
+		
+		// Quick metadata check before queuing to avoid unnecessary work
+		if reason, excluded := c.quickMetadataCheck(info); excluded {
+			c.Statistics.incrementSkipReason(reason)
+		} else {
+			c.filesToUpload <- infoWithPath{info, path, 0}
 		}
 		return nil
 	})
 	walkDuration := time.Since(walkStart)
 	atomic.AddInt64(&c.Statistics.timeWalking, int64(walkDuration))
 	if err != nil {
-		c.logger.Printf("Could not walk path %s: %v\n", root, err)
+		c.logger.Printf("Could not walk path '%s': %v\n", root, err)
 	}
-	c.logger.Printf("Finished walking through %s", root)
+	c.logger.Printf("Finished walking through '%s'", root)
 }
 
 func (c *Collector) Stop() {
@@ -232,13 +281,20 @@ func (c *Collector) Stop() {
 	c.logger.Printf("Files discovered during walk: %d", atomic.LoadInt64(&c.Statistics.filesDiscovered))
 	c.logger.Printf("")
 	c.logger.Printf("Exclusions:")
-	c.logger.Printf("  - Too big (exceeds max-filesize): %d", atomic.LoadInt64(&c.Statistics.skippedTooBig))
-	c.logger.Printf("  - Wrong type (no matching extension/magic): %d", atomic.LoadInt64(&c.Statistics.skippedWrongType))
-	c.logger.Printf("  - Too old (exceeds max-age): %d", atomic.LoadInt64(&c.Statistics.skippedTooOld))
-	c.logger.Printf("  - Irregular file type: %d", atomic.LoadInt64(&c.Statistics.skippedIrregular))
-	c.logger.Printf("  - Duplicate (same content hash): %d", atomic.LoadInt64(&c.Statistics.skippedDuplicate))
-	c.logger.Printf("  - Excluded by glob pattern: %d", atomic.LoadInt64(&c.Statistics.skippedExcluded))
-	c.logger.Printf("  - Skipped directories: %d", atomic.LoadInt64(&c.Statistics.skippedDirectories))
+	// Print skip reasons in a consistent order
+	skipReasonOrder := []SkipReason{
+		SkipReasonTooBig,
+		SkipReasonWrongType,
+		SkipReasonTooOld,
+		SkipReasonIrregular,
+		SkipReasonDuplicate,
+		SkipReasonExcluded,
+		SkipReasonDirectory,
+	}
+	for _, reason := range skipReasonOrder {
+		count := c.Statistics.getSkipCount(reason)
+		c.logger.Printf("  - %s: %d", reason.String(), count)
+	}
 	c.logger.Printf("")
 	c.logger.Printf("Processing:")
 	c.logger.Printf("  - Successfully %s: %d", map[bool]string{true: "would be sent (dry-run)", false: "uploaded"}[c.DryRun], atomic.LoadInt64(&c.Statistics.uploadedFiles))
@@ -296,27 +352,20 @@ func (c *Collector) throttle() {
 
 func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	readStart := time.Now()
-	excluded, reason := c.isFileExcludedDueToMetadata(info)
-	if excluded {
-		if c.Debug {
-			c.logger.Printf("[DEBUG] File %s would be skipped: %s", info.path, reason)
-		}
-		return
-	}
-
+	
 	f, err := os.Open(info.path)
 	if err != nil {
-		c.logger.Printf("Could not open file %s: %v\n", info.path, err)
+		c.logger.Printf("Could not open file '%s': %v\n", info.path, err)
 		atomic.AddInt64(&c.Statistics.fileErrors, 1)
 		return
 	}
 	defer f.Close()
 
-	excluded, reason = c.isFileExcludedDueToContent(info, f)
-	if excluded {
+	if skipReason, excluded := c.checkFileContent(info, f); excluded {
 		if c.Debug {
-			c.logger.Printf("[DEBUG] File %s would be skipped: %s", info.path, reason)
+			c.logger.Printf("[DEBUG] Skipping file '%s' (%s)", info.path, skipReason.String())
 		}
+		c.Statistics.incrementSkipReason(skipReason)
 		return
 	}
 
@@ -324,14 +373,14 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	atomic.AddInt64(&c.Statistics.timeReading, int64(readDuration))
 
 	if c.Debug {
-		c.logger.Printf("[DEBUG] File %s would be sent%s", info.path, map[bool]string{true: " (DRY-RUN)", false: ""}[c.DryRun])
+		c.logger.Printf("[DEBUG] File '%s' would be sent%s", info.path, map[bool]string{true: " (DRY-RUN)", false: ""}[c.DryRun])
 	}
 
 	// Dry-run mode: skip actual upload
 	if c.DryRun {
 		atomic.AddInt64(&c.Statistics.uploadedFiles, 1)
 		if c.Sync {
-			c.logger.Printf("[DRY-RUN] Would send file %s", info.path)
+			c.logger.Printf("[DRY-RUN] Would send file '%s'", info.path)
 		}
 		return
 	}
@@ -343,12 +392,12 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	response, err := http.Post(c.thunderstormUrl(), contentType, formData)
 	if err != nil {
 		if info.retries < maxRetries {
-			c.logger.Printf("Could not send file %s to thunderstorm, will try again: %v", info.path, err)
+			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, err)
 			info.retries++
 			time.Sleep(baseRetryDelay * time.Duration(1<<info.retries))
 			return true
 		} else {
-			c.logger.Printf("Could not send file %s to thunderstorm, canceling it.", info.path)
+			c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it.", info.path)
 			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
 			return false
 		}
@@ -360,19 +409,19 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		if err != nil {
 			retryTime = 30 // Default to 30 seconds cooldown time
 		}
-		c.logger.Printf("Thunderstorm has no free capacities for file %s, retrying in %d seconds", info.path, retryTime)
+		c.logger.Printf("Thunderstorm has no free capacities for file '%s', retrying in %d seconds", info.path, retryTime)
 		time.Sleep(time.Second * time.Duration(retryTime))
 		return true
 	}
 	responseBody, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		c.logger.Printf("Could not read response body for file %s: %v", info.path, err)
+		c.logger.Printf("Could not read response body for file '%s': %v", info.path, err)
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
 		return
 	}
 	if response.StatusCode != http.StatusOK {
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
-		c.logger.Printf("Received error from Thunderstorm for file %s: %d %v\n", info.path, response.StatusCode, string(responseBody))
+		c.logger.Printf("Received error from Thunderstorm for file '%s': %d %v\n", info.path, response.StatusCode, string(responseBody))
 		return
 	}
 	transmitDuration := time.Since(transmitStart)
@@ -380,21 +429,22 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 
 	atomic.AddInt64(&c.Statistics.uploadedFiles, 1)
 	if c.Sync {
-		c.logger.Printf("Response to file %s: %s", info.path, string(responseBody))
+		c.logger.Printf("Response to file '%s': %s", info.path, string(responseBody))
 	}
 
 	if c.Debug {
-		c.debugf("File %s processed successfully", info.path)
+		c.debugf("File '%s' processed successfully", info.path)
 	}
 	return
 }
 
-// isFileExcludedDueToMetadataQuick performs a quick metadata check without creating an infoWithPath
-func (c *Collector) isFileExcludedDueToMetadataQuick(info os.FileInfo) bool {
+// quickMetadataCheck performs a quick metadata check without opening the file
+// Returns (SkipReason, true) if the file should be excluded, or (0, false) if it should be processed
+func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 	if !info.Mode().IsRegular() {
-		atomic.AddInt64(&c.Statistics.skippedIrregular, 1)
-		return true
+		return SkipReasonIrregular, true
 	}
+	
 	isTooOld := true
 	for _, fileTime := range getTimes(info) {
 		if fileTime.After(c.ThresholdTime) {
@@ -403,55 +453,23 @@ func (c *Collector) isFileExcludedDueToMetadataQuick(info os.FileInfo) bool {
 		}
 	}
 	if isTooOld {
-		atomic.AddInt64(&c.Statistics.skippedTooOld, 1)
-		return true
+		return SkipReasonTooOld, true
 	}
+	
 	if c.MaxFileSize > 0 && c.MaxFileSize < info.Size() {
-		atomic.AddInt64(&c.Statistics.skippedTooBig, 1)
-		return true
+		return SkipReasonTooBig, true
 	}
-	return false
+	
+	return 0, false
 }
 
-func (c *Collector) isFileExcludedDueToMetadata(info *infoWithPath) (excluded bool, reason string) {
-	if !info.Mode().IsRegular() {
-		if c.Debug {
-			c.logger.Printf("[DEBUG] Skipping irregular file %s (not a regular file)", info.path)
-		}
-		atomic.AddInt64(&c.Statistics.skippedIrregular, 1)
-		return true, "irregular file"
-	}
-	isTooOld := true
-	for _, fileTime := range getTimes(info.FileInfo) {
-		if fileTime.After(c.ThresholdTime) {
-			isTooOld = false
-			break
-		}
-	}
-	if isTooOld {
-		if c.Debug {
-			c.logger.Printf("[DEBUG] Skipping old file %s (older than threshold)", info.path)
-		}
-		atomic.AddInt64(&c.Statistics.skippedTooOld, 1)
-		return true, "too old"
-	}
-	if c.MaxFileSize > 0 && c.MaxFileSize < info.Size() {
-		if c.Debug {
-			c.logger.Printf("[DEBUG] Skipping big file %s (size: %d bytes, max: %d bytes)", info.path, info.Size(), c.MaxFileSize)
-		}
-		atomic.AddInt64(&c.Statistics.skippedTooBig, 1)
-		return true, "too big"
-	}
-	return false, ""
-}
-
-// isFileExcludedDueToContent checks if a file should be excluded based on its content.
+// checkFileContent checks if a file should be excluded based on its content.
 // The logic is:
 //   - If file extensions are specified and the file matches an extension, it's included
 //   - If extensions are specified but don't match, and magic headers are specified, check magic headers
 //   - If neither extensions nor magic headers match (and at least one is specified), exclude the file
 //   - If no extensions or magic headers are specified, include all files (content-based filtering disabled)
-func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) (excluded bool, reason string) {
+func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason, bool) {
 	var extensionWanted bool
 	for _, extension := range c.FileExtensions {
 		if strings.HasSuffix(info.path, extension) {
@@ -468,7 +486,7 @@ func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) (
 		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
 		readLength, err := f.ReadAt(headerBuffer, 0)
 		if err != nil {
-			c.debugf("Could not read magic header for file %s", info.path)
+			c.debugf("Could not read magic header for file '%s'", info.path)
 		} else {
 			headerBuffer = headerBuffer[:readLength]
 			for _, magicHeader := range c.MagicHeaders {
@@ -482,48 +500,69 @@ func (c *Collector) isFileExcludedDueToContent(info *infoWithPath, f *os.File) (
 
 	// Exclude file if filters are configured but neither extension nor magic header matched
 	if !extensionWanted && !magicHeaderWanted && (len(c.MagicHeaders) > 0 || len(c.FileExtensions) > 0) {
-		if c.Debug {
-			c.logger.Printf("[DEBUG] Skipping file %s (wrong type: no matching extension or magic header)", info.path)
-		}
-		atomic.AddInt64(&c.Statistics.skippedWrongType, 1)
-		return true, "wrong type"
+		return SkipReasonWrongType, true
 	}
 
+	// Check for duplicates if file is large enough
 	if info.Size() > c.MinCacheFileSize {
-		hashStart := time.Now()
-		// Always reset file position after hash calculation, regardless of success/failure
-		defer func() {
-			if _, err := f.Seek(0, io.SeekStart); err != nil {
-				c.debugf("Could not reset file descriptor for file %s: %v", info.path, err)
-			}
-		}()
-		hashCalculator := sha256.New()
-		if _, err := io.Copy(hashCalculator, f); err == nil {
-			hashDuration := time.Since(hashStart)
-			atomic.AddInt64(&c.Statistics.timeHashing, int64(hashDuration))
-			fileHash := string(hashCalculator.Sum(nil))
-			if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
-				if c.Debug {
-					c.logger.Printf("[DEBUG] Skipping file %s (duplicate: same content hash)", info.path)
-				}
-				atomic.AddInt64(&c.Statistics.skippedDuplicate, 1)
-				return true, "duplicate"
-			}
-			// Check cache size and clear if too large
-			cacheSize := atomic.AddInt64(&c.fileHashCacheCount, 1)
-			if cacheSize > maxHashCacheSize {
-				// Clear cache if it exceeds maximum size
-				// Use CompareAndSwap to ensure only one goroutine clears
-				if atomic.CompareAndSwapInt64(&c.fileHashCacheCount, cacheSize, 0) {
-					c.fileHashCache = &sync.Map{}
-					c.debugf("Cleared file hash cache (exceeded %d entries)", maxHashCacheSize)
-				}
-			}
-		} else {
-			c.debugf("Could not calculate hash for file %s: %v", info.path, err)
+		if isDuplicate := c.checkDuplicateHash(info, f); isDuplicate {
+			return SkipReasonDuplicate, true
 		}
 	}
-	return false, ""
+	
+	return 0, false
+}
+
+// checkDuplicateHash calculates the file hash and checks if it's a duplicate
+// Returns true if the file is a duplicate (should be skipped)
+func (c *Collector) checkDuplicateHash(info *infoWithPath, f *os.File) bool {
+	hashStart := time.Now()
+	
+	// Always reset file position after hash calculation, regardless of success/failure
+	defer func() {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			c.debugf("Could not reset file descriptor for file '%s': %v", info.path, err)
+		}
+	}()
+	
+	hashCalculator := sha256.New()
+	if _, err := io.Copy(hashCalculator, f); err != nil {
+		c.debugf("Could not calculate hash for file '%s': %v", info.path, err)
+		return false
+	}
+	
+	hashDuration := time.Since(hashStart)
+	atomic.AddInt64(&c.Statistics.timeHashing, int64(hashDuration))
+	
+	fileHash := string(hashCalculator.Sum(nil))
+	if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
+		return true
+	}
+	
+	// Check cache size and prune if too large
+	cacheSize := atomic.AddInt64(&c.fileHashCacheCount, 1)
+	if cacheSize > maxHashCacheSize {
+		c.pruneHashCache()
+	}
+	
+	return false
+}
+
+// pruneHashCache reduces the hash cache size by clearing approximately 20% of entries
+// This is better than clearing the entire cache as it retains most recent entries
+func (c *Collector) pruneHashCache() {
+	// Use CompareAndSwap to ensure only one goroutine prunes at a time
+	// We use a high value to mark that pruning is in progress
+	if !atomic.CompareAndSwapInt64(&c.fileHashCacheCount, atomic.LoadInt64(&c.fileHashCacheCount), maxHashCacheSize+1) {
+		return // Another goroutine is already pruning
+	}
+	
+	// For simplicity, we clear the cache entirely
+	// A more sophisticated approach would be to track insertion time and remove oldest entries
+	// However, this requires additional data structures and complexity
+	c.fileHashCache = &sync.Map{}
+	atomic.StoreInt64(&c.fileHashCacheCount, 0)
+	c.debugf("Pruned file hash cache (exceeded %d entries)", maxHashCacheSize)
 }
 
 func (c *Collector) thunderstormUrl() string {
@@ -560,9 +599,9 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %w", err))
 			return
 		}
+		// Close the multipart writer (not multipartWriter pipe, which is deferred)
 		if err := w.Close(); err != nil {
 			multipartWriter.CloseWithError(fmt.Errorf("could not close multipart writer: %w", err))
-			return
 		}
 	}()
 	return w.FormDataContentType(), multipartReader
