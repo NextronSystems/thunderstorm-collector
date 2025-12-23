@@ -13,6 +13,19 @@ This repository features:
 
 For a comprehensive guide on each collector, refer to the linked subdirectories.
 
+## Building the Go Collector
+
+To build the Thunderstorm Collector from source:
+
+```bash
+cd go
+make        # Build for your current platform
+make all    # Build binaries for all platforms
+make release # Create distribution packages for all platforms
+```
+
+For more build options, run `make help` in the `go/` directory.
+
 ## Which Collector Should You Choose?
 
 The Thunderstorm Collector in Go is our top recommendation. Opt for the scripts only when running a compiled binary isn't feasible, as in highly-sensitive settings or on unsupported platforms like proprietary OS IOT devices.
