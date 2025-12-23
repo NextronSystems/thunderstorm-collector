@@ -15,7 +15,7 @@ type Config struct {
 	Port             int      `yaml:"port" description:"Port on the Thunderstorm Server to which files should be uploaded."`
 	Ssl              bool     `yaml:"ssl" description:"If true, connect to the Thunderstorm Server using HTTPS instead of HTTP."`
 	Sync             bool     `yaml:"upload-synchronous" description:"Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files."`
-	Debug            bool     `yaml:"debug" description:"Print debugging information."`
+	Debug            bool     `yaml:"debug" description:"Print debugging information. Shows detailed information about each file processed, including why files are skipped or would be sent."`
 	Threads          int      `yaml:"threads" description:"How many threads should upload files simultaneously." shorthand:"r"`
 	MaxFileSizeMB    int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
 	Proxy            string   `yaml:"http-proxy" description:"Proxy that should be used for the connection to Thunderstorm.\nIf left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables."`
@@ -26,8 +26,8 @@ type Config struct {
 	MagicHeaders     []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
 	AllFilesystems   bool     `yaml:"all-filesystems" description:"Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'"`
 	UploadsPerMinute int      `yaml:"uploads-per-minute" description:"Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays."`
-	MinCacheFileSize int64    `yaml:"min-cache-file-size" description:"Upload files with at least the given size (in MB) only once, skipping them when re-encountering them."`
-	DryRun           bool     `yaml:"dry-run" description:"Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected."`
+	MinCacheFileSize int64    `yaml:"min-cache-file-size" description:"Upload files with at least the given size (in MB) only once, skipping them when re-encountering them. Files are identified by their SHA256 hash to detect duplicates. The hash cache is automatically cleared when it exceeds 10,000 entries to prevent unbounded memory growth."`
+	DryRun           bool     `yaml:"dry-run" description:"Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode."`
 	Template         string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help             bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }

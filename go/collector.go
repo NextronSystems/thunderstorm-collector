@@ -107,15 +107,15 @@ type CollectionStatistics struct {
 	skipMutex   sync.Mutex
 
 	// Processing
-	uploadedFiles          int64
-	uploadErrors           int64
-	fileErrors             int64
+	uploadedFiles int64
+	uploadErrors  int64
+	fileErrors    int64
 
 	// Timing (in nanoseconds, converted to seconds/milliseconds for display)
-	timeWalking            int64
-	timeReading            int64
-	timeHashing            int64
-	timeTransmitting       int64
+	timeWalking      int64
+	timeReading      int64
+	timeHashing      int64
+	timeTransmitting int64
 }
 
 // incrementSkipReason safely increments the counter for a given skip reason
@@ -139,8 +139,8 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 		Statistics: &CollectionStatistics{
 			skipReasons: make(map[SkipReason]int64),
 		},
-		fileHashCache:   &sync.Map{},
-		startTime:       time.Now(),
+		fileHashCache: &sync.Map{},
+		startTime:     time.Now(),
 	}
 	for _, header := range config.MagicHeaders {
 		if len(header) > collector.magicHeaderExtractionLength {
@@ -248,7 +248,7 @@ func (c *Collector) collectPath(root string) {
 
 		// Process regular files
 		atomic.AddInt64(&c.Statistics.filesDiscovered, 1)
-		
+
 		// Quick metadata check before queuing to avoid unnecessary work
 		if reason, excluded := c.quickMetadataCheck(info); excluded {
 			c.Statistics.incrementSkipReason(reason)
@@ -352,7 +352,7 @@ func (c *Collector) throttle() {
 
 func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	readStart := time.Now()
-	
+
 	f, err := os.Open(info.path)
 	if err != nil {
 		c.logger.Printf("Could not open file '%s': %v\n", info.path, err)
@@ -444,7 +444,7 @@ func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 	if !info.Mode().IsRegular() {
 		return SkipReasonIrregular, true
 	}
-	
+
 	isTooOld := true
 	for _, fileTime := range getTimes(info) {
 		if fileTime.After(c.ThresholdTime) {
@@ -455,11 +455,11 @@ func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 	if isTooOld {
 		return SkipReasonTooOld, true
 	}
-	
+
 	if c.MaxFileSize > 0 && c.MaxFileSize < info.Size() {
 		return SkipReasonTooBig, true
 	}
-	
+
 	return 0, false
 }
 
@@ -509,7 +509,7 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 			return SkipReasonDuplicate, true
 		}
 	}
-	
+
 	return 0, false
 }
 
@@ -517,52 +517,56 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 // Returns true if the file is a duplicate (should be skipped)
 func (c *Collector) checkDuplicateHash(info *infoWithPath, f *os.File) bool {
 	hashStart := time.Now()
-	
+
 	// Always reset file position after hash calculation, regardless of success/failure
 	defer func() {
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
 			c.debugf("Could not reset file descriptor for file '%s': %v", info.path, err)
 		}
 	}()
-	
+
 	hashCalculator := sha256.New()
 	if _, err := io.Copy(hashCalculator, f); err != nil {
 		c.debugf("Could not calculate hash for file '%s': %v", info.path, err)
 		return false
 	}
-	
+
 	hashDuration := time.Since(hashStart)
 	atomic.AddInt64(&c.Statistics.timeHashing, int64(hashDuration))
-	
+
 	fileHash := string(hashCalculator.Sum(nil))
 	if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
 		return true
 	}
-	
+
 	// Check cache size and prune if too large
 	cacheSize := atomic.AddInt64(&c.fileHashCacheCount, 1)
 	if cacheSize > maxHashCacheSize {
 		c.pruneHashCache()
 	}
-	
+
 	return false
 }
 
-// pruneHashCache reduces the hash cache size by clearing approximately 20% of entries
-// This is better than clearing the entire cache as it retains most recent entries
+// pruneHashCache clears the hash cache when it exceeds the maximum size.
+// Uses atomic operations to ensure only one goroutine prunes at a time.
+// Future enhancement: could implement LRU eviction to retain most recent entries.
 func (c *Collector) pruneHashCache() {
+	// Load current count first to avoid race condition
+	currentCount := atomic.LoadInt64(&c.fileHashCacheCount)
+
 	// Use CompareAndSwap to ensure only one goroutine prunes at a time
-	// We use a high value to mark that pruning is in progress
-	if !atomic.CompareAndSwapInt64(&c.fileHashCacheCount, atomic.LoadInt64(&c.fileHashCacheCount), maxHashCacheSize+1) {
-		return // Another goroutine is already pruning
+	// We use a high sentinel value to mark that pruning is in progress
+	if !atomic.CompareAndSwapInt64(&c.fileHashCacheCount, currentCount, maxHashCacheSize+1) {
+		return // Another goroutine beat us to it or count changed
 	}
-	
-	// For simplicity, we clear the cache entirely
+
+	// Clear the cache entirely for simplicity
 	// A more sophisticated approach would be to track insertion time and remove oldest entries
 	// However, this requires additional data structures and complexity
 	c.fileHashCache = &sync.Map{}
 	atomic.StoreInt64(&c.fileHashCacheCount, 0)
-	c.debugf("Pruned file hash cache (exceeded %d entries)", maxHashCacheSize)
+	c.debugf("Cleared file hash cache (exceeded %d entries)", maxHashCacheSize)
 }
 
 func (c *Collector) thunderstormUrl() string {

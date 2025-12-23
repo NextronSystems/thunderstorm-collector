@@ -2,7 +2,6 @@ max-filesize: 64
 extension:
     - .asm
     - .asp
-    - .asp
     - .aspx
     - .bas
     - .bat
@@ -11,7 +10,6 @@ extension:
     - .clixml
     - .cmd
     - .com
-    - .conf
     - .conf
     - .config
     - .cpl
@@ -58,12 +56,10 @@ extension:
     - .sys
     - .temp
     - .tmp
-    - .tmp
     - .txt
     - .url
     - .vb
     - .vbe
-    - .vbs
     - .vbs
     - .war
     - .wsc

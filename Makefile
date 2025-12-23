@@ -12,7 +12,7 @@ release:
 		cp "$$f" "release/$$(basename $${f%$$ext})-${VERSION:v%=%}$${ext}"; done
 
 clean:
-	rm -r release
+	rm -rf release
 	make -C go clean
 
 .PHONY: release clean
