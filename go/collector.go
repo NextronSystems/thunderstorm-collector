@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -30,7 +29,6 @@ const (
 	SkipReasonWrongType
 	SkipReasonTooOld
 	SkipReasonIrregular
-	SkipReasonDuplicate
 	SkipReasonDirectory
 	SkipReasonExcluded
 )
@@ -46,8 +44,6 @@ func (r SkipReason) String() string {
 		return "Too old (exceeds max-age)"
 	case SkipReasonIrregular:
 		return "Irregular file type"
-	case SkipReasonDuplicate:
-		return "Duplicate (same content hash)"
 	case SkipReasonDirectory:
 		return "Skipped directories"
 	case SkipReasonExcluded:
@@ -72,8 +68,6 @@ type CollectorConfig struct {
 	AllFilesystems  bool
 	MinUploadPeriod time.Duration
 	DryRun          bool
-
-	MinCacheFileSize int64
 }
 
 type Collector struct {
@@ -90,10 +84,6 @@ type Collector struct {
 
 	throttleMutex sync.Mutex
 	lastScanTime  time.Time
-
-	fileHashCache      *sync.Map
-	fileHashCacheCount int64 // Atomic counter for cache size
-	fileHashGeneration int64 // Atomic counter for cache entry generation (for LRU-like eviction)
 
 	// Timing
 	startTime time.Time
@@ -119,7 +109,6 @@ type CollectionStatistics struct {
 	// Timing (in nanoseconds, converted to seconds/milliseconds for display)
 	timeWalking      int64
 	timeReading      int64
-	timeHashing      int64
 	timeTransmitting int64
 }
 
@@ -144,8 +133,7 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 		Statistics: &CollectionStatistics{
 			skipReasons: make(map[SkipReason]int64),
 		},
-		fileHashCache: &sync.Map{},
-		startTime:     time.Now(),
+		startTime: time.Now(),
 	}
 	for _, header := range config.MagicHeaders {
 		if len(header) > collector.magicHeaderExtractionLength {
@@ -292,7 +280,6 @@ func (c *Collector) Stop() {
 		SkipReasonWrongType,
 		SkipReasonTooOld,
 		SkipReasonIrregular,
-		SkipReasonDuplicate,
 		SkipReasonExcluded,
 		SkipReasonDirectory,
 	}
@@ -308,11 +295,9 @@ func (c *Collector) Stop() {
 	c.logger.Printf("Timing:")
 	walkTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeWalking))
 	readTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeReading))
-	hashTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeHashing))
 	transmitTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeTransmitting))
 	c.logger.Printf("  - File system walk: %v", walkTime.Round(time.Millisecond))
 	c.logger.Printf("  - Reading files: %v", readTime.Round(time.Millisecond))
-	c.logger.Printf("  - Hashing files: %v", hashTime.Round(time.Millisecond))
 	if !c.DryRun {
 		c.logger.Printf("  - Transmitting files: %v", transmitTime.Round(time.Millisecond))
 	}
@@ -327,9 +312,8 @@ type infoWithPath struct {
 }
 
 const (
-	maxRetries       = 3               // Maximum number of retry attempts for failed uploads
-	baseRetryDelay   = 4 * time.Second // Base delay for exponential backoff
-	maxHashCacheSize = 10000           // Maximum number of entries in file hash cache before clearing
+	maxRetries     = 3               // Maximum number of retry attempts for failed uploads
+	baseRetryDelay = 4 * time.Second // Base delay for exponential backoff
 )
 
 // throttle ensures uploads respect the minimum period between uploads.
@@ -508,84 +492,7 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 		return SkipReasonWrongType, true
 	}
 
-	// Check for duplicates if file is large enough
-	if info.Size() > c.MinCacheFileSize {
-		if c.isDuplicateHash(info, f) {
-			return SkipReasonDuplicate, true
-		}
-	}
-
 	return 0, false
-}
-
-// isDuplicateHash calculates the file hash and checks if it's a duplicate.
-// Returns true if the file is a duplicate (should be skipped).
-func (c *Collector) isDuplicateHash(info *infoWithPath, f *os.File) bool {
-	hashStart := time.Now()
-
-	// Always reset file position after hash calculation, regardless of success/failure
-	defer func() {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			c.debugf("Could not reset file descriptor for file '%s': %v", info.path, err)
-		}
-	}()
-
-	hashCalculator := sha256.New()
-	if _, err := io.Copy(hashCalculator, f); err != nil {
-		c.debugf("Could not calculate hash for file '%s': %v", info.path, err)
-		return false
-	}
-
-	hashDuration := time.Since(hashStart)
-	atomic.AddInt64(&c.Statistics.timeHashing, int64(hashDuration))
-
-	fileHash := string(hashCalculator.Sum(nil))
-	generation := atomic.AddInt64(&c.fileHashGeneration, 1)
-	if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, generation); alreadyExists {
-		return true
-	}
-
-	// Check cache size and prune if too large
-	cacheSize := atomic.AddInt64(&c.fileHashCacheCount, 1)
-	if cacheSize > maxHashCacheSize {
-		c.pruneHashCache()
-	}
-
-	return false
-}
-
-// pruneHashCache evicts the oldest ~20% of entries when the cache exceeds maximum size.
-// Each cache entry stores its generation number (insertion order), allowing us to
-// identify and remove the oldest entries while keeping the most recently added ones.
-// Uses atomic operations to ensure only one goroutine prunes at a time.
-func (c *Collector) pruneHashCache() {
-	// Load current count first to avoid race condition
-	currentCount := atomic.LoadInt64(&c.fileHashCacheCount)
-
-	// Use CompareAndSwap to ensure only one goroutine prunes at a time
-	// We use a high sentinel value to mark that pruning is in progress
-	if !atomic.CompareAndSwapInt64(&c.fileHashCacheCount, currentCount, maxHashCacheSize+1) {
-		return // Another goroutine beat us to it or count changed
-	}
-
-	// Calculate the generation threshold - entries older than this will be evicted
-	// Keep approximately 80% of entries (evict oldest 20%)
-	currentGen := atomic.LoadInt64(&c.fileHashGeneration)
-	threshold := currentGen - int64(float64(maxHashCacheSize)*0.8)
-
-	// Evict entries with generation below threshold
-	var remaining int64
-	c.fileHashCache.Range(func(key, value interface{}) bool {
-		if gen, ok := value.(int64); ok && gen < threshold {
-			c.fileHashCache.Delete(key)
-		} else {
-			remaining++
-		}
-		return true
-	})
-
-	atomic.StoreInt64(&c.fileHashCacheCount, remaining)
-	c.debugf("Pruned file hash cache: kept %d of %d entries (threshold gen: %d)", remaining, currentCount, threshold)
 }
 
 func (c *Collector) thunderstormUrl() string {

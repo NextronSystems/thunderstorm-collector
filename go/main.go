@@ -76,16 +76,15 @@ func buildHttpTransport(config Config) *http.Transport {
 
 func validateConfig(config Config) (cc CollectorConfig, err error) {
 	cc = CollectorConfig{
-		RootPaths:        config.RootPaths,
-		FileExtensions:   config.FileExtensions,
-		ExcludeGlobs:     config.ExcludeGlobs,
-		Sync:             config.Sync,
-		Debug:            config.Debug,
-		Threads:          config.Threads,
-		Source:           config.Source,
-		MinCacheFileSize: config.MinCacheFileSize * 1024 * 1024,
-		AllFilesystems:   config.AllFilesystems,
-		DryRun:           config.DryRun,
+		RootPaths:      config.RootPaths,
+		FileExtensions: config.FileExtensions,
+		ExcludeGlobs:   config.ExcludeGlobs,
+		Sync:           config.Sync,
+		Debug:          config.Debug,
+		Threads:        config.Threads,
+		Source:         config.Source,
+		AllFilesystems: config.AllFilesystems,
+		DryRun:         config.DryRun,
 	}
 
 	// Handle thread count:

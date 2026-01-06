@@ -25,21 +25,19 @@ type Config struct {
 	Source           string   `yaml:"source" description:"Name for this device in the Thunderstorm log messages." shorthand:"o"`
 	MagicHeaders     []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
 	AllFilesystems   bool     `yaml:"all-filesystems" description:"Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'"`
-	UploadsPerMinute int      `yaml:"uploads-per-minute" description:"Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays."`
-	MinCacheFileSize int64    `yaml:"min-cache-file-size" description:"Upload files with at least the given size (in MB) only once, skipping them when re-encountering them. Files are identified by their SHA256 hash to detect duplicates. When the hash cache exceeds 10,000 entries, the oldest 20% are evicted to prevent unbounded memory growth."`
-	DryRun           bool     `yaml:"dry-run" description:"Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode."`
+	UploadsPerMinute int  `yaml:"uploads-per-minute" description:"Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays."`
+	DryRun           bool `yaml:"dry-run" description:"Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode."`
 	Template         string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help             bool     `flag:"help" description:"Show this help." shorthand:"h"`
 }
 
 var DefaultConfig = Config{
-	Threads:          1,
-	MaxFileSizeMB:    100,
-	Port:             8080,
-	RootPaths:        []string{getRootPath()},
-	Source:           HostnameOrBlank(),
-	MinCacheFileSize: 100,
-	Template:         defaultConfigFile,
+	Threads:       1,
+	MaxFileSizeMB: 100,
+	Port:          8080,
+	RootPaths:     []string{getRootPath()},
+	Source:        HostnameOrBlank(),
+	Template:      defaultConfigFile,
 }
 
 func HostnameOrBlank() string {

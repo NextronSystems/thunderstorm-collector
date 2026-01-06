@@ -32,7 +32,6 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
                                      Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.
                                      Example: --max-age 10h
   -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
-      --min-cache-file-size int      Upload files with at least the given size (in MB) only once, skipping them when re-encountering them. Files are identified by their SHA256 hash to detect duplicates. The hash cache is automatically cleared when it exceeds 10,000 entries to prevent unbounded memory growth. (default 100)
   -p, --path strings                 Root paths from where files should be collected.
                                      Specify multiple root paths by using this flag multiple times. (default [C:\])
       --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
@@ -154,14 +153,6 @@ The collector includes automatic retry logic for failed uploads:
 - **Server rate limiting**: If the server returns HTTP 503 (Service Unavailable), the collector respects the `Retry-After` header or defaults to 30 seconds
 - **Error reporting**: All upload errors are logged and counted in the final statistics
 
-### Duplicate File Detection
-
-Files larger than the `--min-cache-file-size` threshold are hashed using SHA256 to detect duplicates. If a file with the same content hash was already processed, it's skipped to avoid redundant uploads. The hash cache is automatically managed:
-
-- **Cache limit**: When the cache exceeds 10,000 entries, the oldest ~20% are evicted (keeping the most recent 80%)
-- **Memory efficient**: Only files above the minimum cache size threshold are hashed
-- **Thread-safe**: Hash cache operations are thread-safe for concurrent uploads
-
 ## Build
 
 ### Build requirements
@@ -244,7 +235,6 @@ Exclusions:
   - Wrong type (no matching extension/magic): 234
   - Too old (exceeds max-age): 12
   - Irregular file type: 3
-  - Duplicate (same content hash): 56
   - Excluded by glob pattern: 78
   - Skipped directories: 23
 
@@ -255,21 +245,20 @@ Processing:
 Timing:
   - File system walk: 2.5s
   - Reading files: 1.2s
-  - Hashing files: 0.8s
   - Transmitting files: 45.3s
-  - Total time: 50.1s
+  - Total time: 49.3s
 ```
 
 **Statistics include:**
 - Total files discovered during filesystem walk
-- Detailed breakdown of exclusions by reason (size, type, age, duplicates, etc.)
+- Detailed breakdown of exclusions by reason (size, type, age, etc.)
 - Processing results (successful uploads, errors)
-- Timing breakdown for different phases (walk, read, hash, transmit)
+- Timing breakdown for different phases (walk, read, transmit)
 
 **Debug Mode:**
 When `--debug` is enabled, the collector prints detailed information for every file:
 - Files that would be sent (with DRY-RUN indicator in dry-run mode)
-- Files that are skipped with specific reasons (too big, wrong type, too old, duplicate, etc.)
+- Files that are skipped with specific reasons (too big, wrong type, too old, etc.)
 
 This makes it easy to understand why files are included or excluded from collection.
 
@@ -317,11 +306,8 @@ In dry-run mode:
 ### Memory Usage
 
 The collector is designed to be memory-efficient:
-- File hash cache automatically evicts oldest entries when exceeding 10,000 (keeps ~80% most recent)
 - Files are processed in a streaming fashion (not loaded entirely into memory)
 - Metadata checks happen before files are queued, reducing memory pressure
-
-For very large scans, monitor memory usage and adjust `--min-cache-file-size` if needed (higher values = fewer files hashed = less memory).
 
 ## Tested On
 
