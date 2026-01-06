@@ -75,27 +75,28 @@ func buildHttpTransport(config Config) *http.Transport {
 }
 
 func validateConfig(config Config) (cc CollectorConfig, err error) {
+	// Handle thread count first, before assigning to cc:
+	// - Positive: use exact number
+	// - Zero: use all available CPU cores
+	// - Negative: use all cores minus the absolute value (e.g., -2 = NumCPU - 2)
+	threads := config.Threads
+	if threads <= 0 {
+		threads = runtime.NumCPU() + threads // For 0: NumCPU + 0; For -2: NumCPU - 2
+	}
+	if threads < 1 {
+		threads = 1 // Minimum of 1 thread
+	}
+
 	cc = CollectorConfig{
 		RootPaths:      config.RootPaths,
 		FileExtensions: config.FileExtensions,
 		ExcludeGlobs:   config.ExcludeGlobs,
 		Sync:           config.Sync,
 		Debug:          config.Debug,
-		Threads:        config.Threads,
+		Threads:        threads,
 		Source:         config.Source,
 		AllFilesystems: config.AllFilesystems,
 		DryRun:         config.DryRun,
-	}
-
-	// Handle thread count:
-	// - Positive: use exact number
-	// - Zero: use all available CPU cores
-	// - Negative: use all cores minus the absolute value (e.g., -2 = NumCPU - 2)
-	if config.Threads <= 0 {
-		config.Threads = runtime.NumCPU() + config.Threads // For 0: NumCPU + 0; For -2: NumCPU - 2
-	}
-	if config.Threads < 1 {
-		config.Threads = 1 // Minimum of 1 thread
 	}
 
 	if config.MaxAgeInDays != "" {

@@ -143,11 +143,11 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 	return collector
 }
 
-// debugf calls logger.Printf if and only if debugging is enabled.
+// debugf calls logger.Printf with [DEBUG] prefix if and only if debugging is enabled.
 // Arguments are handled in the manner of fmt.Printf.
 func (c *Collector) debugf(format string, params ...interface{}) {
 	if c.Debug {
-		c.logger.Printf(format, params...)
+		c.logger.Printf("[DEBUG] "+format, params...)
 	}
 }
 
@@ -214,15 +214,11 @@ func (c *Collector) collectPath(root string) {
 		for _, glob := range c.ExcludeGlobs {
 			if match, _ := doublestar.Match(glob, path); match {
 				if info.IsDir() {
-					if c.Debug {
-						c.logger.Printf("[DEBUG] Skipping directory '%s' due to exclusion rule %s", path, glob)
-					}
+					c.debugf("Skipping directory '%s' due to exclusion rule %s", path, glob)
 					c.Statistics.incrementSkipReason(SkipReasonDirectory)
 					return filepath.SkipDir
 				} else {
-					if c.Debug {
-						c.logger.Printf("[DEBUG] Skipping file '%s' due to exclusion rule %s", path, glob)
-					}
+					c.debugf("Skipping file '%s' due to exclusion rule %s", path, glob)
 					c.Statistics.incrementSkipReason(SkipReasonExcluded)
 					return nil
 				}
@@ -231,9 +227,7 @@ func (c *Collector) collectPath(root string) {
 		// Check directory first to reduce nesting
 		if info.Mode().IsDir() {
 			if !c.AllFilesystems && SkipFilesystem(path) {
-				if c.Debug {
-					c.logger.Printf("[DEBUG] Skipping directory '%s' since it uses a pseudo or network filesystem", path)
-				}
+				c.debugf("Skipping directory '%s' since it uses a pseudo or network filesystem", path)
 				return filepath.SkipDir
 			}
 			return nil
@@ -244,6 +238,7 @@ func (c *Collector) collectPath(root string) {
 
 		// Quick metadata check before queuing to avoid unnecessary work
 		if reason, excluded := c.quickMetadataCheck(info); excluded {
+			c.debugf("Skipping file '%s' (%s)", path, reason.String())
 			c.Statistics.incrementSkipReason(reason)
 		} else {
 			c.filesToUpload <- infoWithPath{info, path, 0}
@@ -339,6 +334,9 @@ func (c *Collector) throttle() {
 	}
 }
 
+// uploadToThunderstorm uploads a file to the Thunderstorm server.
+// Returns true if the upload should be retried (e.g., due to transient errors or rate limiting),
+// or false if the upload completed (successfully or with a permanent error).
 func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	readStart := time.Now()
 
@@ -351,9 +349,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	defer f.Close()
 
 	if skipReason, excluded := c.checkFileContent(info, f); excluded {
-		if c.Debug {
-			c.logger.Printf("[DEBUG] Skipping file '%s' (%s)", info.path, skipReason.String())
-		}
+		c.debugf("Skipping file '%s' (%s)", info.path, skipReason.String())
 		c.Statistics.incrementSkipReason(skipReason)
 		return
 	}
@@ -361,9 +357,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	readDuration := time.Since(readStart)
 	atomic.AddInt64(&c.Statistics.timeReading, int64(readDuration))
 
-	if c.Debug {
-		c.logger.Printf("[DEBUG] File '%s' would be sent%s", info.path, map[bool]string{true: " (DRY-RUN)", false: ""}[c.DryRun])
-	}
+	c.debugf("File '%s' would be sent%s", info.path, map[bool]string{true: " (DRY-RUN)", false: ""}[c.DryRun])
 
 	// Dry-run mode: skip actual upload
 	if c.DryRun {
@@ -421,14 +415,14 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		c.logger.Printf("Response to file '%s': %s", info.path, string(responseBody))
 	}
 
-	if c.Debug {
-		c.debugf("File '%s' processed successfully", info.path)
-	}
+	c.debugf("File '%s' processed successfully", info.path)
 	return
 }
 
 // quickMetadataCheck performs a quick metadata check without opening the file.
+// It checks if the file is a regular file, within the age threshold, and within the size limit.
 // Returns (SkipReason, true) if the file should be excluded, or (0, false) if it should be processed.
+// Note: Debug logging for skip reasons is done by the caller, not this function.
 func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 	if !info.Mode().IsRegular() {
 		return SkipReasonIrregular, true
@@ -452,12 +446,15 @@ func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 	return 0, false
 }
 
-// checkFileContent checks if a file should be excluded based on its content.
-// The logic is:
+// checkFileContent checks if a file should be excluded based on its content (extension and magic header).
+// Returns (SkipReason, true) if the file should be excluded, or (0, false) if it should be processed.
+// Note: Debug logging for skip reasons is done by the caller, not this function.
+//
+// Extension and magic header filtering logic:
 //   - If file extensions are specified and the file matches an extension, it's included.
 //   - If extensions are specified but don't match, and magic headers are specified, check magic headers.
 //   - If neither extensions nor magic headers match (and at least one is specified), exclude the file.
-//   - If no extensions or magic headers are specified, include all files (content-based filtering disabled).
+//   - If no extensions or magic headers are specified, all files pass content filtering.
 func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason, bool) {
 	var extensionWanted bool
 	for _, extension := range c.FileExtensions {
@@ -511,6 +508,8 @@ func (c *Collector) thunderstormUrl() string {
 	return fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
 }
 
+// getFileContentAsFormData creates multipart form data from a file for HTTP upload.
+// Returns the Content-Type header value (including boundary) and a PipeReader for the form data.
 func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (string, *io.PipeReader) {
 	multipartReader, multipartWriter := io.Pipe()
 	w := multipart.NewWriter(multipartWriter)
