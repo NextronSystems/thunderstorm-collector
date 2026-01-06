@@ -39,7 +39,7 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
   -o, --source string                Name for this device in the Thunderstorm log messages. (default "DESKTOP-EEM5B52")
       --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
   -t, --template string              Process default scan parameters from this YAML file. (default "config.yml")
-  -r, --threads int                  How many threads should upload files simultaneously. Set to the number of CPU cores for maximum performance. (default 1)
+  -r, --threads int                  How many threads should upload files simultaneously. Set to 0 to use all available CPU cores, or use negative values to reserve cores (e.g., -2 = all cores except 2). (default 1)
   -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
                                      Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
                                      Note: Not required when using --dry-run mode.
@@ -158,7 +158,7 @@ The collector includes automatic retry logic for failed uploads:
 
 Files larger than the `--min-cache-file-size` threshold are hashed using SHA256 to detect duplicates. If a file with the same content hash was already processed, it's skipped to avoid redundant uploads. The hash cache is automatically managed:
 
-- **Cache limit**: The cache is automatically cleared when it exceeds 10,000 entries
+- **Cache limit**: When the cache exceeds 10,000 entries, the oldest ~20% are evicted (keeping the most recent 80%)
 - **Memory efficient**: Only files above the minimum cache size threshold are hashed
 - **Thread-safe**: Hash cache operations are thread-safe for concurrent uploads
 
@@ -299,7 +299,7 @@ In dry-run mode:
 ### Common Error Messages
 
 - **"thunderstorm-server: not specified"**: The `--thunderstorm-server` parameter is required (unless using `--dry-run`). Make sure to specify the server address or use `--dry-run` for testing.
-- **"threads: count must be > 0"**: The thread count must be at least 1. Use `-r 1` or higher. To use all available CPU cores, set `-r` to match your system's CPU count (e.g., `-r 8` for an 8-core system).
+- **Thread count options**: Use `-r 4` for a specific number of threads, `-r 0` for all available CPU cores, or negative values to reserve cores (e.g., `-r -2` uses all cores except 2). The minimum is always 1 thread.
 - **"max-filesize: must be > 0"**: The maximum file size must be greater than 0 MB.
 - **"max-age: invalid suffix"**: The max-age parameter supports suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Example: `--max-age 10h`
 - **"magic header too long"**: Magic headers are limited to 1024 bytes. Check your magic header configuration.
@@ -317,7 +317,7 @@ In dry-run mode:
 ### Memory Usage
 
 The collector is designed to be memory-efficient:
-- File hash cache is automatically cleared at 10,000 entries
+- File hash cache automatically evicts oldest entries when exceeding 10,000 (keeps ~80% most recent)
 - Files are processed in a streaming fashion (not loaded entirely into memory)
 - Metadata checks happen before files are queued, reducing memory pressure
 

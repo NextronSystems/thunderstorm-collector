@@ -22,7 +22,7 @@ import (
 	"github.com/bmatcuk/doublestar/v3"
 )
 
-// SkipReason represents why a file was excluded from collection
+// SkipReason represents why a file was excluded from collection.
 type SkipReason int
 
 const (
@@ -35,7 +35,7 @@ const (
 	SkipReasonExcluded
 )
 
-// String returns a human-readable description of the skip reason
+// String returns a human-readable description of the skip reason.
 func (r SkipReason) String() string {
 	switch r {
 	case SkipReasonTooBig:
@@ -93,6 +93,7 @@ type Collector struct {
 
 	fileHashCache      *sync.Map
 	fileHashCacheCount int64 // Atomic counter for cache size
+	fileHashGeneration int64 // Atomic counter for cache entry generation (for LRU-like eviction)
 
 	// Timing
 	startTime time.Time
@@ -102,7 +103,11 @@ type CollectionStatistics struct {
 	// Discovery
 	filesDiscovered int64
 
-	// Exclusions - using a map with mutex for thread-safe access
+	// Exclusions - using a map with mutex for thread-safe access.
+	// We use a regular map with mutex instead of sync.Map because:
+	// 1. sync.Map stores values as interface{}, requiring type assertions for atomic increments
+	// 2. The map has a fixed small size (7 SkipReason values), so contention is minimal
+	// 3. Increment operations (Load + Store) are simpler with a mutex than sync.Map
 	skipReasons map[SkipReason]int64
 	skipMutex   sync.Mutex
 
@@ -118,14 +123,14 @@ type CollectionStatistics struct {
 	timeTransmitting int64
 }
 
-// incrementSkipReason safely increments the counter for a given skip reason
+// incrementSkipReason safely increments the counter for a given skip reason.
 func (s *CollectionStatistics) incrementSkipReason(reason SkipReason) {
 	s.skipMutex.Lock()
 	s.skipReasons[reason]++
 	s.skipMutex.Unlock()
 }
 
-// getSkipCount safely retrieves the counter for a given skip reason
+// getSkipCount safely retrieves the counter for a given skip reason.
 func (s *CollectionStatistics) getSkipCount(reason SkipReason) int64 {
 	s.skipMutex.Lock()
 	defer s.skipMutex.Unlock()
@@ -438,8 +443,8 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	return
 }
 
-// quickMetadataCheck performs a quick metadata check without opening the file
-// Returns (SkipReason, true) if the file should be excluded, or (0, false) if it should be processed
+// quickMetadataCheck performs a quick metadata check without opening the file.
+// Returns (SkipReason, true) if the file should be excluded, or (0, false) if it should be processed.
 func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 	if !info.Mode().IsRegular() {
 		return SkipReasonIrregular, true
@@ -465,10 +470,10 @@ func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 
 // checkFileContent checks if a file should be excluded based on its content.
 // The logic is:
-//   - If file extensions are specified and the file matches an extension, it's included
-//   - If extensions are specified but don't match, and magic headers are specified, check magic headers
-//   - If neither extensions nor magic headers match (and at least one is specified), exclude the file
-//   - If no extensions or magic headers are specified, include all files (content-based filtering disabled)
+//   - If file extensions are specified and the file matches an extension, it's included.
+//   - If extensions are specified but don't match, and magic headers are specified, check magic headers.
+//   - If neither extensions nor magic headers match (and at least one is specified), exclude the file.
+//   - If no extensions or magic headers are specified, include all files (content-based filtering disabled).
 func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason, bool) {
 	var extensionWanted bool
 	for _, extension := range c.FileExtensions {
@@ -505,7 +510,7 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 
 	// Check for duplicates if file is large enough
 	if info.Size() > c.MinCacheFileSize {
-		if isDuplicate := c.checkDuplicateHash(info, f); isDuplicate {
+		if c.isDuplicateHash(info, f) {
 			return SkipReasonDuplicate, true
 		}
 	}
@@ -513,9 +518,9 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 	return 0, false
 }
 
-// checkDuplicateHash calculates the file hash and checks if it's a duplicate
-// Returns true if the file is a duplicate (should be skipped)
-func (c *Collector) checkDuplicateHash(info *infoWithPath, f *os.File) bool {
+// isDuplicateHash calculates the file hash and checks if it's a duplicate.
+// Returns true if the file is a duplicate (should be skipped).
+func (c *Collector) isDuplicateHash(info *infoWithPath, f *os.File) bool {
 	hashStart := time.Now()
 
 	// Always reset file position after hash calculation, regardless of success/failure
@@ -535,7 +540,8 @@ func (c *Collector) checkDuplicateHash(info *infoWithPath, f *os.File) bool {
 	atomic.AddInt64(&c.Statistics.timeHashing, int64(hashDuration))
 
 	fileHash := string(hashCalculator.Sum(nil))
-	if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, true); alreadyExists {
+	generation := atomic.AddInt64(&c.fileHashGeneration, 1)
+	if _, alreadyExists := c.fileHashCache.LoadOrStore(fileHash, generation); alreadyExists {
 		return true
 	}
 
@@ -548,9 +554,10 @@ func (c *Collector) checkDuplicateHash(info *infoWithPath, f *os.File) bool {
 	return false
 }
 
-// pruneHashCache clears the hash cache when it exceeds the maximum size.
+// pruneHashCache evicts the oldest ~20% of entries when the cache exceeds maximum size.
+// Each cache entry stores its generation number (insertion order), allowing us to
+// identify and remove the oldest entries while keeping the most recently added ones.
 // Uses atomic operations to ensure only one goroutine prunes at a time.
-// Future enhancement: could implement LRU eviction to retain most recent entries.
 func (c *Collector) pruneHashCache() {
 	// Load current count first to avoid race condition
 	currentCount := atomic.LoadInt64(&c.fileHashCacheCount)
@@ -561,12 +568,24 @@ func (c *Collector) pruneHashCache() {
 		return // Another goroutine beat us to it or count changed
 	}
 
-	// Clear the cache entirely for simplicity
-	// A more sophisticated approach would be to track insertion time and remove oldest entries
-	// However, this requires additional data structures and complexity
-	c.fileHashCache = &sync.Map{}
-	atomic.StoreInt64(&c.fileHashCacheCount, 0)
-	c.debugf("Cleared file hash cache (exceeded %d entries)", maxHashCacheSize)
+	// Calculate the generation threshold - entries older than this will be evicted
+	// Keep approximately 80% of entries (evict oldest 20%)
+	currentGen := atomic.LoadInt64(&c.fileHashGeneration)
+	threshold := currentGen - int64(float64(maxHashCacheSize)*0.8)
+
+	// Evict entries with generation below threshold
+	var remaining int64
+	c.fileHashCache.Range(func(key, value interface{}) bool {
+		if gen, ok := value.(int64); ok && gen < threshold {
+			c.fileHashCache.Delete(key)
+		} else {
+			remaining++
+		}
+		return true
+	})
+
+	atomic.StoreInt64(&c.fileHashCacheCount, remaining)
+	c.debugf("Pruned file hash cache: kept %d of %d entries (threshold gen: %d)", remaining, currentCount, threshold)
 }
 
 func (c *Collector) thunderstormUrl() string {
@@ -593,19 +612,27 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 		abspath = filename
 	}
 	go func() {
-		defer multipartWriter.Close()
+		var pipeErr error
+		defer func() {
+			if pipeErr != nil {
+				multipartWriter.CloseWithError(pipeErr)
+			} else {
+				multipartWriter.Close()
+			}
+		}()
+
 		fw, err := w.CreateFormFile("file", abspath)
 		if err != nil {
-			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %w", err))
+			pipeErr = fmt.Errorf("could not create form file: %w", err)
 			return
 		}
 		if _, err := io.Copy(fw, f); err != nil {
-			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %w", err))
+			pipeErr = fmt.Errorf("could not copy file content: %w", err)
 			return
 		}
-		// Close the multipart writer (not multipartWriter pipe, which is deferred)
+		// Close the multipart writer to finalize the form data
 		if err := w.Close(); err != nil {
-			multipartWriter.CloseWithError(fmt.Errorf("could not close multipart writer: %w", err))
+			pipeErr = fmt.Errorf("could not close multipart writer: %w", err)
 		}
 	}()
 	return w.FormDataContentType(), multipartReader

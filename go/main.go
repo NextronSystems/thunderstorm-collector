@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -87,8 +88,15 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		DryRun:           config.DryRun,
 	}
 
+	// Handle thread count:
+	// - Positive: use exact number
+	// - Zero: use all available CPU cores
+	// - Negative: use all cores minus the absolute value (e.g., -2 = NumCPU - 2)
+	if config.Threads <= 0 {
+		config.Threads = runtime.NumCPU() + config.Threads // For 0: NumCPU + 0; For -2: NumCPU - 2
+	}
 	if config.Threads < 1 {
-		return cc, errors.New("threads: count must be > 0")
+		config.Threads = 1 // Minimum of 1 thread
 	}
 
 	if config.MaxAgeInDays != "" {
@@ -173,7 +181,7 @@ func main() {
 	fmt.Println(`  / /__/ _ \/ / / -_) __/ __/ _ \/ __/                     `)
 	fmt.Println(`  \___/\___/_/_/\__/\__/\__/\___/_/                        `)
 	fmt.Println(`                                                           `)
-	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020-2024             `)
+	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020-2026             `)
 	fmt.Println(`                                                           `)
 
 	var config = ParseConfig()
