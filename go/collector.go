@@ -115,8 +115,8 @@ type CollectionStatistics struct {
 // incrementSkipReason safely increments the counter for a given skip reason.
 func (s *CollectionStatistics) incrementSkipReason(reason SkipReason) {
 	s.skipMutex.Lock()
+	defer s.skipMutex.Unlock()
 	s.skipReasons[reason]++
-	s.skipMutex.Unlock()
 }
 
 // getSkipCount safely retrieves the counter for a given skip reason.
@@ -357,14 +357,10 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	readDuration := time.Since(readStart)
 	atomic.AddInt64(&c.Statistics.timeReading, int64(readDuration))
 
-	c.debugf("File '%s' would be sent%s", info.path, map[bool]string{true: " (DRY-RUN)", false: ""}[c.DryRun])
-
 	// Dry-run mode: skip actual upload
 	if c.DryRun {
+		c.debugf("File '%s' would be sent (DRY-RUN)", info.path)
 		atomic.AddInt64(&c.Statistics.uploadedFiles, 1)
-		if c.Sync {
-			c.logger.Printf("[DRY-RUN] Would send file '%s'", info.path)
-		}
 		return
 	}
 
@@ -518,28 +514,20 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 		abspath = filename
 	}
 	go func() {
-		var pipeErr error
-		defer func() {
-			if pipeErr != nil {
-				multipartWriter.CloseWithError(pipeErr)
-			} else {
-				multipartWriter.Close()
-			}
-		}()
-
 		fw, err := w.CreateFormFile("file", abspath)
 		if err != nil {
-			pipeErr = fmt.Errorf("could not create form file: %w", err)
+			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %w", err))
 			return
 		}
 		if _, err := io.Copy(fw, f); err != nil {
-			pipeErr = fmt.Errorf("could not copy file content: %w", err)
+			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %w", err))
 			return
 		}
-		// Close the multipart writer to finalize the form data
 		if err := w.Close(); err != nil {
-			pipeErr = fmt.Errorf("could not close multipart writer: %w", err)
+			multipartWriter.CloseWithError(fmt.Errorf("could not close multipart writer: %w", err))
+			return
 		}
+		multipartWriter.Close()
 	}()
 	return w.FormDataContentType(), multipartReader
 }
