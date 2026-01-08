@@ -26,15 +26,8 @@ jobs:
         run: |
           cd go
           make release
-      - name: Create scripts package
-        run: |
-          mkdir -p release
-          cd scripts
-          zip -r ../release/thunderstorm-collector-scripts.zip *.sh *.ps1 *.py *.pl *.bat
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            go/dist/*
-            release/thunderstorm-collector-scripts.zip
+          files: go/dist/*

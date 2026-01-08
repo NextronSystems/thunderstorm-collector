@@ -5,6 +5,10 @@ ALL_TARGETS := $(shell go tool dist list)
 BLACKLIST_OS := android ios
 FILTERED_TARGETS := $(filter-out $(addsuffix /%,$(BLACKLIST_OS)),$(ALL_TARGETS))
 
+# Extract unique architectures and operating systems
+ALLARCHS := $(sort $(foreach t,$(FILTERED_TARGETS),$(word 2,$(subst /, ,$(t)))))
+ALLOS := $(sort $(foreach t,$(FILTERED_TARGETS),$(word 1,$(subst /, ,$(t)))))
+
 # Build configuration
 LDFLAGS_RELEASE = -w -s
 
@@ -15,21 +19,32 @@ CURRENT_ARCH := $(shell go env GOARCH)
 # Default target: build for current platform
 .DEFAULT_GOAL := build
 
+# Generate targets for each arch/os combination (enables tab completion)
+$(foreach arch,$(ALLARCHS), \
+	$(foreach os,$(ALLOS), \
+		$(eval bin/$(arch)-$(os)-%: GOARCH=$(arch)) \
+		$(eval bin/$(arch)-$(os)-%: GOOS=$(os)) \
+		$(eval .PHONY: $(os)/$(arch)) \
+		$(eval $(os)/$(arch): bin/$(arch)-$(os)-thunderstorm-collector$(if $(findstring windows,$(os)),.exe,)) \
+))
+
 .PHONY: help
 help: ## Show this help menu
 	@echo "Thunderstorm Collector - Build System"
 	@echo "======================================"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make        - Build for current platform ($(CURRENT_ARCH)-$(CURRENT_OS))"
-	@echo "  make all    - Build binaries for all supported platforms"
+	@echo "  make         - Build for current platform ($(CURRENT_ARCH)-$(CURRENT_OS))"
+	@echo "  make all     - Build binaries for all supported platforms"
 	@echo "  make release - Create distribution packages (binary + config) for all platforms"
-	@echo "  make clean  - Remove all build artifacts"
-	@echo "  make test   - Run tests"
-	@echo "  make help   - Show this help menu"
+	@echo "  make clean   - Remove all build artifacts"
+	@echo "  make test    - Run tests"
+	@echo "  make help    - Show this help menu"
+	@echo ""
+	@echo "  make <os>/<arch> - Build for specific platform (e.g., make linux/amd64)"
 	@echo ""
 	@echo "Note: Packages include only the binary and config.yml."
-	@echo "      Scripts are alternatives to the Go binary and not included."
+	@echo "      Scripts are standalone alternatives to the Go binary."
 
 .PHONY: build
 build: bin/$(CURRENT_ARCH)-$(CURRENT_OS)-thunderstorm-collector$(if $(findstring windows,$(CURRENT_OS)),.exe,) ## Build for current platform
@@ -90,12 +105,8 @@ test: ## Run tests
 
 # Build rule for individual binaries
 # Binary names are in arch-os format (e.g., amd64-linux-thunderstorm-collector)
-bin/%: $(wildcard *.go) $(wildcard */*.go)
+BUILD_ENV = GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
+
+bin/%: $(wildcard *.go)
 	@mkdir -p bin
-	@target=$(notdir $@); \
-	arch=$$(echo $$target | cut -d'-' -f1); \
-	rest=$$(echo $$target | cut -d'-' -f2-); \
-	os=$$(echo $$rest | cut -d'-' -f1); \
-	echo "Building $$target for $$os/$$arch..."; \
-	GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -o $@ -ldflags "$(LDFLAGS)" .; \
-	echo "Built: $@"
+	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS_RELEASE)"
