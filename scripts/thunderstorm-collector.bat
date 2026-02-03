@@ -6,8 +6,8 @@ SETLOCAL EnableDelayedExpansion
 :: Windows Batch
 :: Florian Roth
 :: v0.4
-:: 
-:: A Windows Batch script that uses a compiled Curl for Windows 
+::
+:: A Windows Batch script that uses a compiled Curl for Windows
 :: to upload files to a THOR Thunderstorm server
 ::
 :: Requirements:
@@ -15,12 +15,12 @@ SETLOCAL EnableDelayedExpansion
 :: https://curl.haxx.se/windows/
 ::
 :: Note on Windows 10
-:: Windows 10 already includes a curl since build 17063, so all versions newer than 
+:: Windows 10 already includes a curl since build 17063, so all versions newer than
 :: version 1709 (Redstone 3) from October 2017 already meet the requirements
 ::
 :: Note on very old Windows versions:
-:: The last version of curl that works with Windows 7 / Windows 2008 R2 
-:: and earlier is v7.46.0 and can be still be downloaded from here: 
+:: The last version of curl that works with Windows 7 / Windows 2008 R2
+:: and earlier is v7.46.0 and can be still be downloaded from here:
 :: https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
 
 :: CONFIGURATION -------------------------------------------------
@@ -52,20 +52,20 @@ SET SOURCE=
 :: WELCOME -------------------------------------------------------
 
 ECHO =============================================================
-ECHO    ________                __            __                
-ECHO   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _  
-ECHO    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \ 
-ECHO   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/ 
-ECHO. 
+ECHO    ________                __            __
+ECHO   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _
+ECHO    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \
+ECHO   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/
+ECHO.
 ECHO   Windows Batch Collector
 ECHO   Florian Roth, 2020
 ECHO.
 ECHO =============================================================
-ECHO. 
+ECHO.
 
 :: REQUIREMENTS -------------------------------------------------
 :: CURL in PATH
-where /q curl.exe 
+where /q curl.exe
 IF NOT ERRORLEVEL 1 (
     GOTO CHECKDONE
 )
@@ -73,7 +73,7 @@ IF NOT ERRORLEVEL 1 (
 IF EXIST %CD%\curl.exe (
     GOTO CHECKDONE
 )
-ECHO Cannot find curl in PATH or the current directory. Download it from https://curl.haxx.se/windows/ and place curl.exe from the ./bin sub folder into the collector script folder. 
+ECHO Cannot find curl in PATH or the current directory. Download it from https://curl.haxx.se/windows/ and place curl.exe from the ./bin sub folder into the collector script folder.
 ECHO If you're collecting on Windows systems older than Windows Vista, use curl version 7.46.0 from https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
 EXIT /b 1
 :CHECKDONE
@@ -91,7 +91,7 @@ IF "%SOURCE%" NEQ "" (
 )
 
 :: Directory walk and upload
-ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE: %MAX_AGE% days EXTENSIONS: %RELEVANT_EXTENSIONS% 
+ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE: %MAX_AGE% days EXTENSIONS: %RELEVANT_EXTENSIONS%
 ECHO This could take a while depending on the disk size and number of files. (set DEBUG=1 to see all skips)
 FOR %%T IN (%COLLECT_DIRS%) DO (
     SET TARGETDIR=%%T
@@ -116,7 +116,7 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
                     ) ELSE (
                         SET FOLDER=%%~dF%%~pF
                     )
-                    :: File Size Check 
+                    :: File Size Check
                     IF %%~zF GTR %COLLECT_MAX_SIZE% (
                         :: File is too big
                         IF %DEBUG% == 1 ECHO Skipping %%F due to big file size ...
@@ -128,7 +128,7 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
                         ) || (
                             :: Upload
                             ECHO Uploading %%F ..
-                            :: We'll start the upload process in background to speed up the submission process 
+                            :: We'll start the upload process in background to speed up the submission process
                             START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
                         )
                     )
