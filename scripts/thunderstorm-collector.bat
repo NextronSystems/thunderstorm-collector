@@ -95,44 +95,51 @@ ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE
 ECHO This could take a while depending on the disk size and number of files. (set DEBUG=1 to see all skips)
 FOR %%T IN (%COLLECT_DIRS%) DO (
     SET TARGETDIR=%%T
-    ECHo Checking !TARGETDIR! ...
-    FOR /R C:\Users %%F IN (*.*) DO (
-        SETLOCAL
-        :: Marker if processed due to selected extensions
-        SET PROCESSED=false
-        :: Extension Check
-        FOR %%E IN (%RELEVANT_EXTENSIONS%) DO (
-            :: Check if one of the relevant extensions matches the file extension
-            IF /I "%%~xF"=="%%E" (
-                SET PROCESSED=true
-                :: When the folder is empty (root directory) add extra characters
-                IF "%%~pF"=="\" (
-                    SET FOLDER=%%~dF%%~pF\\
-                ) ELSE (
-                    SET FOLDER=%%~dF%%~pF
-                )
-                :: File Size Check 
-                IF %%~zF GTR %COLLECT_MAX_SIZE% (
-                    :: File is too big
-                    IF %DEBUG% == 1 ECHO Skipping %%F due to big file size ...
-                ) ELSE (
-                    :: Age check
-                    FORFILES /P "!FOLDER:~0,-1!" /M "%%~nF%%~xF" /D -%MAX_AGE% >nul 2>nul && (
-                        :: File is too old
-                        IF %DEBUG% == 1 ECHO Skipping %%F due to age ...
-                    ) || (
-                        :: Upload
-                        ECHO Uploading %%F ..
-                        :: We'll start the upload process in background to speed up the submission process 
-                        START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
+    IF NOT EXIST !TARGETDIR! (
+        ECHO Warning: Target directory !TARGETDIR! does not exist. Skipping ...
+    ) ELSE (
+        ECHO Checking !TARGETDIR! ...
+        :: Nested FOR does not accept delayed-expansion variables, so we need to use a workaround via pushd/popd
+        pushd !TARGETDIR!
+        FOR /R . %%F IN (*.*) DO (
+            SETLOCAL
+            :: Marker if processed due to selected extensions
+            SET PROCESSED=false
+            :: Extension Check
+            FOR %%E IN (%RELEVANT_EXTENSIONS%) DO (
+                :: Check if one of the relevant extensions matches the file extension
+                IF /I "%%~xF"=="%%E" (
+                    SET PROCESSED=true
+                    :: When the folder is empty [root directory] add extra characters
+                    IF "%%~pF"=="\" (
+                        SET FOLDER=%%~dF%%~pF\\
+                    ) ELSE (
+                        SET FOLDER=%%~dF%%~pF
+                    )
+                    :: File Size Check 
+                    IF %%~zF GTR %COLLECT_MAX_SIZE% (
+                        :: File is too big
+                        IF %DEBUG% == 1 ECHO Skipping %%F due to big file size ...
+                    ) ELSE (
+                        :: Age check
+                        FORFILES /P "!FOLDER:~0,-1!" /M "%%~nF%%~xF" /D -%MAX_AGE% >nul 2>nul && (
+                            :: File is too old
+                            IF %DEBUG% == 1 ECHO Skipping %%F due to age ...
+                        ) || (
+                            :: Upload
+                            ECHO Uploading %%F ..
+                            :: We'll start the upload process in background to speed up the submission process 
+                            START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
+                        )
                     )
                 )
             )
+            :: Note that file was skipped due to wrong extension
+            IF %DEBUG% == 1 (
+                IF !PROCESSED! == false ECHO Skipping %%F due to extension ...
+            )
+            ENDLOCAL
         )
-        :: Note that file was skippe due to wrong extension
-        IF %DEBUG% == 1 (
-            IF !PROCESSED! == false ECHO Skipping %%F due to extension ...
-        )
-        ENDLOCAL
+        popd
     )
 )
