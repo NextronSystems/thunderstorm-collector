@@ -129,7 +129,7 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
                             :: Upload
                             ECHO Uploading %%F ..
                             :: We'll start the upload process in background to speed up the submission process
-                            START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
+                            START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/v1/checkAsync%SOURCE%
                         )
                     )
                 )
