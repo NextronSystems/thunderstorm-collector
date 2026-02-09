@@ -55,7 +55,7 @@ if ( $source ne "" ) {
 }
 
 # Composed Values
-our $api_endpoint = "$scheme://$server:$port/api/checkAsync$source";
+our $api_endpoint = "$scheme://$server:$port/api/v1/checkAsync$source";
 our $current_date = time;
 
 # Stats

@@ -229,7 +229,7 @@ if ( $Source -ne "" ) {
     Write-Log "Using Source: $($Source)"
     $SourceParam = "?Source=$Source"
 }
-$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
+$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/v1/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
 
 # ---------------------------------------------------------------------
