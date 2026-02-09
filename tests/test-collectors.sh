@@ -323,7 +323,7 @@ verify_result() {
     # Wrap log entries in array for jq processing
     # Each line is a separate JSON object
     local result
-    result=$(cat "$log_file" | jq -s "$jq_query" 2>&1)
+    result=$(jq -r -s "$jq_query" < "$log_file" 2>&1)
     local jq_exit=$?
 
     if [ $jq_exit -ne 0 ]; then
@@ -333,10 +333,7 @@ verify_result() {
         return 1
     fi
 
-    # Remove quotes if result is a string
-    result=$(echo "$result" | tr -d '"')
-
-    # Check if result matches expected pattern
+    # Check if result matches expected pattern (bash extended regex via =~)
     if [[ $result =~ $expected_pattern ]]; then
         return 0
     else
@@ -425,12 +422,16 @@ cleanup_temp_scripts() {
 # Test Definitions
 # ==============================================================================
 
-# Test format: "name;args;jq_query;pattern;setup_func;cleanup_func"
+# Test format: "name;args;jq_query;pattern"
 # Note: Using semicolon (;) as delimiter because jq queries use pipe (|)
 #
 # Placeholders in args:
 #   PORT    - Replaced with MOCK_PORT
 #   TESTDIR - Replaced with TEST_DATA_DIR
+#
+# pattern notes:
+#   - Matched against the jq result using bash's =~ operator
+#   - Use POSIX Extended Regular Expression (ERE) syntax
 #
 # jq_query notes:
 #   - Log file is wrapped in array with jq -s
@@ -439,34 +440,34 @@ cleanup_temp_scripts() {
 
 # Perl collector tests
 declare -a PERL_TESTS=(
-    "basic_submission;--server localhost:PORT --dir TESTDIR;.[0].response | fromjson | .id;^[0-9]+$;setup_perl_script;cleanup_temp_scripts"
-    "source_param;--server localhost:PORT --source test-client --dir TESTDIR;.[0].uri | capture(\"source=(?<src>[^&]*)\") | .src;^test-client$;setup_perl_script;cleanup_temp_scripts"
-    "file_count;--server localhost:PORT --dir TESTDIR;length;^[1-9][0-9]*$;setup_perl_script;cleanup_temp_scripts"
-    "port_param;--server localhost --port PORT --dir TESTDIR;.[0].response | fromjson | .id;^[0-9]+$;setup_perl_script;cleanup_temp_scripts"
+    "basic_submission;--server localhost:PORT --dir TESTDIR;.[0].response | fromjson | .id;^[0-9]+$"
+    "source_param;--server localhost:PORT --source test-client --dir TESTDIR;.[0].uri | capture(\"source=(?<src>[^&]*)\") | .src;^test-client$"
+    "file_count;--server localhost:PORT --dir TESTDIR;length;^[1-9][0-9]*$"
+    "port_param;--server localhost --port PORT --dir TESTDIR;.[0].response | fromjson | .id;^[0-9]+$"
 )
 
 # Python collector tests
 declare -a PYTHON_TESTS=(
-    "basic_submission;-s localhost -p PORT --dirs TESTDIR;.[0].response | fromjson | .id;^[0-9]+$;setup_python_script;cleanup_temp_scripts"
-    "source_param;-s localhost -p PORT -S test-host --dirs TESTDIR;.[0].uri | capture(\"source=(?<src>[^&]*)\") | .src;^test-host$;setup_python_script;cleanup_temp_scripts"
-    "file_count;-s localhost -p PORT --dirs TESTDIR;length;^[1-9][0-9]*$;setup_python_script;cleanup_temp_scripts"
+    "basic_submission;-s localhost -p PORT --dirs TESTDIR;.[0].response | fromjson | .id;^[0-9]+$"
+    "source_param;-s localhost -p PORT -S test-host --dirs TESTDIR;.[0].uri | capture(\"source=(?<src>[^&]*)\") | .src;^test-host$"
+    "file_count;-s localhost -p PORT --dirs TESTDIR;length;^[1-9][0-9]*$"
 )
 
 # Shell script tests (require script modification)
 declare -a SH_TESTS=(
-    "basic_submission;;.[0].response | fromjson | .id;^[0-9]+$;setup_sh_script;cleanup_temp_scripts"
-    "file_count;;length;^[1-9][0-9]*$;setup_sh_script;cleanup_temp_scripts"
+    "basic_submission;;.[0].response | fromjson | .id;^[0-9]+$"
+    "file_count;;length;^[1-9][0-9]*$"
 )
 
 # PowerShell tests
 declare -a PS1_TESTS=(
-    "basic_submission;-ThunderstormServer localhost -ThunderstormPort PORT -Folder TESTDIR;.[0].response | fromjson | .id;^[0-9]+$;setup_ps1_script;cleanup_temp_scripts"
-    "file_count;-ThunderstormServer localhost -ThunderstormPort PORT -Folder TESTDIR;length;^[1-9][0-9]*$;setup_ps1_script;cleanup_temp_scripts"
+    "basic_submission;-ThunderstormServer localhost -ThunderstormPort PORT -Folder TESTDIR;.[0].response | fromjson | .id;^[0-9]+$"
+    "file_count;-ThunderstormServer localhost -ThunderstormPort PORT -Folder TESTDIR;length;^[1-9][0-9]*$"
 )
 
 # Batch script tests (Windows only, require script modification)
 declare -a BAT_TESTS=(
-    "basic_submission;;.[0].response | fromjson | .id;^[0-9]+$;setup_bat_script;cleanup_temp_scripts"
+    "basic_submission;;.[0].response | fromjson | .id;^[0-9]+$"
 )
 
 # ==============================================================================
@@ -544,17 +545,23 @@ run_test() {
     local test_spec=$2
 
     # Parse test specification (semicolon-delimited to avoid conflict with jq pipe)
-    IFS=';' read -r test_name args jq_query pattern setup_func cleanup_func <<< "$test_spec"
+    IFS=';' read -r test_name args jq_query pattern <<< "$test_spec"
 
     echo "  Running test: $test_name"
 
-    # Call setup function if provided
-    if [ -n "$setup_func" ]; then
-        if ! $setup_func; then
-            echo "    ERROR: Setup function failed"
-            echo "  FAIL"
-            return 1
-        fi
+    # Call setup function based on collector type
+    local setup_ok=true
+    case $collector in
+        perl)   setup_perl_script   || setup_ok=false ;;
+        python) setup_python_script || setup_ok=false ;;
+        sh)     setup_sh_script     || setup_ok=false ;;
+        bat)    setup_bat_script    || setup_ok=false ;;
+        ps1)    setup_ps1_script    || setup_ok=false ;;
+    esac
+    if [ "$setup_ok" = false ]; then
+        echo "    ERROR: Setup function failed"
+        echo "  FAIL"
+        return 1
     fi
 
     # Replace placeholders in args
@@ -563,7 +570,7 @@ run_test() {
 
     # Start mock server
     if ! start_mock_server "$MOCK_PORT"; then
-        [ -n "$cleanup_func" ] && $cleanup_func
+        cleanup_temp_scripts
         echo "  FAIL"
         return 1
     fi
@@ -618,7 +625,7 @@ run_test() {
     # If collector failed/timed out, show log and fail
     if [ $collector_exit -ne 0 ]; then
         show_log_snippet "$MOCK_LOG_FILE"
-        [ -n "$cleanup_func" ] && $cleanup_func
+        cleanup_temp_scripts
         $RM_CMD -f "$MOCK_LOG_FILE"
         echo "  FAIL"
         return 1
@@ -627,25 +634,25 @@ run_test() {
     # Verify results
     if ! verify_result "$jq_query" "$pattern" "$MOCK_LOG_FILE"; then
         show_log_snippet "$MOCK_LOG_FILE"
-        [ -n "$cleanup_func" ] && $cleanup_func
+        cleanup_temp_scripts
         $RM_CMD -f "$MOCK_LOG_FILE"
         echo "  FAIL"
         return 1
     fi
 
     # Success - cleanup
-    [ -n "$cleanup_func" ] && $cleanup_func
+    cleanup_temp_scripts
     $RM_CMD -f "$MOCK_LOG_FILE"
     echo "  PASS"
     return 0
 }
 
 # Run all tests for a collector
-# Arguments: collector_name, collector_type, tests_array_name
+# Arguments: collector_name, collector_type, test_specs...
 run_collector_tests() {
     local name=$1
     local collector_type=$2
-    local tests_array_name=$3
+    shift 2
 
     echo ""
     echo "========================================"
@@ -660,12 +667,10 @@ run_collector_tests() {
         return 1
     fi
 
-    # Get tests array by reference
-    local -n tests=$tests_array_name
     local passed=0
     local failed=0
 
-    for test_spec in "${tests[@]}"; do
+    for test_spec in "$@"; do
         if run_test "$collector_type" "$test_spec"; then
             ((passed++))
             ((TOTAL_PASSED++))
@@ -851,32 +856,32 @@ main() {
     # Run tests for specified collector(s)
     case $COLLECTOR_KEYWORD in
         perl|pl)
-            run_collector_tests "Perl" "perl" PERL_TESTS || overall_success=1
+            run_collector_tests "Perl" "perl" "${PERL_TESTS[@]}" || overall_success=1
             ;;
         python|py)
-            run_collector_tests "Python" "python" PYTHON_TESTS || overall_success=1
+            run_collector_tests "Python" "python" "${PYTHON_TESTS[@]}" || overall_success=1
             ;;
         sh|bash)
-            run_collector_tests "Shell" "sh" SH_TESTS || overall_success=1
+            run_collector_tests "Shell" "sh" "${SH_TESTS[@]}" || overall_success=1
             ;;
         ps1|powershell)
-            run_collector_tests "PowerShell" "ps1" PS1_TESTS || overall_success=1
+            run_collector_tests "PowerShell" "ps1" "${PS1_TESTS[@]}" || overall_success=1
             ;;
         bat|batch)
-            run_collector_tests "Batch" "bat" BAT_TESTS || overall_success=1
+            run_collector_tests "Batch" "bat" "${BAT_TESTS[@]}" || overall_success=1
             ;;
         all)
             # Run all applicable collectors
-            run_collector_tests "Perl" "perl" PERL_TESTS || overall_success=1
-            run_collector_tests "Python" "python" PYTHON_TESTS || overall_success=1
-            run_collector_tests "Shell" "sh" SH_TESTS || overall_success=1
+            run_collector_tests "Perl" "perl" "${PERL_TESTS[@]}" || overall_success=1
+            run_collector_tests "Python" "python" "${PYTHON_TESTS[@]}" || overall_success=1
+            run_collector_tests "Shell" "sh" "${SH_TESTS[@]}" || overall_success=1
 
             # PowerShell - try on all platforms (pwsh on Linux, powershell.exe on Windows)
-            run_collector_tests "PowerShell" "ps1" PS1_TESTS || overall_success=1
+            run_collector_tests "PowerShell" "ps1" "${PS1_TESTS[@]}" || overall_success=1
 
             # Batch - Windows only
             if [ "$PLATFORM" = "windows" ]; then
-                run_collector_tests "Batch" "bat" BAT_TESTS || overall_success=1
+                run_collector_tests "Batch" "bat" "${BAT_TESTS[@]}" || overall_success=1
             else
                 echo ""
                 echo "Skipping Batch collector tests (Windows only)"
