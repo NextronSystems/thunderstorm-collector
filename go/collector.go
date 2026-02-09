@@ -111,9 +111,9 @@ type CollectionStatistics struct {
 	// Timings (in nanoseconds, converted to seconds/milliseconds for display)
 
 	// timeWalking measures the time spent walking the file system.
-	timeWalking      int64
+	timeWalking int64
 	// timeReading measures the time spent reading file metadata and performing checks (e.g., magic header check).
-	timeReading      int64
+	timeReading int64
 	// timeTransmitting measures the time spent on reading file content and transmitting it to the server.
 	timeTransmitting int64
 
@@ -189,7 +189,7 @@ func (c *Collector) StartWorkers() {
 
 func (c *Collector) CheckThunderstormUp() error {
 	c.debugf("Checking whether Thunderstorm at %s answers", c.Server)
-	response, err := http.Get(fmt.Sprintf("%s/api/status", c.Server))
+	response, err := http.Get(fmt.Sprintf("%s/api/v1/status", c.Server))
 	if err != nil {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
 			if opError, isOpError := urlError.Err.(*net.OpError); isOpError {
@@ -209,7 +209,7 @@ func (c *Collector) CheckThunderstormUp() error {
 	if response.StatusCode != 200 {
 		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d: %s", response.StatusCode, body)
 	}
-	c.debugf("Read status page from %s/api/status", c.Server)
+	c.debugf("Read status page from %s/api/v1/status", c.Server)
 	return nil
 }
 
@@ -514,9 +514,9 @@ func (c *Collector) thunderstormUrl() string {
 
 	var apiEndpoint string
 	if c.Sync {
-		apiEndpoint = "api/check"
+		apiEndpoint = "api/v1/check"
 	} else {
-		apiEndpoint = "api/checkAsync"
+		apiEndpoint = "api/v1/checkAsync"
 	}
 
 	return fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
