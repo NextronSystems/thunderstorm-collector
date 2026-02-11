@@ -28,6 +28,16 @@ $(foreach arch,$(ALLARCHS), \
 		$(eval $(os)/$(arch): bin/$(arch)-$(os)-thunderstorm-collector$(if $(findstring windows,$(os)),.exe,)) \
 ))
 
+# Build rule for individual binaries
+# Binary names are in arch-os format (e.g., amd64-linux-thunderstorm-collector)
+BUILD_ENV = GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
+
+bin/%: $(wildcard *.go)
+	@mkdir -p bin
+	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS_RELEASE)"
+
+OUTINDENT := $(shell printf '  %.0s' {1..${MAKELEVEL})
+
 .PHONY: help
 help: ## Show this help menu
 	@echo "Thunderstorm Collector - Build System"
@@ -61,6 +71,8 @@ all: ## Build binaries for all supported platforms
 		else \
 			echo "bin/$$arch-$$os-thunderstorm-collector"; \
 		fi))
+	@echo ""
+	@echo "Binaries built in bin/"
 
 .PHONY: release
 release: all ## Create distribution packages (binary + config) for all platforms
@@ -95,18 +107,10 @@ release: all ## Create distribution packages (binary + config) for all platforms
 
 .PHONY: clean
 clean: ## Remove all build artifacts
-	@echo "Cleaning build artifacts..."
+	@echo "${OUTINDENT}Cleaning build artifacts..."
 	@rm -rf bin dist
-	@echo "Clean complete."
+	@echo "${OUTINDENT}Clean complete."
 
 .PHONY: test
 test: ## Run tests
 	go test -v -cover ./...
-
-# Build rule for individual binaries
-# Binary names are in arch-os format (e.g., amd64-linux-thunderstorm-collector)
-BUILD_ENV = GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
-
-bin/%: $(wildcard *.go)
-	@mkdir -p bin
-	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS_RELEASE)"

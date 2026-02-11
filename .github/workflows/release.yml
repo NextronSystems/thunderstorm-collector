@@ -22,12 +22,13 @@ jobs:
           cache-dependency-path: ./go/go.sum
       - name: Display Go version
         run: go version
-      - name: Build binary packages
+      - name: Build project
+        env:
+          VERSION: ${{ github.ref }}
         run: |
-          cd go
           make release
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          files: go/dist/*
+          files: release/*
