@@ -21,14 +21,13 @@ VERSION := ${VERSION:refs/tags/%=%}
 release:
 	@mkdir -p release
 	@echo "Building release ${VERSION}"
-	@make -C go release
+	@make --no-print-directory -C go release
 	@for f in go/dist/thunderstorm-collector*; do \
 		suffix=$${f##*thunderstorm-collector-}; \
 		cp "$$f" "release/thunderstorm-collector-${VERSION:v%=%}-$${suffix}"; done
 	@for f in scripts/thunderstorm-collector.* go/config.yml; do \
 		ext=$${f##*.}; if [ "$$ext" = "$$f" ]; then ext=''; else ext=".$$ext"; fi ; \
 		cp "$$f" "release/$$(basename $${f%$$ext})-${VERSION:v%=%}$${ext}"; done
-	@echo ""
 	@echo "Release artifacts placed in release/"
 
 .PHONY: clean

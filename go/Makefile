@@ -2,7 +2,8 @@
 
 # Get all supported platforms and filter out unsupported ones
 ALL_TARGETS := $(shell go tool dist list)
-BLACKLIST_OS := android ios
+# BLACKLIST_OS := android ios
+BLACKLIST_OS := android ios linux openbsd netbsd
 FILTERED_TARGETS := $(filter-out $(addsuffix /%,$(BLACKLIST_OS)),$(ALL_TARGETS))
 
 # Extract unique architectures and operating systems
@@ -20,13 +21,19 @@ CURRENT_ARCH := $(shell go env GOARCH)
 .DEFAULT_GOAL := build
 
 # Generate targets for each arch/os combination (enables tab completion)
-$(foreach arch,$(ALLARCHS), \
-	$(foreach os,$(ALLOS), \
-		$(eval bin/$(arch)-$(os)-%: GOARCH=$(arch)) \
-		$(eval bin/$(arch)-$(os)-%: GOOS=$(os)) \
-		$(eval .PHONY: $(os)/$(arch)) \
-		$(eval $(os)/$(arch): bin/$(arch)-$(os)-thunderstorm-collector$(if $(findstring windows,$(os)),.exe,)) \
-))
+$(foreach target,$(FILTERED_TARGETS), \
+	$(eval arch := $(word 2,$(subst /, ,$(target)))) \
+	$(eval os := $(word 1,$(subst /, ,$(target)))) \
+	$(eval bin/$(arch)-$(os)-%: GOARCH=$(arch)) \
+	$(eval bin/$(arch)-$(os)-%: GOOS=$(os)) \
+	$(eval .PHONY: $(os)/$(arch)) \
+	$(eval TMP_FILE := $(arch)-$(os)-thunderstorm-collector$(if $(findstring windows,$(os)),.exe,)) \
+	$(eval $(os)/$(arch): bin/$(TMP_FILE)) \
+	$(eval all: bin/$(TMP_FILE)) \
+	$(eval TMP_PACK := thunderstorm-collector-$(arch)-$(os)$(if $(findstring windows,$(os)),.zip,.tar.gz)) \
+	$(eval dist/$(TMP_PACK): bin/$(TMP_FILE)) \
+	$(eval release: dist/$(TMP_PACK)) \
+)
 
 # Build rule for individual binaries
 # Binary names are in arch-os format (e.g., amd64-linux-thunderstorm-collector)
@@ -34,9 +41,34 @@ BUILD_ENV = GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
 
 bin/%: $(wildcard *.go)
 	@mkdir -p bin
+	@echo "$(OUTINDENT)Building for $(GOOS)/$(GOARCH): $@"
+	@echo -n "$(OUTINDENT)  "
 	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS_RELEASE)"
 
-OUTINDENT := $(shell printf '  %.0s' {1..${MAKELEVEL})
+dist/%:
+	@mkdir -p dist
+	@pack_path="$@"; \
+	pack_file=$${pack_path#dist/}; \
+	ext=$${pack_file#*.}; \
+	pack_name=$${pack_file%%.*}; \
+	arch_os=$${pack_name#thunderstorm-collector-}; \
+	arch=$${arch_os%%-*}; \
+	os=$${arch_os#*-}; \
+	binary=bin/$$arch-$$os-thunderstorm-collector; \
+	archive_cmd="tar -czf"; \
+	if [ "$$ext" = "zip" ]; then \
+		binary=$$binary.exe; \
+		archive_cmd="zip -q -r"; \
+	fi; \
+	pack_dir=dist/$$pack_name; \
+	mkdir -p $$pack_dir; \
+	cp $$binary $$pack_dir/; \
+	cp config.yml $$pack_dir/; \
+	cd dist && $$archive_cmd "$$pack_file" "$$pack_name/" && cd ..; \
+	echo "$(OUTINDENT)Created package: dist/$$pack_file"; \
+	rm -rf $$pack_dir
+
+OUTINDENT := $(shell for ((i=0;i<${MAKELEVEL};i++)); do printf '  %.0s' $$i; done)
 
 .PHONY: help
 help: ## Show this help menu
@@ -59,51 +91,12 @@ help: ## Show this help menu
 .PHONY: build
 build: bin/$(CURRENT_ARCH)-$(CURRENT_OS)-thunderstorm-collector$(if $(findstring windows,$(CURRENT_OS)),.exe,) ## Build for current platform
 
+# Build binaries for all supported platforms (prerequisites are set above)
 .PHONY: all
 all: LDFLAGS = $(LDFLAGS_RELEASE)
-all: ## Build binaries for all supported platforms
-	@echo "Building binaries for all platforms..."
-	@$(MAKE) $(foreach target,$(FILTERED_TARGETS),$(shell \
-		os=$$(echo $(target) | cut -d'/' -f1); \
-		arch=$$(echo $(target) | cut -d'/' -f2); \
-		if [ "$$os" = "windows" ]; then \
-			echo "bin/$$arch-$$os-thunderstorm-collector.exe"; \
-		else \
-			echo "bin/$$arch-$$os-thunderstorm-collector"; \
-		fi))
-	@echo ""
-	@echo "Binaries built in bin/"
 
+# Create distribution packages (binary + config) for all platforms (prerequisites are set above)
 .PHONY: release
-release: all ## Create distribution packages (binary + config) for all platforms
-	@echo "Creating distribution packages..."
-	@rm -rf dist
-	@mkdir -p dist
-	@for target in $(FILTERED_TARGETS); do \
-		os=$$(echo $$target | cut -d'/' -f1); \
-		arch=$$(echo $$target | cut -d'/' -f2); \
-		binary=bin/$$arch-$$os-thunderstorm-collector; \
-		if [ "$$os" = "windows" ]; then \
-			binary=$$binary.exe; \
-		fi; \
-		if [ -f "$$binary" ]; then \
-			package_name=thunderstorm-collector-$$arch-$$os; \
-			package_dir=dist/$$package_name; \
-			mkdir -p $$package_dir; \
-			cp $$binary $$package_dir/; \
-			cp config.yml $$package_dir/; \
-			if [ "$$os" = "windows" ]; then \
-				cd dist && zip -q -r $$package_name.zip $$package_name/ && cd ..; \
-				echo "Created package: dist/$$package_name.zip"; \
-			else \
-				cd dist && tar -czf $$package_name.tar.gz $$package_name/ && cd ..; \
-				echo "Created package: dist/$$package_name.tar.gz"; \
-			fi; \
-			rm -rf $$package_dir; \
-		fi; \
-	done
-	@echo ""
-	@echo "Distribution packages created in dist/"
 
 .PHONY: clean
 clean: ## Remove all build artifacts
