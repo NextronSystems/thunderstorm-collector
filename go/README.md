@@ -244,8 +244,8 @@ Processing:
 
 Timing:
   - File system walk: 2.5s
-  - Reading files: 1.2s
-  - Transmitting files: 45.3s
+  - File metadata analysis: 1.2s
+  - File read and transmission: 45.3s
   - Total time: 49.3s
 ```
 

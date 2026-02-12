@@ -90,26 +90,41 @@ type Collector struct {
 }
 
 type CollectionStatistics struct {
+	// Note: The int64 fields for counting are accessed atomically thus MUST be
+	// 64-bit aligned and MUST be kept as first words in this struct.
+	// Info: "The first word in an allocated struct" is guaranteed to be 64-bit
+	// aligned, see https://pkg.go.dev/sync/atomic#pkg-note-BUG . And so are all
+	// consecutive fields of the struct, as long as they are also 64-bit in size.
+	// Therefore, we keep all int64 fields at the top of the struct to ensure
+	// proper alignment for atomic operations.
+
 	// Discovery
+
 	filesDiscovered int64
+
+	// Processing
+
+	uploadedFiles int64
+	uploadErrors  int64
+	fileErrors    int64
+
+	// Timings (in nanoseconds, converted to seconds/milliseconds for display)
+
+	// timeWalking measures the time spent walking the file system.
+	timeWalking      int64
+	// timeReading measures the time spent reading file metadata and performing checks (e.g., magic header check).
+	timeReading      int64
+	// timeTransmitting measures the time spent on reading file content and transmitting it to the server.
+	timeTransmitting int64
 
 	// Exclusions - using a map with mutex for thread-safe access.
 	// We use a regular map with mutex instead of sync.Map because:
 	// 1. sync.Map stores values as interface{}, requiring type assertions for atomic increments
 	// 2. The map has a fixed small size (7 SkipReason values), so contention is minimal
 	// 3. Increment operations (Load + Store) are simpler with a mutex than sync.Map
+
 	skipReasons map[SkipReason]int64
 	skipMutex   sync.Mutex
-
-	// Processing
-	uploadedFiles int64
-	uploadErrors  int64
-	fileErrors    int64
-
-	// Timing (in nanoseconds, converted to seconds/milliseconds for display)
-	timeWalking      int64
-	timeReading      int64
-	timeTransmitting int64
 }
 
 // incrementSkipReason safely increments the counter for a given skip reason.
@@ -207,6 +222,7 @@ func (c *Collector) Collect() {
 func (c *Collector) collectPath(root string) {
 	c.logger.Printf("Walking through '%s' to find files to upload", root)
 	walkStart := time.Now()
+	var submissionWait time.Duration
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -241,11 +257,13 @@ func (c *Collector) collectPath(root string) {
 			c.debugf("Skipping file '%s' (%s)", path, reason.String())
 			c.Statistics.incrementSkipReason(reason)
 		} else {
+			submissionStart := time.Now()
 			c.filesToUpload <- infoWithPath{info, path, 0}
+			submissionWait += time.Since(submissionStart)
 		}
 		return nil
 	})
-	walkDuration := time.Since(walkStart)
+	walkDuration := time.Since(walkStart) - submissionWait
 	atomic.AddInt64(&c.Statistics.timeWalking, int64(walkDuration))
 	if err != nil {
 		c.logger.Printf("Could not walk path '%s': %v\n", root, err)
@@ -292,9 +310,9 @@ func (c *Collector) Stop() {
 	readTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeReading))
 	transmitTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeTransmitting))
 	c.logger.Printf("  - File system walk: %v", walkTime.Round(time.Millisecond))
-	c.logger.Printf("  - Reading files: %v", readTime.Round(time.Millisecond))
+	c.logger.Printf("  - File metadata analysis: %v", readTime.Round(time.Millisecond))
 	if !c.DryRun {
-		c.logger.Printf("  - Transmitting files: %v", transmitTime.Round(time.Millisecond))
+		c.logger.Printf("  - File read and transmission: %v", transmitTime.Round(time.Millisecond))
 	}
 	c.logger.Printf("  - Total time: %v", totalDuration.Round(time.Millisecond))
 	c.logger.Printf("")
