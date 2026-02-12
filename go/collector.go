@@ -321,7 +321,7 @@ func (c *Collector) Stop() {
 type infoWithPath struct {
 	os.FileInfo
 	path    string
-	retries int
+	retries uint
 }
 
 const (
