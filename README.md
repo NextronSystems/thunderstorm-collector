@@ -89,7 +89,6 @@ This creates:
 
 **Scripts** - Use when:
 - Running a compiled binary isn't feasible
-- Working in highly-sensitive environments requiring source code review
 - Using unsupported platforms (proprietary OS, IoT devices)
 - Requiring low-effort customization of collection logic
 

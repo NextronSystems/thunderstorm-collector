@@ -21,7 +21,7 @@ VERSION := ${VERSION:refs/tags/%=%}
 release:
 	@mkdir -p release
 	@echo "Building release ${VERSION}"
-	@make --no-print-directory -C go release
+	@$(MAKE) --no-print-directory -C go release
 	@for f in go/dist/thunderstorm-collector*; do \
 		suffix=$${f##*thunderstorm-collector-}; \
 		cp "$$f" "release/thunderstorm-collector-${VERSION:v%=%}-$${suffix}"; done
@@ -34,9 +34,9 @@ release:
 clean: ## Remove all release artifacts
 	@echo "Cleaning release artifacts..."
 	@rm -rf release
-	@make --no-print-directory -C go clean
+	@$(MAKE) --no-print-directory -C go clean
 	@echo "Clean complete."
 
 .PHONY: test
 test:
-	@make -C go test
+	@$(MAKE) -C go test
