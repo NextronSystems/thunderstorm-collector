@@ -2,8 +2,7 @@
 
 # Get all supported platforms and filter out unsupported ones
 ALL_TARGETS := $(shell go tool dist list)
-# BLACKLIST_OS := android ios
-BLACKLIST_OS := android ios linux openbsd netbsd
+BLACKLIST_OS := android ios
 FILTERED_TARGETS := $(filter-out $(addsuffix /%,$(BLACKLIST_OS)),$(ALL_TARGETS))
 
 # Extract unique architectures and operating systems
@@ -21,6 +20,7 @@ CURRENT_ARCH := $(shell go env GOARCH)
 .DEFAULT_GOAL := build
 
 # Generate targets for each arch/os combination (enables tab completion)
+# Note: .tar.gz by default, .zip (and .exe for contained binaries) on Windows.
 $(foreach target,$(FILTERED_TARGETS), \
 	$(eval arch := $(word 2,$(subst /, ,$(target)))) \
 	$(eval os := $(word 1,$(subst /, ,$(target)))) \
@@ -43,7 +43,7 @@ bin/%: $(wildcard *.go)
 	@mkdir -p bin
 	@echo "$(OUTINDENT)Building for $(GOOS)/$(GOARCH): $@"
 	@echo -n "$(OUTINDENT)  "
-	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS_RELEASE)"
+	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS)"
 
 dist/%:
 	@mkdir -p dist
@@ -52,23 +52,22 @@ dist/%:
 	ext=$${pack_file#*.}; \
 	pack_name=$${pack_file%%.*}; \
 	arch_os=$${pack_name#thunderstorm-collector-}; \
-	arch=$${arch_os%%-*}; \
-	os=$${arch_os#*-}; \
-	binary=bin/$$arch-$$os-thunderstorm-collector; \
+	binary=bin/$$arch_os-thunderstorm-collector; \
 	archive_cmd="tar -czf"; \
 	if [ "$$ext" = "zip" ]; then \
 		binary=$$binary.exe; \
 		archive_cmd="zip -q -r"; \
 	fi; \
 	pack_dir=dist/$$pack_name; \
-	mkdir -p $$pack_dir; \
-	cp $$binary $$pack_dir/; \
-	cp config.yml $$pack_dir/; \
-	cd dist && $$archive_cmd "$$pack_file" "$$pack_name/" && cd ..; \
-	echo "$(OUTINDENT)Created package: dist/$$pack_file"; \
+	mkdir -p $$pack_dir && \
+	cp $$binary $$pack_dir/ && \
+	cp config.yml $$pack_dir/ && \
+	cd dist && $$archive_cmd "$$pack_file" "$$pack_name/" && cd .. && \
+	echo "$(OUTINDENT)Created package: dist/$$pack_file" && \
 	rm -rf $$pack_dir
 
-OUTINDENT := $(shell for ((i=0;i<${MAKELEVEL};i++)); do printf '  %.0s' $$i; done)
+# Indent output for nested make calls (e.g., when calling from top-level directory)
+OUTINDENT := $(shell for ((i=0;i<${MAKELEVEL};i++)); do echo -n "  "; done)
 
 .PHONY: help
 help: ## Show this help menu
@@ -87,9 +86,19 @@ help: ## Show this help menu
 	@echo ""
 	@echo "Note: Packages include only the binary and config.yml."
 	@echo "      Scripts are standalone alternatives to the Go binary."
-
+	@echo ""
+	@echo "Note on format:"
+	@echo "      Packages are gzipped tar archives (.tar.gz) by default,"
+	@echo "      except for Windows, which uses zip (.zip)."
+	@echo "      On Windows, binaries have an additional .exe suffix."
+ 
+# Build for current platform
 .PHONY: build
-build: bin/$(CURRENT_ARCH)-$(CURRENT_OS)-thunderstorm-collector$(if $(findstring windows,$(CURRENT_OS)),.exe,) ## Build for current platform
+build: bin/$(CURRENT_ARCH)-$(CURRENT_OS)-thunderstorm-collector$(if $(findstring windows,$(CURRENT_OS)),.exe,)
+## Enforce rebuild for current platform to pick up release flags
+bin/$(CURRENT_ARCH)-$(CURRENT_OS)-thunderstorm-collector$(if $(findstring windows,$(CURRENT_OS)),.exe,): FORCE
+
+FORCE:
 
 # Build binaries for all supported platforms (prerequisites are set above)
 .PHONY: all
@@ -97,6 +106,7 @@ all: LDFLAGS = $(LDFLAGS_RELEASE)
 
 # Create distribution packages (binary + config) for all platforms (prerequisites are set above)
 .PHONY: release
+release: LDFLAGS = $(LDFLAGS_RELEASE)
 
 .PHONY: clean
 clean: ## Remove all build artifacts
