@@ -20,6 +20,7 @@
 #     - curl (for shell script collector)
 #     - powershell.exe (Windows) or pwsh (PowerShell Core on Linux)
 #     - cmd.exe (Windows only, for batch scripts)
+#     - go 1.15+ toolchain with make (for Go collector)
 #
 # PLATFORM SUPPORT:
 #   - Linux: Native bash environment
@@ -56,6 +57,7 @@
 #     sh, bash        - Test Shell collector
 #     ps1, powershell - Test PowerShell collector
 #     bat, batch      - Test Batch collector (Windows only)
+#     go              - Test Go collector
 #     all             - Test all applicable collectors
 #
 #   Options:
@@ -109,6 +111,8 @@ COLLECTOR_TIMEOUT="${COLLECTOR_TIMEOUT:-120}"
 MOCK_SERVER_PID=""
 MOCK_LOG_FILE=""
 TEMP_SCRIPT_PATH=""
+GO_BINARY_PATH=""
+GO_TEMPLATE_PATH=""
 COLLECTOR_KEYWORD=""
 
 # Test results
@@ -410,11 +414,42 @@ setup_ps1_script() {
     $CP_CMD "$PROJECT_ROOT/scripts/thunderstorm-collector.ps1" "$TEMP_SCRIPT_PATH"
 }
 
+# Setup Go collector binary (build via make)
+setup_go_binary() {
+    # Build the Go collector
+    if ! make -C "$PROJECT_ROOT/go" build >/dev/null 2>&1; then
+        echo "    ERROR: Failed to build Go collector"
+        return 1
+    fi
+
+    # Determine the binary name for the current platform
+    local arch os_name suffix=""
+    arch=$(go env GOARCH)
+    os_name=$(go env GOOS)
+    [ "$os_name" = "windows" ] && suffix=".exe"
+    GO_BINARY_PATH="$PROJECT_ROOT/go/bin/${arch}-${os_name}-thunderstorm-collector${suffix}"
+
+    if [ ! -x "$GO_BINARY_PATH" ]; then
+        echo "    ERROR: Go binary not found at $GO_BINARY_PATH"
+        return 1
+    fi
+
+    # Create an empty YAML template to prevent the binary from reading the
+    # default config.yml (which restricts extensions and file sizes)
+    GO_TEMPLATE_PATH=$($MKTEMP_CMD --suffix=.yml)
+    echo "---" > "$GO_TEMPLATE_PATH"
+    echo "max-filesize: 100" >> "$GO_TEMPLATE_PATH"
+}
+
 # Cleanup temporary scripts
 cleanup_temp_scripts() {
     if [ -n "$TEMP_SCRIPT_PATH" ] && [ -f "$TEMP_SCRIPT_PATH" ]; then
         $RM_CMD -f "$TEMP_SCRIPT_PATH"
         TEMP_SCRIPT_PATH=""
+    fi
+    if [ -n "$GO_TEMPLATE_PATH" ] && [ -f "$GO_TEMPLATE_PATH" ]; then
+        $RM_CMD -f "$GO_TEMPLATE_PATH"
+        GO_TEMPLATE_PATH=""
     fi
 }
 
@@ -468,6 +503,15 @@ declare -a PS1_TESTS=(
 # Batch script tests (Windows only, require script modification)
 declare -a BAT_TESTS=(
     "basic_submission;;.[0].response | fromjson | .id;^[0-9]+$"
+)
+
+# Go collector tests
+# Note: The Go collector issues a GET /api/v1/status health check before uploading,
+# so jq queries must filter for checkAsync entries to skip the status request.
+declare -a GO_TESTS=(
+    "basic_submission;-s localhost --port PORT -p TESTDIR;[.[] | select(.handler == \"CheckAsync\")] | .[0].response | fromjson | .id;^[0-9]+$"
+    "source_param;-s localhost --port PORT -o test-device -p TESTDIR;[.[] | select(.handler == \"CheckAsync\")] | .[0].uri | capture(\"source=(?<src>[^&]*)\") | .src;^test-device$"
+    "file_count;-s localhost --port PORT -p TESTDIR;[.[] | select(.handler == \"CheckAsync\")] | length;^[1-9][0-9]*$"
 )
 
 # ==============================================================================
@@ -529,6 +573,17 @@ check_collector_requirements() {
                 return 1
             fi
             ;;
+        go)
+            if ! command -v go >/dev/null 2>&1; then
+                echo "ERROR: Go toolchain not found"
+                echo "Install from: https://go.dev/dl/"
+                return 1
+            fi
+            if ! command -v make >/dev/null 2>&1; then
+                echo "ERROR: make not found (required to build Go collector)"
+                return 1
+            fi
+            ;;
         *)
             echo "ERROR: Unknown collector: $collector"
             return 1
@@ -557,6 +612,7 @@ run_test() {
         sh)     setup_sh_script     || setup_ok=false ;;
         bat)    setup_bat_script    || setup_ok=false ;;
         ps1)    setup_ps1_script    || setup_ok=false ;;
+        go)     setup_go_binary     || setup_ok=false ;;
     esac
     if [ "$setup_ok" = false ]; then
         echo "    ERROR: Setup function failed"
@@ -603,6 +659,9 @@ run_test() {
             local bat_path
             bat_path=$(to_native_path "$TEMP_SCRIPT_PATH")
             collector_cmd="$CMD_CMD /c \"$bat_path\" $args"
+            ;;
+        go)
+            collector_cmd="\"$GO_BINARY_PATH\" --template \"$GO_TEMPLATE_PATH\" $args"
             ;;
     esac
 
@@ -707,6 +766,7 @@ COLLECTORS:
   sh, bash        Test Shell collector (thunderstorm-collector.sh)
   ps1, powershell Test PowerShell collector (thunderstorm-collector.ps1)
   bat, batch      Test Batch collector (thunderstorm-collector.bat) [Windows]
+  go              Test Go collector (go/)
   all             Test all applicable collectors
 
 OPTIONS:
@@ -870,6 +930,9 @@ main() {
         bat|batch)
             run_collector_tests "Batch" "bat" "${BAT_TESTS[@]}" || overall_success=1
             ;;
+        go)
+            run_collector_tests "Go" "go" "${GO_TESTS[@]}" || overall_success=1
+            ;;
         all)
             # Run all applicable collectors
             run_collector_tests "Perl" "perl" "${PERL_TESTS[@]}" || overall_success=1
@@ -878,6 +941,9 @@ main() {
 
             # PowerShell - try on all platforms (pwsh on Linux, powershell.exe on Windows)
             run_collector_tests "PowerShell" "ps1" "${PS1_TESTS[@]}" || overall_success=1
+
+            # Go collector
+            run_collector_tests "Go" "go" "${GO_TESTS[@]}" || overall_success=1
 
             # Batch - Windows only
             if [ "$PLATFORM" = "windows" ]; then
