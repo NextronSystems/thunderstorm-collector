@@ -1,0 +1,51 @@
+name: Collector Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: ./go/go.sum
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq perl libwww-perl python3 curl
+
+      - name: Install PowerShell
+        run: |
+          # pwsh is pre-installed on ubuntu-latest GitHub runners;
+          # install only if missing.
+          if ! command -v pwsh &>/dev/null; then
+            sudo apt-get install -y wget apt-transport-https software-properties-common
+            source /etc/os-release
+            wget -q "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb"
+            sudo dpkg -i packages-microsoft-prod.deb
+            rm packages-microsoft-prod.deb
+            sudo apt-get update
+            sudo apt-get install -y powershell
+          fi
+          pwsh --version
+
+      - name: Download thunderstorm-mock
+        run: |
+          gh release download --repo NextronSystems/thunderstorm-mock \
+            --pattern 'thunderstorm-mock-*' --dir .
+          mv thunderstorm-mock-* thunderstorm-mock
+          chmod +x thunderstorm-mock
+          ./thunderstorm-mock --version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Run collector tests
+        run: bash tests/test-collectors.sh all

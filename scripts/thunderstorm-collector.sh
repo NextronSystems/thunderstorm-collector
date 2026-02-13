@@ -150,7 +150,7 @@ do
             for retry in {1..3}; do
                 # Submit sample
                 result=$(curl -s -X POST \
-                        "$scheme://$THUNDERSTORM_SERVER:$THUNDERSTORM_PORT/api/$api_endpoint$source" \
+                        "$scheme://$THUNDERSTORM_SERVER:$THUNDERSTORM_PORT/api/v1/$api_endpoint$source" \
                         --form "file=@${file_path};filename=${file_path}")
                 curl_exit=$?
                 if [ $curl_exit -ne 0 ]; then
