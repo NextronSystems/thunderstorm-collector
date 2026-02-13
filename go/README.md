@@ -10,11 +10,13 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
                                      Specify multiple CAs by using this flag multiple times.
-      --debug                        Print debugging information.
+      --debug                        Print debugging information. Shows detailed information about each file processed, including why files are skipped or would be sent.
+      --dry-run                      Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode.
       --exclude strings              Paths that should be excluded. Supports globbing with ?, * and **.
                                      Specify multiple excludes by using this flag multiple times.
                                      Example: --exclude C:\tools --exclude C:\Users\**\.git\**
   -e, --extension strings            File extensions that should be collected. If left empty, file extensions are ignored.
+                                     Extensions are checked first; if no extension matches and magic headers are specified, magic headers are checked.
                                      Specify multiple extensions by using this flag multiple times.
                                      Example: -e .exe -e .dll
   -h, --help                         Show this help.
@@ -24,30 +26,31 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
   -l, --logfile string               Write the log to this file as well as to the console.
       --magic strings                Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.
                                      Specify multiple wanted Magic Headers by using this flag multiple times.
+                                     Magic headers are checked only if file extensions don't match (or if no extensions are specified). Maximum magic header length is 1024 bytes.
                                      Example: --magic 4d5a --magic cffa
   -a, --max-age string               Max age of collected files. Files with older modification date are ignored.
                                      Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.
                                      Example: --max-age 10h
   -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
-      --min-cache-file-size int      Upload files with at least the given size (in MB) only once, skipping them when re-encountering them. (default 100)
   -p, --path strings                 Root paths from where files should be collected.
                                      Specify multiple root paths by using this flag multiple times. (default [C:\])
       --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
   -o, --source string                Name for this device in the Thunderstorm log messages. (default "DESKTOP-EEM5B52")
       --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
   -t, --template string              Process default scan parameters from this YAML file. (default "config.yml")
-  -r, --threads int                  How many threads should upload files simultaneously. (default 1)
+  -r, --threads int                  How many threads should upload files simultaneously. Set to 0 to use all available CPU cores, or use negative values to reserve cores (e.g., -2 = all cores except 2). (default 1)
   -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
                                      Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
+                                     Note: Not required when using --dry-run mode.
       --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files.
       --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
 ```
 
-## Config Files
+## Configuration Files
 
-The collectors use config files in YAML format, which can be set using the `-t`/`--template` parameter.
+The collectors use configuration files in YAML format, which can be set using the `-t`/`--template` parameter.
 
-You can use all command line parameters, but you have to use their long form. A typical custom config file `my-config.yml` could look like this:
+You can use all command line parameters, but you have to use their long form. A typical custom configuration file `my-config.yml` could look like this:
 
 ```yaml
 thunderstorm-server: my-thunderstorm.local
@@ -80,9 +83,11 @@ extension:
     - .job
 ```
 
-In the example above, the collector is instructed to send all samples to a server with the FQDN `my-thunderstorm.local`, send only files smaller 10 Megabyte, changed or created within the last 30 days and only files with the given extensions are collected.
+In the example above, the collector is instructed to send all samples to a server with the FQDN `my-thunderstorm.local`, send only files smaller than 10 Megabyte, changed or created within the last 30 days, and only files with the given extensions are collected.
 
-You can then use the config file as a parameter:
+**Note:** When both extensions and magic headers are specified in the configuration file, extensions are checked first. If an extension matches, the file is included. If no extension matches, magic headers are checked as a fallback.
+
+You can then use the configuration file as a parameter:
 
 ```bash
 ./amd64-linux-thunderstorm-collector -t config.yml
@@ -119,7 +124,7 @@ Note: We haven't tested all compiled binaries on the respective platforms. Pleas
 
 In a THOR Thunderstorm setup, the system load moves from the end systems to the Thunderstorm server.
 
-In cases in which you don’t use the default configuration file provided with the collectors (`config.yml`) and collect all files from an end system, the Thunderstorm server requires a much higher amount of time to process the samples.
+In cases in which you don't use the default configuration file provided with the collectors (`config.yml`) and collect all files from an end system, the Thunderstorm server requires a much higher amount of time to process the samples.
 
 E.g. A Thunderstorm server with 40 CPU Cores (40 threads) needs 1 hour and 15 minutes to process all 400,000 files sent from a Windows 10 end system. Sending all files from 200 Windows 10 end systems to a Thunderstorm server with that specs would take 10 days to process all the samples.
 
@@ -127,11 +132,33 @@ As a rule of thumb, when using the hardware recommended in the setup guide, you 
 
 We highly recommend using the default configuration file named `config.yml` provided with the collectors.
 
+### File Filtering Logic
+
+The collector uses a two-stage filtering approach for optimal performance:
+
+1. **Metadata filtering** (before queuing): Files are checked for size, age, and file type before being added to the upload queue. This prevents unnecessary processing of files that will be excluded.
+
+2. **Content filtering** (after opening): Files are checked for extension and magic header matches. The logic works as follows:
+   - If file extensions are specified and the file matches an extension, it's included
+   - If extensions don't match (or aren't specified) and magic headers are specified, magic headers are checked
+   - If neither extensions nor magic headers match (and at least one is configured), the file is excluded
+   - If no extensions or magic headers are specified, all files pass content filtering
+
+### Error Handling and Retry Logic
+
+The collector includes automatic retry logic for failed uploads:
+
+- **Retry attempts**: Up to 3 retry attempts are made for failed uploads
+- **Exponential backoff**: Retry delays use exponential backoff starting at 4 seconds (4s, 8s, 16s)
+- **Server rate limiting**: If the server returns HTTP 503 (Service Unavailable), the collector respects the `Retry-After` header or defaults to 30 seconds
+- **Error reporting**: All upload errors are logged and counted in the final statistics
+
 ## Build
 
 ### Build requirements
 
-- Go version 1.12 or higher (older versions may work, but are not tested)
+- Go version 1.15 or higher
+  - Note: We maintain Go 1.15 compatibility to support older systems (Windows XP, old Linux). The codebase uses `ioutil` functions which are available in all Go versions (marked deprecated starting with Go 1.16+, but still functional).
 - make
 
 [Here](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-debian-10) is an instruction on how to install Go on Debian. Install make with `sudo apt install make`.
@@ -156,8 +183,7 @@ A full list of architectures and platforms that can be used can be shown using:
 go tool dist list
 ```
 
-
-### Execution examples
+## Usage Examples
 
 Note: The following examples use the amd64-linux-thunderstorm-collector, replace
 the name of the executable with the one you are using.
@@ -188,7 +214,102 @@ Upload synchronously and write the results to a log file:
 ./amd64-linux-thunderstorm-collector -s thunderstorm.test -l collector.log --upload-synchronous
 ```
 
-### Tested On
+Test collection without sending files (dry-run mode, no server required):
+```
+./amd64-linux-thunderstorm-collector --dry-run --debug -p /path/to/scan
+```
+
+## Collection Statistics
+
+At the end of each collection run, the collector displays comprehensive statistics.
+
+**Example output:**
+
+```
+=== Collection Statistics ===
+
+Files discovered during walk: 1234
+
+Exclusions:
+  - Too big (exceeds max-filesize): 45
+  - Wrong type (no matching extension/magic): 234
+  - Too old (exceeds max-age): 12
+  - Irregular file type: 3
+  - Excluded by glob pattern: 78
+  - Skipped directories: 23
+
+Processing:
+  - Successfully uploaded: 763
+  - Read/transmission errors: 2
+
+Timing:
+  - File system walk: 2.5s
+  - File metadata analysis: 1.2s
+  - File read and transmission: 45.3s
+  - Total time: 49.3s
+```
+
+**Statistics include:**
+- Total files discovered during filesystem walk
+- Detailed breakdown of exclusions by reason (size, type, age, etc.)
+- Processing results (successful uploads, errors)
+- Timing breakdown for different phases (walk, read, transmit)
+
+**Debug Mode:**
+When `--debug` is enabled, the collector prints detailed information for every file:
+- Files that would be sent (with DRY-RUN indicator in dry-run mode)
+- Files that are skipped with specific reasons (too big, wrong type, too old, etc.)
+
+This makes it easy to understand why files are included or excluded from collection.
+
+## Dry-Run Mode
+
+The `--dry-run` flag allows you to test collection behavior without actually sending files to Thunderstorm:
+
+**Benefits:**
+- Test collection without network connectivity
+- Preview what files would be collected before running a real scan
+- Validate configuration without sending data
+- No server connection required
+
+**Usage:**
+```bash
+./amd64-linux-thunderstorm-collector --dry-run -p /path/to/scan
+```
+
+In dry-run mode:
+- Server connection check is skipped
+- Files are discovered, filtered, and processed normally
+- No actual HTTP requests are made
+- Statistics show "would be sent (dry-run)" instead of "uploaded"
+
+## Troubleshooting
+
+### Common Error Messages
+
+- **"thunderstorm-server: not specified"**: The `--thunderstorm-server` parameter is required (unless using `--dry-run`). Make sure to specify the server address or use `--dry-run` for testing.
+- **Thread count options**: Use `-r 4` for a specific number of threads, `-r 0` for all available CPU cores, or negative values to reserve cores (e.g., `-r -2` uses all cores except 2). The minimum is always 1 thread.
+- **"max-filesize: must be > 0"**: The maximum file size must be greater than 0 MB.
+- **"max-age: invalid suffix"**: The max-age parameter supports suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Example: `--max-age 10h`
+- **"magic header too long"**: Magic headers are limited to 1024 bytes. Check your magic header configuration.
+- **"Could not open CA file"**: The specified CA certificate file cannot be opened. Check the file path and permissions.
+- **"Could not add CA to certificate pool"**: The CA certificate file is not in valid PEM format or cannot be parsed.
+
+### Performance Tips
+
+- Use the default configuration file `config.yml` to avoid collecting unnecessary files
+- Set appropriate `--max-filesize` to avoid uploading very large files
+- Use `--exclude` patterns to skip known directories (e.g., `--exclude "**/node_modules/**"`)
+- Adjust `--threads` based on your network bandwidth and server capacity
+- Use `--uploads-per-minute` to rate-limit uploads if needed
+
+### Memory Usage
+
+The collector is designed to be memory-efficient:
+- Files are processed in a streaming fashion (not loaded entirely into memory)
+- Metadata checks happen before files are queued, reducing memory pressure
+
+## Tested On
 
 Successfully tested on:
 

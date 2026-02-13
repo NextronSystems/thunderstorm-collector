@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,25 +22,24 @@ import (
 	"unicode/utf8"
 )
 
+const maxMagicHeaderLength = 1024 // Maximum magic header length in bytes
+
 func buildHttpTransport(config Config) *http.Transport {
 	caPool := x509.NewCertPool()
 	for _, ca := range config.CAs {
 		f, err := os.Open(ca)
 		if err != nil {
-			if !caPool.AppendCertsFromPEM([]byte(ca)) {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			continue
+			fmt.Fprintf(os.Stderr, "Could not open CA file %s: %v\n", ca, err)
+			os.Exit(1)
 		}
 		b, err := ioutil.ReadAll(f)
 		f.Close()
 		if err != nil {
-			fmt.Println(err)
+			fmt.Fprintf(os.Stderr, "Could not read CA file %s: %v\n", ca, err)
 			os.Exit(1)
 		}
 		if !caPool.AppendCertsFromPEM(b) {
-			fmt.Fprintln(os.Stderr, "Could not add CA to certificate pool")
+			fmt.Fprintf(os.Stderr, "Could not add CA from file %s to certificate pool\n", ca)
 			os.Exit(1)
 		}
 	}
@@ -75,20 +75,28 @@ func buildHttpTransport(config Config) *http.Transport {
 }
 
 func validateConfig(config Config) (cc CollectorConfig, err error) {
-	cc = CollectorConfig{
-		RootPaths:        config.RootPaths,
-		FileExtensions:   config.FileExtensions,
-		ExcludeGlobs:     config.ExcludeGlobs,
-		Sync:             config.Sync,
-		Debug:            config.Debug,
-		Threads:          config.Threads,
-		Source:           config.Source,
-		MinCacheFileSize: config.MinCacheFileSize * 1024 * 1024,
-		AllFilesystems:   config.AllFilesystems,
+	// Handle thread count first, before assigning to cc:
+	// - Positive: use exact number
+	// - Zero: use all available CPU cores
+	// - Negative: use all cores minus the absolute value (e.g., -2 = NumCPU - 2)
+	threads := config.Threads
+	if threads <= 0 {
+		threads = runtime.NumCPU() + threads // For 0: NumCPU + 0; For -2: NumCPU - 2
+	}
+	if threads < 1 {
+		threads = 1 // Minimum of 1 thread
 	}
 
-	if config.Threads < 1 {
-		return cc, errors.New("thread count must be > 0")
+	cc = CollectorConfig{
+		RootPaths:      config.RootPaths,
+		FileExtensions: config.FileExtensions,
+		ExcludeGlobs:   config.ExcludeGlobs,
+		Sync:           config.Sync,
+		Debug:          config.Debug,
+		Threads:        threads,
+		Source:         config.Source,
+		AllFilesystems: config.AllFilesystems,
+		DryRun:         config.DryRun,
 	}
 
 	if config.MaxAgeInDays != "" {
@@ -107,36 +115,40 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 			case 'd':
 				multiplier = time.Hour * 24
 			default:
-				return cc, fmt.Errorf("invalid suffix for maximum age: %s", config.MaxAgeInDays)
+				return cc, fmt.Errorf("max-age: invalid suffix '%c' in %s (supported: s, m, h, d)", lastChar, config.MaxAgeInDays)
 			}
 			config.MaxAgeInDays = config.MaxAgeInDays[:len(config.MaxAgeInDays)-1]
 		}
 		number, err := strconv.Atoi(config.MaxAgeInDays)
 		if err != nil {
-			return cc, fmt.Errorf("could not parse maximum age %s: %w", config.MaxAgeInDays, err)
+			return cc, fmt.Errorf("max-age: could not parse number from %s: %w", config.MaxAgeInDays, err)
 		}
 		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
 	}
 
 	if config.MaxFileSizeMB < 1 {
-		return cc, errors.New("maximum file size must be > 0")
+		return cc, errors.New("max-filesize: must be > 0")
 	}
 	cc.MaxFileSize = config.MaxFileSizeMB * 1024 * 1024
 
-	if config.Server == "" {
-		return cc, errors.New("thunderstorm Server not specified")
+	if config.Server == "" && !config.DryRun {
+		return cc, errors.New("thunderstorm-server: not specified (required unless using --dry-run)")
 	}
-	var protocol string
-	if config.Ssl {
-		protocol = "https"
+	if !config.DryRun {
+		var protocol string
+		if config.Ssl {
+			protocol = "https"
+		} else {
+			protocol = "http"
+		}
+		thunderstormUrl := &url.URL{
+			Scheme: protocol,
+			Host:   fmt.Sprintf("%s:%d", config.Server, config.Port),
+		}
+		cc.Server = thunderstormUrl.String()
 	} else {
-		protocol = "http"
+		cc.Server = "dry-run://localhost" // Placeholder for dry-run mode
 	}
-	thunderstormUrl := &url.URL{
-		Scheme: protocol,
-		Host:   fmt.Sprintf("%s:%d", config.Server, config.Port),
-	}
-	cc.Server = thunderstormUrl.String()
 
 	whitespaceRegex := regexp.MustCompile(`\s`)
 	for _, hexHeader := range config.MagicHeaders {
@@ -144,6 +156,9 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		magicHeader, err := hex.DecodeString(hexHeader)
 		if err != nil {
 			return cc, fmt.Errorf("could not parse magic header %s: %w", hexHeader, err)
+		}
+		if len(magicHeader) > maxMagicHeaderLength {
+			return cc, fmt.Errorf("magic header too long (max %d bytes, got %d): %s", maxMagicHeaderLength, len(magicHeader), hexHeader)
 		}
 		cc.MagicHeaders = append(cc.MagicHeaders, magicHeader)
 	}
@@ -166,7 +181,7 @@ func main() {
 	fmt.Println(`  / /__/ _ \/ / / -_) __/ __/ _ \/ __/                     `)
 	fmt.Println(`  \___/\___/_/_/\__/\__/\__/\___/_/                        `)
 	fmt.Println(`                                                           `)
-	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020-2024             `)
+	fmt.Println(`  Copyright by Nextron Systems GmbH, 2020-2026             `)
 	fmt.Println(`                                                           `)
 
 	var config = ParseConfig()
@@ -193,10 +208,14 @@ func main() {
 	}
 	logger := log.New(output, "", log.Ldate|log.Ltime)
 	collector := NewCollector(collectorConfig, logger)
-	if err := collector.CheckThunderstormUp(); err != nil {
-		logger.Print("Could not successfully connect to Thunderstorm")
-		logger.Print(err)
-		os.Exit(1)
+	if !config.DryRun {
+		if err := collector.CheckThunderstormUp(); err != nil {
+			logger.Print("Could not successfully connect to Thunderstorm")
+			logger.Print(err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Print("DRY-RUN mode: Files will be collected but not sent to Thunderstorm")
 	}
 	if config.Debug {
 		if len(collectorConfig.FileExtensions) > 0 {

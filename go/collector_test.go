@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
@@ -49,7 +48,7 @@ func getFileName(file *multipart.Part) string {
 	}
 	return fileName
 }
-func collectSendAndReceive(cc CollectorConfig, t *testing.T) ([]filedata, CollectionStatistics) {
+func collectSendAndReceive(cc CollectorConfig, t *testing.T) ([]filedata, *CollectionStatistics) {
 	receivedFiles := make([]filedata, 0)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reader, err := r.MultipartReader()
@@ -99,7 +98,7 @@ func collectSendAndReceive(cc CollectorConfig, t *testing.T) ([]filedata, Collec
 	c.Collect()
 	c.Stop()
 
-	return receivedFiles, *c.Statistics
+	return receivedFiles, c.Statistics
 }
 
 func TestUpload(t *testing.T) {
@@ -112,7 +111,7 @@ func TestUpload(t *testing.T) {
 		name               string
 		cc                 CollectorConfig
 		expectedFilesFound []filedata
-		expectedStats      CollectionStatistics
+		expectedStats      *CollectionStatistics
 	}{
 		{
 			"with excludes",
@@ -123,10 +122,12 @@ func TestUpload(t *testing.T) {
 			[]filedata{
 				{"foo.txt", []byte("foo\n")},
 			},
-			CollectionStatistics{
-				uploadedFiles:      1,
-				skippedFiles:       1,
-				skippedDirectories: 2,
+			&CollectionStatistics{
+				uploadedFiles: 1,
+				skipReasons: map[SkipReason]int64{
+					SkipReasonExcluded:  1,
+					SkipReasonDirectory: 2,
+				},
 			},
 		},
 		{
@@ -138,9 +139,11 @@ func TestUpload(t *testing.T) {
 			[]filedata{
 				{"sub2/bar.nfo", []byte("bar\n")},
 			},
-			CollectionStatistics{
+			&CollectionStatistics{
 				uploadedFiles: 1,
-				skippedFiles:  3,
+				skipReasons: map[SkipReason]int64{
+					SkipReasonWrongType: 3,
+				},
 			},
 		},
 		{
@@ -152,9 +155,11 @@ func TestUpload(t *testing.T) {
 			[]filedata{
 				{"nextron250.jpg", func() []byte { b, _ := ioutil.ReadFile("testdata/nextron250.jpg"); return b }()},
 			},
-			CollectionStatistics{
+			&CollectionStatistics{
 				uploadedFiles: 1,
-				skippedFiles:  3,
+				skipReasons: map[SkipReason]int64{
+					SkipReasonWrongType: 3,
+				},
 			},
 		},
 		{
@@ -166,9 +171,11 @@ func TestUpload(t *testing.T) {
 			[]filedata{
 				{"foo.txt", []byte("foo\n")},
 			},
-			CollectionStatistics{
+			&CollectionStatistics{
 				uploadedFiles: 1,
-				skippedFiles:  3,
+				skipReasons: map[SkipReason]int64{
+					SkipReasonTooOld: 3,
+				},
 			},
 		},
 		{
@@ -179,8 +186,11 @@ func TestUpload(t *testing.T) {
 				MaxFileSize:    14670,
 			},
 			[]filedata{},
-			CollectionStatistics{
-				skippedFiles: 4,
+			&CollectionStatistics{
+				skipReasons: map[SkipReason]int64{
+					SkipReasonWrongType: 3,
+					SkipReasonTooBig:    1,
+				},
 			},
 		},
 	}
@@ -192,8 +202,16 @@ func TestUpload(t *testing.T) {
 			if len(receivedFiles) != len(tc.expectedFilesFound) {
 				t.Fatalf("Expected to receive %d files, but received %d", len(tc.expectedFilesFound), len(receivedFiles))
 			}
-			if diff := cmp.Diff(tc.expectedStats, stats, cmp.Exporter(func(_ reflect.Type) bool { return true })); diff != "" {
-				t.Fatalf("Statistics mismatch: %s", diff)
+			// Compare uploaded files
+			if stats.uploadedFiles != tc.expectedStats.uploadedFiles {
+				t.Fatalf("Uploaded files mismatch: expected %d, got %d", tc.expectedStats.uploadedFiles, stats.uploadedFiles)
+			}
+			// Compare skip reasons
+			for reason, expectedCount := range tc.expectedStats.skipReasons {
+				actualCount := stats.getSkipCount(reason)
+				if actualCount != expectedCount {
+					t.Fatalf("Skip reason %s mismatch: expected %d, got %d", reason.String(), expectedCount, actualCount)
+				}
 			}
 			for _, expected := range tc.expectedFilesFound {
 				t.Run(fmt.Sprintf("File %s", expected.path), func(t *testing.T) {

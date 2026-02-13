@@ -24,6 +24,6 @@ test:
 	go test -cover ./...
 
 clean:
-	rm -r bin
+	rm -rf bin
 
 .PHONY: all clean
