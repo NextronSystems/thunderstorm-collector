@@ -1,4 +1,4 @@
 curl.exe
 settings.json
 *.log
-go/dist/*
+go/dist/
