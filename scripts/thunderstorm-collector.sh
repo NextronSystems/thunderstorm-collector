@@ -1,177 +1,533 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # THOR Thunderstorm Bash Collector
-# Florian Roth
-# September 2025
+# Florian Roth / Nextron Systems
+#
+# Goals:
+# - work on old and new Bash versions (Bash 3+)
+# - handle missing dependencies with fallbacks
+# - degrade gracefully on partial failures
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 
-# Settings ------------------------------------------------------------
+# Defaults --------------------------------------------------------------------
 
-# Log
 LOGFILE="./thunderstorm.log"
 LOG_TO_FILE=1
-LOG_TO_SYSLOG=0 # Log to syslog is set to 'off' by default
+LOG_TO_SYSLOG=0
 LOG_TO_CMDLINE=1
+SYSLOG_FACILITY="user"
 
-# Thunderstorm Server
 THUNDERSTORM_SERVER="ygdrasil.nextron"
 THUNDERSTORM_PORT=8080
 USE_SSL=0
 ASYNC_MODE=1
 
-# Source
-HOSTNAME=$(hostname -f)
-
-# Target selection 
-declare -a SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr');  # folders to scan
 MAX_AGE=14
-MAX_FILE_SIZE=2000  # max file size to check in kilobyte, default 2 MB
+MAX_FILE_SIZE_KB=2000
+DEBUG=0
+DRY_RUN=0
+RETRIES=3
 
-# Debug
-DEBUG=1
+UPLOAD_TOOL=""
+TMP_FILES=""
 
-# Code ----------------------------------------------------------------
+# Keep defaults simple and stable for Bash 3+.
+SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr')
 
-function timestamp {
-  date +%F_%T
+FILES_SCANNED=0
+FILES_SUBMITTED=0
+FILES_SKIPPED=0
+FILES_FAILED=0
+
+SCRIPT_NAME="${0##*/}"
+START_TS="$(date +%s 2>/dev/null || echo 0)"
+SOURCE_NAME=""
+
+# Helpers ---------------------------------------------------------------------
+
+timestamp() {
+    date "+%Y-%m-%d_%H:%M:%S" 2>/dev/null || date
 }
 
-function log {
-    local type="$1"
-    local message="$2"
-    local ts
-    ts=$(timestamp)
+cleanup_tmp_files() {
+    local f
+    for f in $TMP_FILES; do
+        [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
+    done
+}
 
-    # Only report debug messages if mode is enabled
-    if [ "$type" == "debug" ] && [ $DEBUG -ne 1 ]; then
+on_exit() {
+    cleanup_tmp_files
+}
+
+trap on_exit EXIT INT TERM
+
+log_msg() {
+    local level="$1"
+    shift
+    local message="$*"
+    local ts
+    local logger_prio
+    local clean
+
+    [ "$level" = "debug" ] && [ "$DEBUG" -ne 1 ] && return 0
+
+    ts="$(timestamp)"
+    clean="$message"
+    clean="${clean//$'\r'/ }"
+    clean="${clean//$'\n'/ }"
+
+    if [ "$LOG_TO_FILE" -eq 1 ]; then
+        if ! printf "%s %s %s\n" "$ts" "$level" "$clean" >> "$LOGFILE" 2>/dev/null; then
+            LOG_TO_FILE=0
+            printf "%s warn Could not write to log file '%s'; disabling file logging\n" "$ts" "$LOGFILE" >&2
+        fi
+    fi
+
+    if [ "$LOG_TO_SYSLOG" -eq 1 ] && command -v logger >/dev/null 2>&1; then
+        case "$level" in
+            error) logger_prio="err" ;;
+            warn) logger_prio="warning" ;;
+            debug) logger_prio="debug" ;;
+            *) logger_prio="info" ;;
+        esac
+        logger -p "${SYSLOG_FACILITY}.${logger_prio}" "${SCRIPT_NAME}: ${clean}" >/dev/null 2>&1 || true
+    fi
+
+    if [ "$LOG_TO_CMDLINE" -eq 1 ]; then
+        printf "[%s] %s\n" "$level" "$clean" >&2
+    fi
+}
+
+die() {
+    log_msg error "$*"
+    exit 1
+}
+
+print_banner() {
+    cat <<EOF
+==============================================================
+    ________                __            __
+   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _
+    / / / _ \\/ // / _ \\/ _  / -_) __(_-</ __/ _ \\/ __/  ' \\
+   /_/ /_//_/\\_,_/_//_/\\_,_/\\__/_/ /___/\\__/\\___/_/ /_/_/_/
+   v${VERSION}
+
+   THOR Thunderstorm Collector for Linux/Unix
+==============================================================
+EOF
+}
+
+print_help() {
+    cat <<'EOF'
+Usage:
+  thunderstorm-collector.sh [options]
+
+Options:
+  -s, --server <host>        Thunderstorm server hostname or IP
+  -p, --port <port>          Thunderstorm port (default: 8080)
+  -d, --dir <path>           Directory to scan (repeatable)
+  --max-age <days>           Max file age in days (default: 14)
+  --max-size-kb <kb>         Max file size in KB (default: 2000)
+  --source <name>            Source identifier (default: hostname)
+  --ssl                      Use HTTPS
+  --sync                     Use /api/check (default: /api/checkAsync)
+  --retries <num>            Retry attempts per file (default: 3)
+  --dry-run                  Do not upload, only show what would be submitted
+  --debug                    Enable debug log messages
+  --log-file <path>          Log file path (default: ./thunderstorm.log)
+  --no-log-file              Disable file logging
+  --syslog                   Enable syslog logging
+  --quiet                    Disable command-line logging
+  -h, --help                 Show this help text
+
+Examples:
+  bash thunderstorm-collector.sh --server thunderstorm.local
+  bash thunderstorm-collector.sh --server 10.0.0.5 --ssl --dir "/tmp/My Files" --dry-run
+EOF
+}
+
+is_integer() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+detect_source_name() {
+    [ -n "$SOURCE_NAME" ] && return 0
+    if command -v hostname >/dev/null 2>&1; then
+        SOURCE_NAME="$(hostname -f 2>/dev/null)"
+        [ -z "$SOURCE_NAME" ] && SOURCE_NAME="$(hostname 2>/dev/null)"
+    fi
+    [ -z "$SOURCE_NAME" ] && SOURCE_NAME="$(uname -n 2>/dev/null)"
+    [ -z "$SOURCE_NAME" ] && SOURCE_NAME="unknown-host"
+}
+
+build_query_source() {
+    local src="$1"
+    if [ -n "$src" ]; then
+        # Keep this simple for old Bash systems. Most hostnames are URL-safe.
+        printf "?source=%s" "$src"
+    fi
+}
+
+file_size_kb() {
+    # Use wc for portability across GNU/BSD and older systems.
+    local bytes
+    bytes="$(wc -c < "$1" 2>/dev/null)"
+    # Intentionally split on whitespace to normalize wc output ("   123\n" -> "123").
+    # shellcheck disable=SC2086
+    set -- $bytes
+    bytes="$1"
+    case "$bytes" in
+        ''|*[!0-9]*) echo -1; return 1 ;;
+    esac
+    echo $(( (bytes + 1023) / 1024 ))
+}
+
+mktemp_portable() {
+    local t
+    t="$(mktemp "${TMPDIR:-/tmp}/thunderstorm.XXXXXX" 2>/dev/null)"
+    if [ -n "$t" ]; then
+        echo "$t"
         return 0
     fi
+    t="${TMPDIR:-/tmp}/thunderstorm.$$.$RANDOM"
+    : > "$t" 2>/dev/null || return 1
+    echo "$t"
+}
 
-    # Exclude certain strings (false positives)
-    for ex_string in "${EXCLUDE_STRINGS[@]}";
-    do
-        # echo "Checking if $ex_string is in $message"
-        if [ "${message/$ex_string}" != "$message" ]; then
+detect_upload_tool() {
+    if command -v curl >/dev/null 2>&1; then
+        UPLOAD_TOOL="curl"
+        return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        UPLOAD_TOOL="wget"
+        return 0
+    fi
+    return 1
+}
+
+upload_with_curl() {
+    local endpoint="$1"
+    local filepath="$2"
+    local filename="$3"
+    local resp_file
+    local code
+
+    resp_file="$(mktemp_portable)" || return 91
+    TMP_FILES="${TMP_FILES} ${resp_file}"
+
+    curl -sS --fail --show-error -X POST \
+        "$endpoint" \
+        --form "file=@${filepath};filename=${filename}" \
+        > "$resp_file" 2>&1
+    code=$?
+    if [ $code -ne 0 ]; then
+        return $code
+    fi
+
+    if grep -qi "reason" "$resp_file" 2>/dev/null; then
+        local body
+        body="$(cat "$resp_file" 2>/dev/null)"
+        body="${body//$'\r'/ }"
+        body="${body//$'\n'/ }"
+        log_msg error "Server reported rejection for '$filepath': $body"
+        return 92
+    fi
+    return 0
+}
+
+upload_with_wget() {
+    # Portable multipart fallback for systems without curl.
+    local endpoint="$1"
+    local filepath="$2"
+    local filename="$3"
+    local boundary
+    local body_file
+    local resp_file
+    local code
+
+    boundary="----ThunderstormBoundary$$$RANDOM"
+    body_file="$(mktemp_portable)" || return 93
+    resp_file="$(mktemp_portable)" || return 94
+    TMP_FILES="${TMP_FILES} ${body_file} ${resp_file}"
+
+    {
+        printf -- "--%s\r\n" "$boundary"
+        printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' "$filename"
+        printf 'Content-Type: application/octet-stream\r\n\r\n'
+        cat "$filepath"
+        printf '\r\n--%s--\r\n' "$boundary"
+    } > "$body_file" 2>/dev/null || return 95
+
+    wget -q -O "$resp_file" \
+        --header="Content-Type: multipart/form-data; boundary=${boundary}" \
+        --post-file="$body_file" \
+        "$endpoint"
+    code=$?
+    if [ $code -ne 0 ]; then
+        return $code
+    fi
+
+    if grep -qi "reason" "$resp_file" 2>/dev/null; then
+        local body
+        body="$(cat "$resp_file" 2>/dev/null)"
+        body="${body//$'\r'/ }"
+        body="${body//$'\n'/ }"
+        log_msg error "Server reported rejection for '$filepath': $body"
+        return 96
+    fi
+    return 0
+}
+
+submit_file() {
+    local endpoint="$1"
+    local filepath="$2"
+    local filename
+    local try=1
+    local rc=1
+    local wait=2
+
+    filename="${filepath##*/}"
+
+    while [ "$try" -le "$RETRIES" ]; do
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_msg info "DRY-RUN: would submit '$filepath'"
             return 0
         fi
+
+        if [ "$UPLOAD_TOOL" = "curl" ]; then
+            upload_with_curl "$endpoint" "$filepath" "$filename"
+            rc=$?
+        else
+            upload_with_wget "$endpoint" "$filepath" "$filename"
+            rc=$?
+        fi
+
+        if [ "$rc" -eq 0 ]; then
+            return 0
+        fi
+
+        log_msg warn "Upload failed for '$filepath' (attempt ${try}/${RETRIES}, code ${rc})"
+        if [ "$try" -lt "$RETRIES" ]; then
+            sleep "$wait"
+            wait=$((wait * 2))
+        fi
+        try=$((try + 1))
     done
 
-    # Remove line breaks
-    message=$(echo "$message" | tr -d '\r' | tr '\n' ' ') 
+    return "$rc"
+}
 
-    # Remove prefix (e.g. [+])
-    if [[ "${message:0:1}" == "[" ]]; then
-        message_cleaned="${message:4:${#message}}"
+parse_args() {
+    local arg
+    local add_dir_mode=0
+
+    while [ $# -gt 0 ]; do
+        arg="$1"
+        case "$arg" in
+            -h|--help)
+                print_help
+                exit 0
+                ;;
+            -s|--server)
+                [ -n "$2" ] || die "Missing value for $arg"
+                THUNDERSTORM_SERVER="$2"
+                shift
+                ;;
+            -p|--port)
+                [ -n "$2" ] || die "Missing value for $arg"
+                THUNDERSTORM_PORT="$2"
+                shift
+                ;;
+            -d|--dir)
+                [ -n "$2" ] || die "Missing value for $arg"
+                if [ "$add_dir_mode" -eq 0 ]; then
+                    SCAN_FOLDERS=()
+                    add_dir_mode=1
+                fi
+                SCAN_FOLDERS+=("$2")
+                shift
+                ;;
+            --max-age)
+                [ -n "$2" ] || die "Missing value for $arg"
+                MAX_AGE="$2"
+                shift
+                ;;
+            --max-size-kb)
+                [ -n "$2" ] || die "Missing value for $arg"
+                MAX_FILE_SIZE_KB="$2"
+                shift
+                ;;
+            --source)
+                [ -n "$2" ] || die "Missing value for $arg"
+                SOURCE_NAME="$2"
+                shift
+                ;;
+            --ssl)
+                USE_SSL=1
+                ;;
+            --sync)
+                ASYNC_MODE=0
+                ;;
+            --retries)
+                [ -n "$2" ] || die "Missing value for $arg"
+                RETRIES="$2"
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                ;;
+            --debug)
+                DEBUG=1
+                ;;
+            --log-file)
+                [ -n "$2" ] || die "Missing value for $arg"
+                LOGFILE="$2"
+                shift
+                ;;
+            --no-log-file)
+                LOG_TO_FILE=0
+                ;;
+            --syslog)
+                LOG_TO_SYSLOG=1
+                ;;
+            --quiet)
+                LOG_TO_CMDLINE=0
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                die "Unknown option: $arg (use --help)"
+                ;;
+            *)
+                # Positional args are treated as additional directories.
+                if [ "$add_dir_mode" -eq 0 ]; then
+                    SCAN_FOLDERS=()
+                    add_dir_mode=1
+                fi
+                SCAN_FOLDERS+=("$arg")
+                ;;
+        esac
+        shift
+    done
+}
+
+validate_config() {
+    is_integer "$THUNDERSTORM_PORT" || die "Port must be numeric: '$THUNDERSTORM_PORT'"
+    is_integer "$MAX_AGE" || die "max-age must be numeric: '$MAX_AGE'"
+    is_integer "$MAX_FILE_SIZE_KB" || die "max-size-kb must be numeric: '$MAX_FILE_SIZE_KB'"
+    is_integer "$RETRIES" || die "retries must be numeric: '$RETRIES'"
+
+    [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0"
+    [ "$MAX_AGE" -ge 0 ] || die "max-age must be >= 0"
+    [ "$MAX_FILE_SIZE_KB" -gt 0 ] || die "max-size-kb must be > 0"
+    [ "$RETRIES" -gt 0 ] || die "retries must be > 0"
+
+    [ -n "$THUNDERSTORM_SERVER" ] || die "Server must not be empty"
+    [ "${#SCAN_FOLDERS[@]}" -gt 0 ] || die "At least one directory is required"
+}
+
+main() {
+    local scheme="http"
+    local endpoint_name="check"
+    local query_source=""
+    local api_endpoint=""
+    local scandir
+    local file_path
+    local size_kb
+    local elapsed=0
+    local find_mtime="-${MAX_AGE}"
+
+    parse_args "$@"
+    detect_source_name
+    validate_config
+    print_banner
+
+    if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
+        log_msg warn "Running without root privileges; some files may be inaccessible"
+    fi
+
+    if [ "$USE_SSL" -eq 1 ]; then
+        scheme="https"
+    fi
+    if [ "$ASYNC_MODE" -eq 1 ]; then
+        endpoint_name="checkAsync"
+    fi
+
+    query_source="$(build_query_source "$SOURCE_NAME")"
+    api_endpoint="${scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}/api/${endpoint_name}${query_source}"
+
+    if [ "$DRY_RUN" -eq 0 ]; then
+        if ! detect_upload_tool; then
+            die "Neither 'curl' nor 'wget' is installed; unable to upload samples"
+        fi
     else
-        message_cleaned="$message"
+        if detect_upload_tool; then
+            log_msg info "Dry-run mode active (upload tool detected: $UPLOAD_TOOL)"
+        else
+            log_msg info "Dry-run mode active (no upload tool required)"
+        fi
     fi
 
-    # Log to file
-    if [[ $LOG_TO_FILE -eq 1 ]]; then
-        echo "$ts $type $message_cleaned" >> "$LOGFILE"
-    fi
-    # Log to syslog
-    if [[ $LOG_TO_SYSLOG -eq 1 ]]; then
-        logger -p "$SYSLOG_FACILITY.$type" "$(basename "$0"): $message_cleaned"
-    fi
-    # Log to command line
-    if [[ $LOG_TO_CMDLINE -eq 1 ]]; then
-        echo "$message" >&2
-    fi
-}
+    log_msg info "Started Thunderstorm Collector - Version $VERSION"
+    log_msg info "Server: $THUNDERSTORM_SERVER"
+    log_msg info "Port: $THUNDERSTORM_PORT"
+    log_msg info "API endpoint: $api_endpoint"
+    log_msg info "Max age (days): $MAX_AGE"
+    log_msg info "Max size (KB): $MAX_FILE_SIZE_KB"
+    log_msg info "Source: $SOURCE_NAME"
+    log_msg info "Folders: ${SCAN_FOLDERS[*]}"
+    [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
 
-function check_req 
-{
-    curl_avail=$(command -v curl)
-    if [[ -z $curl_avail ]]; then 
-        log error "The 'curl' command can't be found but is needed"
-        exit 1
-    fi
-}
+    for scandir in "${SCAN_FOLDERS[@]}"; do
+        if [ ! -d "$scandir" ]; then
+            log_msg warn "Skipping non-directory path '$scandir'"
+            continue
+        fi
 
-# Program -------------------------------------------------------------
+        log_msg info "Scanning '$scandir'"
+        while IFS= read -r -d '' file_path; do
+            FILES_SCANNED=$((FILES_SCANNED + 1))
 
-echo "=============================================================="
-echo "    ________                __            __                "
-echo "   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _  "
-echo "    / / / _ \/ // / _ \/ _  / -_) __(_-</ __/ _ \/ __/  ' \ "
-echo "   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/ "
-echo "   v$VERSION"
-echo " "
-echo "   THOR Thunderstorm Collector for Linux/Unix"
-echo "   Florian Roth, September 2020"
-echo "=============================================================="
+            [ -f "$file_path" ] || continue
 
-# Root check
-if [ "$(id -u)" != "0" ]; then
-   log error "This script should be run as root to have access to all files on disk" 1>&2
-fi
-
-echo "Writing log file to $LOGFILE ..."
-
-log info "Started Thunderstorm Collector - Version $VERSION"
-log info "Transmitting samples to $THUNDERSTORM_SERVER"
-log info "Processing folders ${SCAN_FOLDERS[*]}"
-log info "Only check files created / modified within $MAX_AGE days"
-log info "Only process files smaller $MAX_FILE_SIZE KB"
-
-# Check requirements
-check_req
-
-# Some presets
-api_endpoint="check"
-if [[ $ASYNC_MODE -eq 1 ]]; then
-    api_endpoint="checkAsync"
-fi
-scheme="http"
-if [[ $USE_SSL -eq 1 ]]; then
-    scheme="https"
-fi
-source=""
-if [[ -n $HOSTNAME ]]; then
-    source="?source=${HOSTNAME}"
-fi
-
-# Loop over filesystem
-for scandir in "${SCAN_FOLDERS[@]}";
-do
-    find "$scandir" -type f  -mtime -$MAX_AGE 2> /dev/null | while read -r file_path
-    do
-        if [ -f "${file_path}" ]; then
-            # Check Size
-            filesize=$(du -k "$file_path" | cut -f1)
-            if [ "${filesize}" -gt $MAX_FILE_SIZE ]; then
+            size_kb="$(file_size_kb "$file_path")"
+            if [ "$size_kb" -lt 0 ]; then
+                FILES_SKIPPED=$((FILES_SKIPPED + 1))
+                log_msg debug "Skipping unreadable file '$file_path'"
                 continue
             fi
-            log debug "Submitting ${file_path} ..."
-            successful=0
 
-            for retry in {1..3}; do
-                # Submit sample
-                result=$(curl -s -X POST \
-                        "$scheme://$THUNDERSTORM_SERVER:$THUNDERSTORM_PORT/api/$api_endpoint$source" \
-                        --form "file=@${file_path};filename=${file_path}")
-                curl_exit=$?
-                if [ $curl_exit -ne 0 ]; then
-                    log error "Upload failed with code $curl_exit"
-                    sleep $((2 << retry))
-                    continue
-                fi
-
-                # If 'reason' in result
-                if [ "${result/reason}" != "$result" ]; then
-                    log error "$result"
-                    sleep $((2 << retry))
-                    continue
-                fi
-                successful=1
-                break
-            done
-            if [ $successful -ne 1 ]; then
-                log error "Could not upload ${file_path}"
+            if [ "$size_kb" -gt "$MAX_FILE_SIZE_KB" ]; then
+                FILES_SKIPPED=$((FILES_SKIPPED + 1))
+                log_msg debug "Skipping '$file_path' due to size (${size_kb}KB)"
+                continue
             fi
-        fi
-    done 
-done
-exit 0
+
+            log_msg debug "Submitting '$file_path'"
+            if submit_file "$api_endpoint" "$file_path"; then
+                FILES_SUBMITTED=$((FILES_SUBMITTED + 1))
+            else
+                FILES_FAILED=$((FILES_FAILED + 1))
+                log_msg error "Could not upload '$file_path'"
+            fi
+        done < <(find "$scandir" -type f -mtime "$find_mtime" -print0 2>/dev/null)
+    done
+
+    if [ "$START_TS" -gt 0 ] 2>/dev/null; then
+        elapsed=$(( $(date +%s 2>/dev/null || echo "$START_TS") - START_TS ))
+        [ "$elapsed" -lt 0 ] && elapsed=0
+    fi
+
+    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$elapsed"
+    return 0
+}
+
+main "$@"

@@ -9,7 +9,7 @@ A shell script for Linux.
 ### Requirements
 
 - bash
-- wget
+- curl **or** wget
 
 ### Usage
 
@@ -17,6 +17,18 @@ You can run it like:
 
 ```bash
 bash ./thunderstorm-collector.sh
+```
+
+Show available options:
+
+```bash
+bash ./thunderstorm-collector.sh --help
+```
+
+Example dry-run for a custom folder with spaces in the path:
+
+```bash
+bash ./thunderstorm-collector.sh --server thunderstorm.local --dir "/tmp/Suspicious Files" --dry-run
 ```
 
 The most common use case would be a collector script that looks e.g. for files that have been created or modified within the last X days and runs every X days.
