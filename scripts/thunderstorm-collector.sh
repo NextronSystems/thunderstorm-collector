@@ -487,10 +487,11 @@ main() {
     local file_path
     local size_kb
     local elapsed=0
-    local find_mtime="-${MAX_AGE}"
+    local find_mtime
     local find_results_file
 
     parse_args "$@"
+    find_mtime="-${MAX_AGE}"
     detect_source_name
     validate_config
     print_banner
