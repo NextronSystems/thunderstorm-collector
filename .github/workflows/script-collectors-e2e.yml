@@ -172,82 +172,82 @@ jobs:
           "UPLOADS_DIR=$uploadsDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "EXPECTED_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Start thunderstorm-stub-server
+      - name: Run Windows collectors against thunderstorm-stub-server
         shell: pwsh
         run: |
           $stdoutLogFile = Join-Path $env:RUNNER_TEMP "stub-server.stdout.log"
           $stderrLogFile = Join-Path $env:RUNNER_TEMP "stub-server.stderr.log"
           $auditFile = Join-Path $env:RUNNER_TEMP "stub-audit.jsonl"
-          $proc = Start-Process `
-            -FilePath "$env:RUNNER_TEMP\thunderstorm-stub-server.exe" `
-            -ArgumentList @("--port", $env:STUB_PORT, "--uploads-dir", $env:UPLOADS_DIR, "--log-file", $auditFile) `
-            -RedirectStandardOutput $stdoutLogFile `
-            -RedirectStandardError $stderrLogFile `
-            -PassThru
-          "STUB_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "STUB_STDOUT_LOG=$stdoutLogFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "STUB_STDERR_LOG=$stderrLogFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          for ($i = 0; $i -lt 60; $i++) {
-            try {
-              Invoke-RestMethod -Uri "http://127.0.0.1:$($env:STUB_PORT)/api/status" | Out-Null
-              exit 0
-            } catch {
-              Start-Sleep -Seconds 1
+          $proc = $null
+          try {
+            $proc = Start-Process `
+              -FilePath "$env:RUNNER_TEMP\thunderstorm-stub-server.exe" `
+              -ArgumentList @("--port", $env:STUB_PORT, "--uploads-dir", $env:UPLOADS_DIR, "--log-file", $auditFile) `
+              -RedirectStandardOutput $stdoutLogFile `
+              -RedirectStandardError $stderrLogFile `
+              -PassThru
+
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:$($env:STUB_PORT)/api/status" | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
             }
-          }
-          throw "Stub server did not become ready in time"
+            if (-not $ready) {
+              throw "Stub server did not become ready in time"
+            }
 
-      - name: Run PowerShell collector
-        shell: pwsh
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector.ps1 `
-            -ThunderstormServer 127.0.0.1 `
-            -ThunderstormPort $env:STUB_PORT `
-            -Folder $env:SAMPLE_DIR `
-            -Source windows-ps-e2e `
-            -MaxAge 30 `
-            -MaxSize 100
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector.ps1 `
+              -ThunderstormServer 127.0.0.1 `
+              -ThunderstormPort $env:STUB_PORT `
+              -Folder $env:SAMPLE_DIR `
+              -Source windows-ps-e2e `
+              -MaxAge 30 `
+              -MaxSize 100
+            if ($LASTEXITCODE -ne 0) {
+              throw "PowerShell collector failed with exit code $LASTEXITCODE"
+            }
 
-      - name: Run Batch collector
-        shell: pwsh
-        run: |
-          $env:THUNDERSTORM_SERVER = "127.0.0.1"
-          $env:THUNDERSTORM_PORT = $env:STUB_PORT
-          $env:URL_SCHEME = "http"
-          $env:COLLECT_DIRS = $env:SAMPLE_DIR
-          $env:RELEVANT_EXTENSIONS = ".exe"
-          $env:COLLECT_MAX_SIZE = "50000000"
-          $env:MAX_AGE = "30"
-          $env:SOURCE = "windows-bat-e2e"
-          $env:DEBUG = "1"
-          cmd /c scripts\thunderstorm-collector.bat
+            $env:THUNDERSTORM_SERVER = "127.0.0.1"
+            $env:THUNDERSTORM_PORT = $env:STUB_PORT
+            $env:URL_SCHEME = "http"
+            $env:COLLECT_DIRS = $env:SAMPLE_DIR
+            $env:RELEVANT_EXTENSIONS = ".exe"
+            $env:COLLECT_MAX_SIZE = "50000000"
+            $env:MAX_AGE = "30"
+            $env:SOURCE = "windows-bat-e2e"
+            $env:DEBUG = "1"
+            cmd /c scripts\thunderstorm-collector.bat
+            if ($LASTEXITCODE -ne 0) {
+              throw "Batch collector failed with exit code $LASTEXITCODE"
+            }
 
-      - name: Verify uploaded file integrity
-        shell: pwsh
-        run: |
-          python .\scripts\tests\verify_uploads.py `
-            --uploads-dir "$env:UPLOADS_DIR" `
-            --expected-sha256 "$env:EXPECTED_SHA256" `
-            --min-count 2 `
-            --timeout-seconds 180
-
-      - name: Stop thunderstorm-stub-server
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:STUB_PID) {
-            Stop-Process -Id ([int]$env:STUB_PID) -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Print stub server log
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:STUB_STDOUT_LOG -and (Test-Path $env:STUB_STDOUT_LOG)) {
-            Write-Host "==== thunderstorm-stub-server stdout ===="
-            Get-Content -Path $env:STUB_STDOUT_LOG
-          }
-          if ($env:STUB_STDERR_LOG -and (Test-Path $env:STUB_STDERR_LOG)) {
-            Write-Host "==== thunderstorm-stub-server stderr ===="
-            Get-Content -Path $env:STUB_STDERR_LOG
+            python .\scripts\tests\verify_uploads.py `
+              --uploads-dir "$env:UPLOADS_DIR" `
+              --expected-sha256 "$env:EXPECTED_SHA256" `
+              --min-count 2 `
+              --timeout-seconds 180
+            if ($LASTEXITCODE -ne 0) {
+              throw "Upload verification failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            if ($proc) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path $stdoutLogFile) {
+              Write-Host "==== thunderstorm-stub-server stdout ===="
+              Get-Content -Path $stdoutLogFile
+            }
+            if (Test-Path $stderrLogFile) {
+              Write-Host "==== thunderstorm-stub-server stderr ===="
+              Get-Content -Path $stderrLogFile
+            }
+            if (Test-Path $auditFile) {
+              Write-Host "==== thunderstorm-stub-server audit jsonl ===="
+              Get-Content -Path $auditFile
+            }
           }
