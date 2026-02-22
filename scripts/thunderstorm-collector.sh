@@ -168,9 +168,45 @@ detect_source_name() {
 build_query_source() {
     local src="$1"
     if [ -n "$src" ]; then
-        # Keep this simple for old Bash systems. Most hostnames are URL-safe.
-        printf "?source=%s" "$src"
+        local encoded
+        encoded="$(urlencode "$src")"
+        printf "?source=%s" "$encoded"
     fi
+}
+
+urlencode() {
+    local input="$1"
+    local out=""
+    local i ch hex
+
+    for ((i = 0; i < ${#input}; i++)); do
+        ch="${input:i:1}"
+        case "$ch" in
+            [a-zA-Z0-9.~_-])
+                out="${out}${ch}"
+                ;;
+            ' ')
+                out="${out}%20"
+                ;;
+            *)
+                hex="$(printf '%s' "$ch" | od -An -tx1 | tr -d ' \n' | tr '[:lower:]' '[:upper:]')"
+                out="${out}%${hex}"
+                ;;
+        esac
+    done
+    printf "%s" "$out"
+}
+
+sanitize_filename_for_multipart() {
+    local input="$1"
+    # Keep multipart header/form attribute values simple and safe.
+    input="${input//\"/_}"
+    input="${input//;/_}"
+    input="${input//\\/_}"
+    input="${input//$'\r'/_}"
+    input="${input//$'\n'/_}"
+    [ -z "$input" ] && input="sample.bin"
+    printf "%s" "$input"
 }
 
 file_size_kb() {
@@ -215,15 +251,20 @@ upload_with_curl() {
     local endpoint="$1"
     local filepath="$2"
     local filename="$3"
+    local safe_filename
+    local curl_filepath
     local resp_file
     local code
+
+    safe_filename="$(sanitize_filename_for_multipart "$filename")"
+    curl_filepath="${filepath//\"/\\\"}"
 
     resp_file="$(mktemp_portable)" || return 91
     TMP_FILES="${TMP_FILES} ${resp_file}"
 
     curl -sS --fail --show-error -X POST \
         "$endpoint" \
-        --form "file=@${filepath};filename=${filename}" \
+        --form "file=@\"${curl_filepath}\";filename=\"${safe_filename}\"" \
         > "$resp_file" 2>&1
     code=$?
     if [ $code -ne 0 ]; then
@@ -246,19 +287,21 @@ upload_with_wget() {
     local endpoint="$1"
     local filepath="$2"
     local filename="$3"
+    local safe_filename
     local boundary
     local body_file
     local resp_file
     local code
 
     boundary="----ThunderstormBoundary$$$RANDOM"
+    safe_filename="$(sanitize_filename_for_multipart "$filename")"
     body_file="$(mktemp_portable)" || return 93
     resp_file="$(mktemp_portable)" || return 94
     TMP_FILES="${TMP_FILES} ${body_file} ${resp_file}"
 
     {
         printf -- "--%s\r\n" "$boundary"
-        printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' "$filename"
+        printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' "$safe_filename"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
         cat "$filepath"
         printf '\r\n--%s--\r\n' "$boundary"
@@ -292,7 +335,8 @@ submit_file() {
     local rc=1
     local wait=2
 
-    filename="${filepath##*/}"
+    # Preserve client-side path in multipart filename for server-side audit logs.
+    filename="$filepath"
 
     while [ "$try" -le "$RETRIES" ]; do
         if [ "$DRY_RUN" -eq 1 ]; then
@@ -444,6 +488,7 @@ main() {
     local size_kb
     local elapsed=0
     local find_mtime="-${MAX_AGE}"
+    local find_results_file
 
     parse_args "$@"
     detect_source_name
@@ -493,6 +538,13 @@ main() {
         fi
 
         log_msg info "Scanning '$scandir'"
+        find_results_file="$(mktemp_portable)" || {
+            log_msg error "Could not create temporary file list for '$scandir'"
+            continue
+        }
+        TMP_FILES="${TMP_FILES} ${find_results_file}"
+        find "$scandir" -type f -mtime "$find_mtime" -print0 > "$find_results_file" 2>/dev/null || true
+
         while IFS= read -r -d '' file_path; do
             FILES_SCANNED=$((FILES_SCANNED + 1))
 
@@ -518,7 +570,7 @@ main() {
                 FILES_FAILED=$((FILES_FAILED + 1))
                 log_msg error "Could not upload '$file_path'"
             fi
-        done < <(find "$scandir" -type f -mtime "$find_mtime" -print0 2>/dev/null)
+        done < "$find_results_file"
     done
 
     if [ "$START_TS" -gt 0 ] 2>/dev/null; then
