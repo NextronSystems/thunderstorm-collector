@@ -80,12 +80,16 @@ param
         HelpMessage='Select only files smaller than the given number in MegaBytes (default: 20MB) ')]
         [ValidateNotNullOrEmpty()]
         [Alias('MS')]
-        [int]$MaxSize,
+        [int]$MaxSize = 20,
 
     [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')]
         [ValidateNotNullOrEmpty()]
         [Alias('E')]
         [string[]]$Extensions,
+
+    [Parameter(HelpMessage='Use HTTPS instead of HTTP for Thunderstorm communication')]
+        [Alias('SSL')]
+        [switch]$UseSSL = $False,
 
     [Parameter(HelpMessage='Enables debug output and skips cleanup at the end of the scan')]
         [ValidateNotNullOrEmpty()]
@@ -124,7 +128,10 @@ if ( $OutputPath -eq "" -or $OutputPath.Contains("Advanced Threat Protection") )
 #[int]$MaxAge = 99
 
 # Maximum Size
-[int]$MaxSize = 20
+# Apply default only when no -MaxSize parameter was explicitly passed
+if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
+    [int]$MaxSize = 20
+}
 
 # Extensions
 # Apply recommended preset only when no -Extensions parameter was explicitly passed
@@ -133,7 +140,7 @@ if (-not $PSBoundParameters.ContainsKey('Extensions')) {
 }
 
 # Debug
-$Debug = $False
+$Debug = $Debugging
 
 # Show Help -----------------------------------------------------------
 # No Thunderstorm server 
@@ -231,7 +238,19 @@ if ( $Source -ne "" ) {
     $EncodedSource = [uri]::EscapeDataString($Source)
     $SourceParam = "?source=$EncodedSource"
 }
-$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
+$Protocol = "http"
+if ( $UseSSL ) {
+    $Protocol = "https"
+    # Enforce TLS 1.2+ (required on older .NET / PS versions that default to SSL3/TLS1.0)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    } catch {
+        # TLS 1.3 not available on older .NET; fall back to TLS 1.2 only
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    }
+    Write-Log "HTTPS mode enabled (TLS 1.2+)"
+}
+$Url = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
 
 # ---------------------------------------------------------------------
@@ -299,7 +318,7 @@ try {
         while ( $($StatusCode) -ne 200 ) {
             try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
-                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes
+                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes -UseBasicParsing
                 $StatusCode = [int]$Response.StatusCode
             }
             # Catch all non 200 status codes

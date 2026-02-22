@@ -1,0 +1,2055 @@
+diff --git a/scripts/README.md b/scripts/README.md
+index 987e3a0..f7d156e 100644
+--- a/scripts/README.md
++++ b/scripts/README.md
+@@ -1,146 +1,411 @@
+ # THOR Thunderstorm Collector Scripts
+ 
+-The Thunderstorm collector script library is a library of script examples that you can use for sample collection purposes.
++Lightweight, dependency-minimal scripts for collecting and submitting file samples to a [THOR Thunderstorm](https://www.nextron-systems.com/thor-thunderstorm/) server for YARA-based scanning.
+ 
+-## thunderstorm-collector Shell Script
++Designed for forensic triage, incident response, and continuous monitoring — often on systems where installing a full agent is impractical or undesirable.
+ 
+-A shell script for Linux.
++## Quick Start
+ 
+-### Requirements
++```bash
++# Linux/macOS — Bash
++bash thunderstorm-collector.sh --server thunderstorm.local --dir /home
+ 
+-- bash
+-- curl **or** wget
++# Embedded Linux / BusyBox / Alpine — POSIX sh
++sh thunderstorm-collector-ash.sh --server thunderstorm.local --dir /tmp
+ 
+-### Usage
++# Cross-platform — Python 3
++python3 thunderstorm-collector.py -s thunderstorm.local -d /home
+ 
+-You can run it like:
++# Legacy systems — Python 2
++python thunderstorm-collector-py2.py -s thunderstorm.local -d /home
+ 
+-```bash
+-bash ./thunderstorm-collector.sh
+-```
++# Unix with Perl
++perl thunderstorm-collector.pl -- --server thunderstorm.local --dir /home
+ 
+-Show available options:
++# Windows — PowerShell 3+
++powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.local
+ 
+-```bash
+-bash ./thunderstorm-collector.sh --help
++# Windows — PowerShell 2+
++powershell.exe -ep bypass .\thunderstorm-collector-ps2.ps1 -ThunderstormServer thunderstorm.local
++
++# Windows — Batch (legacy)
++thunderstorm-collector.bat
+ ```
+ 
+-Example dry-run for a custom folder with spaces in the path:
++## Choosing the Right Collector
++
++| Scenario | Recommended Collector |
++|---|---|
++| Modern Linux server or workstation | `thunderstorm-collector.sh` (Bash) |
++| macOS (any version) | `thunderstorm-collector.sh` (Bash) |
++| Embedded Linux / BusyBox / router / IoT | `thunderstorm-collector-ash.sh` (POSIX sh) |
++| Alpine Docker container | `thunderstorm-collector-ash.sh` (POSIX sh) |
++| Cross-platform, single script | `thunderstorm-collector.py` (Python 3) |
++| Legacy Linux (RHEL/CentOS 7, Debian 7/8) | `thunderstorm-collector-py2.py` (Python 2) |
++| Solaris, AIX, HP-UX | `thunderstorm-collector.pl` (Perl) |
++| Windows 7+ / Server 2008 R2+ (PS 3+) | `thunderstorm-collector.ps1` |
++| Windows 7 / Server 2008 R2 (PS 2) | `thunderstorm-collector-ps2.ps1` |
++| Windows XP / Server 2003 / no PowerShell | `thunderstorm-collector.bat` |
++
++---
++
++## Collector Reference
++
++### Bash Collector — `thunderstorm-collector.sh`
++
++The most feature-complete Linux/macOS collector. Supports both `curl` and `wget` as upload backends with automatic detection and fallback.
++
++**Use on:** Linux servers, workstations, macOS, WSL, any system with Bash 3.2+.
++
++| Requirement | Detail |
++|---|---|
++| Shell | Bash 3.2+ |
++| Upload tool | `curl` or `wget` (at least one) |
++| TLS | Via curl/wget flags (`--ssl`) |
++
++**Features:**
++- Automatic curl/wget detection and fallback
++- Retry with exponential backoff (configurable)
++- Safe handling of filenames with spaces, quotes, and special characters (`find -print0`)
++- URL-encoded source identifiers
++- Syslog integration (`--syslog`), log file output (`--log-file`), dry-run mode (`--dry-run`)
++
++**Limitations:**
++- Not compatible with `ash`, `dash`, or plain `sh` — uses Bash arrays, `${var//pattern}`, `read -d ''`, C-style for loops
++- Requires `curl` or `wget` as external dependency
++
++**Tested Environments:**
++
++| Environment | Bash | curl | wget | Result |
++|---|---|---|---|---|
++| Fedora 43 | 5.2 | ✅ | ✅ | ✅ 28/28 tests |
++| CentOS 7 | 4.2 | ✅ | ✅ | ✅ |
++| Debian 9 (Stretch) | 4.4 | ✅ | ✅ | ✅ |
++| Alpine 3.18 | 5.2 | ✅ | ✅ | ✅ |
++| Bash 3.2 (compiled, macOS-equivalent) | 3.2 | ✅ | ✅ | ✅ |
+ 
++**Usage:**
+ ```bash
+-bash ./thunderstorm-collector.sh --server thunderstorm.local --dir "/tmp/Suspicious Files" --dry-run
++bash thunderstorm-collector.sh --server thunderstorm.local
++bash thunderstorm-collector.sh --server 10.0.0.5 --ssl --dir /home --dir /tmp --max-age 7
++bash thunderstorm-collector.sh --help
+ ```
+ 
+-The most common use case would be a collector script that looks e.g. for files that have been created or modified within the last X days and runs every X days.
++---
+ 
+-### Tested On
++### POSIX sh / ash Collector — `thunderstorm-collector-ash.sh`
+ 
+-Successfully tested on:
++A POSIX-compliant rewrite that runs on any Bourne-compatible shell. Designed for minimal environments where Bash is unavailable.
+ 
+-- Debian 10
++**Use on:** BusyBox-based firmware, Alpine Docker containers, embedded Linux, network appliances, routers, IoT devices, stripped-down VMs.
+ 
+-## thunderstorm-collector Batch Script
++| Requirement | Detail |
++|---|---|
++| Shell | Any POSIX sh (`ash`, `dash`, `busybox sh`, `ksh`) |
++| Upload tool | `curl`, `wget`, or `nc` (at least one) |
++| Utilities | `find`, `wc`, `od`, `tr`, `sed`, `grep` (standard POSIX) |
++| TLS | Via curl/wget flags (`--ssl`) |
+ 
+-A Batch script for Windows.
++**Features:**
++- Same CLI interface, retry logic, logging, and syslog support as the Bash collector
++- Three upload backends with automatic detection: `curl` → GNU `wget` → `nc` → BusyBox `wget`
++- URL-encoding via `od` + POSIX arithmetic (no Bash constructs)
+ 
+-Warning: The FOR loop used in the Batch script tends to [leak memory](https://stackoverflow.com/questions/6330519/memory-leak-in-batch-for-loop). We couldn't figure out a clever hack to avoid this behaviour and therefore recommend using the Go based Thunderstorm Collector on Windows systems.
++**Limitations:**
++- Filenames containing literal newline characters (`\n`) are not supported — the Bash version handles this via `find -print0` + `read -d ''`, which requires Bash. Extremely rare in practice.
++- BusyBox `wget --post-file` truncates binary files at the first NUL byte (0x00). The collector detects this and prefers `nc` automatically. If neither `curl` nor `nc` is available, BusyBox `wget` is used with a warning.
+ 
+-### Requirements
++**Tested Environments:**
+ 
+-- curl (Download [here](https://curl.haxx.se/windows/))
++| Environment | Shell | curl | nc | wget | Result |
++|---|---|---|---|---|---|
++| BusyBox 1.36 | ash | — | ✅ | ⚠️ truncates | ✅ 10/10 files (via nc) |
++| Alpine 3.18 | ash | ✅ | ✅ | ✅ | ✅ |
++| Fedora 43 | dash | ✅ | ✅ | ✅ | ✅ |
++| Debian 9 (Stretch) | dash | ✅ | ✅ | ✅ | ✅ |
+ 
+-#### Note on Windows 10
++**Usage:**
++```sh
++sh thunderstorm-collector-ash.sh --server thunderstorm.local
++sh thunderstorm-collector-ash.sh --server 10.0.0.5 --dir /var --dir /tmp --max-age 7
++```
++
++---
++
++### Python 3 Collector — `thunderstorm-collector.py`
++
++Cross-platform collector using only the Python 3 standard library. No external packages required.
+ 
+-Windows 10 already includes a curl since build 17063, so all versions newer than version 1709 (Redstone 3) from October 2017 already meet the requirements
++**Use on:** Any system with Python 3.4+ — Linux, macOS, Windows, BSD, Solaris. Good default choice when Python is available and you want a single script that works everywhere.
+ 
+-#### Note on very old Windows versions
++| Requirement | Detail |
++|---|---|
++| Runtime | Python 3.4+ |
++| Dependencies | None (stdlib only: `http.client`, `ssl`, `mimetypes`) |
++| TLS | Built-in (`--tls`, `--insecure`) |
+ 
+-The last version of curl that works with Windows 7 / Windows 2008 R2 and earlier is v7.46.0 and can be still be downloaded from [here](https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z)
++**Features:**
++- Built-in HTTP/HTTPS client (no curl/wget needed)
++- TLS with certificate verification or `--insecure` mode
++- Multipart form-data upload, URL-encoded source identifiers
++- Configurable skip patterns (regex), directory exclusions, file size/age limits
+ 
+-### Usage
++**Limitations:**
++- Python 2 not supported — use `thunderstorm-collector-py2.py` instead
++- Skip patterns and directory exclusions are configured in source code, not CLI flags
++- No syslog integration
+ 
+-You can run it like:
++**Tested Environments:**
+ 
++| Environment | Python | Result |
++|---|---|---|
++| Fedora 43 | 3.14 | ✅ |
++| Alpine 3.18 | 3.11 | ✅ |
++| CentOS 7 | 3.6 | ✅ |
++| Debian 9 (Stretch) | 3.5 | ✅ (after f-string removal) |
++
++**Usage:**
+ ```bash
+-thunderstorm-collector.bat
++python3 thunderstorm-collector.py -s thunderstorm.local -d /home -d /tmp
++python3 thunderstorm-collector.py -s thunderstorm.local -p 443 -t -k  # HTTPS, skip cert verify
+ ```
+ 
+-### Tested On
++---
+ 
+-Successfully tested on:
++### Python 2 Collector — `thunderstorm-collector-py2.py`
+ 
+-- Windows 10
+-- Windows 2003
+-- Windows XP
++Functionally equivalent to the Python 3 collector, using Python 2 standard library modules (`httplib`, `urllib`).
+ 
+-## thunderstorm-collector PowerShell Script
++**Use on:** Legacy systems where Python 3 is unavailable — RHEL/CentOS 6–7, Debian 7/8, older Solaris, AIX. Python 2 reached end-of-life in January 2020; prefer the Python 3 version when possible.
+ 
+-A PowerShell script for Windows.
++| Requirement | Detail |
++|---|---|
++| Runtime | Python 2.7+ |
++| Dependencies | None (stdlib only: `httplib`, `urllib`, `ssl`) |
++| TLS | Built-in; full support requires Python 2.7.9+ (SNI, cert verification) |
+ 
+-### Requirements
++**Features:**
++- Same feature set as the Python 3 collector
++- Graceful TLS fallback for Python 2.7.0–2.7.8 (connects without SNI/cert verification)
++- Version guard: exits with a clear error if accidentally run under Python 3
+ 
+-- PowerShell version 3
++**Limitations:**
++- TLS on Python 2.7.0–2.7.8: connects but without SNI or certificate verification (limited by the `ssl` module)
++- Same configuration limitations as the Python 3 version
+ 
+-### Usage
++**Tested Environments:**
+ 
+-You can run it like:
++| Environment | Python | TLS | Result |
++|---|---|---|---|
++| CentOS 7 | 2.7.5 | ⚠️ no SNI (pre-2.7.9) | ✅ |
+ 
++**Usage:**
+ ```bash
+-powershell.exe -ep bypass .\thunderstorm-collector.ps1
++python thunderstorm-collector-py2.py -s thunderstorm.local -d /home
++python thunderstorm-collector-py2.py -s thunderstorm.local -p 443 -t -k
+ ```
+ 
+-Collect files from a certain directory
++---
++
++### Perl Collector — `thunderstorm-collector.pl`
++
++**Use on:** Unix/Linux systems where Perl is available but Python and Bash may not be. Common on older Solaris, AIX, HP-UX, and hardened systems that strip other scripting languages.
+ 
++| Requirement | Detail |
++|---|---|
++| Runtime | Perl 5.16+ |
++| Dependencies | `LWP::UserAgent` (not in Perl core since 5.14) |
++| TLS | Via LWP SSL configuration |
++
++**Features:**
++- Multipart form-data upload via LWP
++- URL-encoded source identifiers
++- Recursive directory scanning with configurable age and size limits
++- Debug mode
++
++**Limitations:**
++- Requires `LWP::UserAgent` (`apt-get install libwww-perl` / `yum install perl-libwww-perl`)
++- No retry logic on upload failure
++- Configuration (skip patterns, extensions, size/age limits) is in source code, not CLI flags
++- No syslog integration
++
++**Tested Environments:**
++
++| Environment | Perl | LWP | Result |
++|---|---|---|---|
++| Fedora 43 | 5.40 | ✅ | ✅ |
++| CentOS 7 | 5.16 | ✅ | ✅ |
++| Debian 9 (Stretch) | 5.24 | ✅ | ✅ |
++| Alpine 3.18 | 5.36 | ✅ | ✅ |
++
++**Usage:**
+ ```bash
+-powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer my-thunderstorm.local -Folder C:\ProgramData\Suspicious
++perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
++perl thunderstorm-collector.pl -- --dir /home --server thunderstorm.internal.net --debug
+ ```
+ 
+-Collect all files created within the last 24 hours from partition C:\
++> **Note:** The `--` before flags is required because the script uses Perl's `-s` switch for legacy flag parsing alongside `Getopt::Long`.
+ 
+-```bash
+-powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer my-thunderstorm.local -MaxAge 1
++---
++
++### PowerShell 3+ Collector — `thunderstorm-collector.ps1`
++
++**Use on:** Windows 7 SP1+, Windows Server 2008 R2 SP1+ — any system with PowerShell 3.0 or newer. This covers most modern Windows deployments.
++
++| Requirement | Detail |
++|---|---|
++| Runtime | PowerShell 3.0+ |
++| Dependencies | None |
++| TLS | Built-in (`-UseSSL` flag, enforces TLS 1.2+) |
++
++**Features:**
++- Recursive file scanning with extension, age, and size filtering
++- HTTPS support with TLS 1.2/1.3 enforcement (`-UseSSL`)
++- Source identifier for audit trail
++- Debug output (`-Debugging`)
++- Log file output
++- Retry with exponential backoff, 503 back-pressure handling with `Retry-After`
++- Auto-detection of Microsoft Defender ATP Live Response environment
++
++**Limitations:**
++- PowerShell 2.0 is not supported — use `thunderstorm-collector-ps2.ps1` instead
++- Uses `Invoke-WebRequest` with `-UseBasicParsing`
++
++**Tested Environments:**
++
++| Environment | PowerShell | .NET | Upload Integrity | Result |
++|---|---|---|---|---|
++| Windows 11 | 5.1.26100 | 4.x | ✅ MD5 verified (512KB binary w/ NUL bytes) | ✅ |
++| Fedora 43 (pwsh) | 7.4.6 | — | ✅ MD5 verified | ✅ |
++
++**Usage:**
++```powershell
++# Basic scan
++powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.local
++
++# HTTPS with TLS
++powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.local -UseSSL
++
++# Scan specific folder, files modified in last 24 hours
++powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer ts.local -Folder C:\ProgramData -MaxAge 1
++
++# Debug mode
++powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer ts.local -Debugging
+ ```
+ 
+-### Configuration
++---
+ 
+-Please review the configuration section in the PowerShell script for more settings.
++### PowerShell 2+ Collector — `thunderstorm-collector-ps2.ps1`
+ 
+-### Tested On
++A PowerShell 2.0–compatible variant using `System.Net.HttpWebRequest` instead of `Invoke-WebRequest` (which was introduced in PowerShell 3.0).
+ 
+-Successfully tested on:
++**Use on:** Windows 7 (pre-SP1 or without WMF 3.0 update), Windows Server 2008 R2 (pre-SP1), or any environment where PowerShell 2.0 is the only option and cannot be upgraded. Also works on all newer PowerShell versions.
+ 
+-- Windows 10
+-- Windows 7
++| Requirement | Detail |
++|---|---|
++| Runtime | PowerShell 2.0+ |
++| Dependencies | None |
++| TLS | Built-in (`-UseSSL` flag); requires .NET 4.5+ for TLS 1.2 |
+ 
+-## thunderstorm-collector Perl Script
++**Features:**
++- Same scanning and filtering as the PS 3+ version
++- Raw byte stream upload via `HttpWebRequest.GetRequestStream()` — no encoding layer, binary-safe
++- HTTPS with TLS 1.2+ enforcement via numeric `SecurityProtocol` enum values (works without .NET 4.5 type names)
++- Retry with exponential backoff, 503 back-pressure with `Retry-After`
++- PS 2–compatible file enumeration (`Where-Object { -not $_.PSIsContainer }` instead of `-File`)
+ 
+-A Perl script collector.
++**Limitations:**
++- TLS 1.2 requires .NET Framework 4.5 or newer installed on the system. Windows 7 RTM ships with .NET 3.5; if .NET 4.5 is not installed, HTTPS connections will fail
++- No auto-detection of MDATP Live Response environment (rare on PS 2 systems)
+ 
+-### Requirements
++**Tested Environments:**
+ 
+-- Perl version 5
+-- LWP::UserAgent
++| Environment | PowerShell | .NET | Upload Integrity | Result |
++|---|---|---|---|---|
++| Windows 11 | 5.1.26100 | 4.x | ✅ MD5 verified (512KB binary w/ NUL bytes) | ✅ |
++| Fedora 43 (pwsh) | 7.4.6 | — | ✅ MD5 verified | ✅ |
+ 
+-### Usage
++**Usage:**
++```powershell
++# Basic scan
++powershell.exe -ep bypass .\thunderstorm-collector-ps2.ps1 -ThunderstormServer thunderstorm.local
+ 
+-You can run it like:
++# HTTPS
++powershell.exe -ep bypass .\thunderstorm-collector-ps2.ps1 -ThunderstormServer thunderstorm.local -UseSSL
++```
+ 
+-```bash
+-perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
++---
++
++### Batch Collector — `thunderstorm-collector.bat`
++
++A minimal `cmd.exe` script for very old Windows systems.
++
++**Use on:** Windows XP, Server 2003, Server 2008 — systems where PowerShell is unavailable or restricted. Last resort for legacy environments.
++
++| Requirement | Detail |
++|---|---|
++| Runtime | cmd.exe (Windows XP+) |
++| Upload tool | `curl.exe` (included in Windows 10 1709+; download separately for older) |
++| TLS | Not supported |
++
++**Features:**
++- Minimal dependencies — runs on virtually any Windows version
++- `FORFILES` for age-based file filtering
++
++**Limitations:**
++- **Known memory leak** in the `FOR` loop for directory traversal ([details](https://stackoverflow.com/questions/6330519/memory-leak-in-batch-for-loop)). For large scans, prefer a PowerShell or Go collector.
++- No TLS, limited error handling, hardcoded configuration
++- Requires `curl.exe` to be available in `PATH`
++
++> **Old Windows note:** The last curl version supporting Windows 7 / 2008 R2 and earlier is [v7.46.0](https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z).
++
++**Usage:**
++```cmd
++thunderstorm-collector.bat
+ ```
+ 
+-Collect files from a certain directory
++---
++
++## Configuration
++
++All collectors support basic configuration via command-line flags:
++
++| Parameter | Description | Default |
++|---|---|---|
++| Server | Hostname or IP of the Thunderstorm server | (required) |
++| Port | Server port | 8080 |
++| Directory | Path(s) to scan | `/` or `C:\` |
++| Max age | Only submit files modified within N days | disabled |
++| Max size | Skip files larger than N MB | 20 MB |
++| Source | Identifier string for audit trail | hostname |
++
++Advanced settings (skip patterns, extension filters, directory exclusions) are configured in the script source for most collectors.
++
++## Common Use Cases
++
++### Scheduled collection via cron (Linux)
+ 
+ ```bash
+-perl thunderstorm-collector.pl -- --dir /home --server thunderstorm.internal.net
++# Every 6 hours, scan /home and /tmp for files modified in the last 7 days
++0 */6 * * * bash /opt/thunderstorm-collector.sh --server ts.local --dir /home --dir /tmp --max-age 7 --quiet
+ ```
+ 
+-### Configuration
++### One-shot incident response triage
++
++```bash
++# Scan entire system, everything modified in the last 30 days
++bash thunderstorm-collector.sh --server 10.0.0.5 --dir / --max-age 30 --source "IR-case-2024-001"
++```
+ 
+-Please review the configuration section in the Perl script for more settings like the maximum age, maximum file size or directory exclusions.
++### Windows scheduled task
+ 
+-### Tested On
++```powershell
++schtasks /create /tn "ThunderstormCollector" /tr "powershell.exe -ep bypass C:\tools\thunderstorm-collector.ps1 -ThunderstormServer ts.local" /sc daily /st 02:00
++```
+ 
+-Successfully tested on:
++### BusyBox / embedded system
+ 
+-- Debian 10
++```sh
++# On a router or IoT device with only BusyBox
++sh /tmp/thunderstorm-collector-ash.sh --server 10.0.0.5 --dir /var --max-age 7
++```
+diff --git a/scripts/thunderstorm-collector-ash.sh b/scripts/thunderstorm-collector-ash.sh
+new file mode 100755
+index 0000000..fba82a9
+--- /dev/null
++++ b/scripts/thunderstorm-collector-ash.sh
+@@ -0,0 +1,653 @@
++#!/bin/sh
++#
++# THOR Thunderstorm Collector — POSIX sh / ash Edition
++# Florian Roth / Nextron Systems
++#
++# Goals:
++# - POSIX sh compatible (ash, dash, busybox sh, ksh88)
++# - No bash required — suitable for embedded Linux, routers, stripped VMs
++# - Functionally equivalent to thunderstorm-collector.sh
++#
++# Limitations vs the bash version:
++# - Filenames containing literal newlines will not be processed correctly
++#   (find -print0 / read -d '' require bash; this is an extreme edge case
++#   in real deployments and is documented here as a known trade-off)
++# - No associative arrays, no C-style for loops — all replaced with
++#   POSIX-compatible equivalents
++
++VERSION="0.4.0"
++
++# Defaults --------------------------------------------------------------------
++
++LOGFILE="./thunderstorm.log"
++LOG_TO_FILE=1
++LOG_TO_SYSLOG=0
++LOG_TO_CMDLINE=1
++SYSLOG_FACILITY="user"
++
++THUNDERSTORM_SERVER="ygdrasil.nextron"
++THUNDERSTORM_PORT=8080
++USE_SSL=0
++ASYNC_MODE=1
++
++MAX_AGE=14
++MAX_FILE_SIZE_KB=2000
++DEBUG=0
++DRY_RUN=0
++RETRIES=3
++
++UPLOAD_TOOL=""
++TMP_FILES=""
++
++# Space-separated list of directories to scan (no bash arrays in ash)
++SCAN_DIRS="/root /tmp /home /var /usr"
++SCAN_DIRS_SET=0   # 1 once the user has overridden via --dir
++
++FILES_SCANNED=0
++FILES_SUBMITTED=0
++FILES_SKIPPED=0
++FILES_FAILED=0
++
++SCRIPT_NAME="${0##*/}"
++START_TS="$(date +%s 2>/dev/null || echo 0)"
++SOURCE_NAME=""
++
++# Helpers ---------------------------------------------------------------------
++
++timestamp() {
++    date "+%Y-%m-%d_%H:%M:%S" 2>/dev/null || date
++}
++
++cleanup_tmp_files() {
++    for _f in $TMP_FILES; do
++        [ -n "$_f" ] && [ -f "$_f" ] && rm -f "$_f"
++    done
++}
++
++on_exit() {
++    cleanup_tmp_files
++}
++
++trap on_exit EXIT INT TERM
++
++log_msg() {
++    _lm_level="$1"
++    shift
++    _lm_message="$*"
++
++    [ "$_lm_level" = "debug" ] && [ "$DEBUG" -ne 1 ] && return 0
++
++    _lm_ts="$(timestamp)"
++    # Strip CR/LF from message — no ${var//pat/rep} in ash, use tr
++    _lm_clean="$(printf '%s' "$_lm_message" | tr '\r\n' '  ')"
++
++    if [ "$LOG_TO_FILE" -eq 1 ]; then
++        if ! printf "%s %s %s\n" "$_lm_ts" "$_lm_level" "$_lm_clean" >> "$LOGFILE" 2>/dev/null; then
++            LOG_TO_FILE=0
++            printf "%s warn Could not write to log file '%s'; disabling file logging\n" \
++                "$_lm_ts" "$LOGFILE" >&2
++        fi
++    fi
++
++    if [ "$LOG_TO_SYSLOG" -eq 1 ] && command -v logger >/dev/null 2>&1; then
++        case "$_lm_level" in
++            error) _lm_prio="err" ;;
++            warn)  _lm_prio="warning" ;;
++            debug) _lm_prio="debug" ;;
++            *)     _lm_prio="info" ;;
++        esac
++        logger -p "${SYSLOG_FACILITY}.${_lm_prio}" "${SCRIPT_NAME}: ${_lm_clean}" \
++            >/dev/null 2>&1 || true
++    fi
++
++    if [ "$LOG_TO_CMDLINE" -eq 1 ]; then
++        printf "[%s] %s\n" "$_lm_level" "$_lm_clean" >&2
++    fi
++}
++
++die() {
++    log_msg error "$*"
++    exit 1
++}
++
++print_banner() {
++    cat <<EOF
++==============================================================
++    ________                __            __
++   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _
++    / / / _ \/ // / _ \/ _  / -_) __(_-</ __/ _ \/ __/  ' \\
++   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/
++   v${VERSION} (POSIX sh / ash edition)
++
++   THOR Thunderstorm Collector for Linux/Unix
++==============================================================
++EOF
++}
++
++print_help() {
++    cat <<'EOF'
++Usage:
++  sh thunderstorm-collector-ash.sh [options]
++
++Options:
++  -s, --server <host>        Thunderstorm server hostname or IP
++  -p, --port <port>          Thunderstorm port (default: 8080)
++  -d, --dir <path>           Directory to scan (repeatable)
++  --max-age <days>           Max file age in days (default: 14)
++  --max-size-kb <kb>         Max file size in KB (default: 2000)
++  --source <name>            Source identifier (default: hostname)
++  --ssl                      Use HTTPS
++  --sync                     Use /api/check (default: /api/checkAsync)
++  --retries <num>            Retry attempts per file (default: 3)
++  --dry-run                  Do not upload, only show what would be submitted
++  --debug                    Enable debug log messages
++  --log-file <path>          Log file path (default: ./thunderstorm.log)
++  --no-log-file              Disable file logging
++  --syslog                   Enable syslog logging
++  --quiet                    Disable command-line logging
++  -h, --help                 Show this help text
++
++Notes:
++  This script requires only POSIX sh (ash, dash, busybox sh).
++  Filenames containing literal newline characters are not supported.
++  For systems with bash available, prefer thunderstorm-collector.sh.
++
++Examples:
++  sh thunderstorm-collector-ash.sh --server thunderstorm.local
++  sh thunderstorm-collector-ash.sh --server 10.0.0.5 --dir /tmp --dir /home
++EOF
++}
++
++is_integer() {
++    case "$1" in
++        ''|*[!0-9]*) return 1 ;;
++        *) return 0 ;;
++    esac
++}
++
++detect_source_name() {
++    [ -n "$SOURCE_NAME" ] && return 0
++    if command -v hostname >/dev/null 2>&1; then
++        SOURCE_NAME="$(hostname -f 2>/dev/null)"
++        [ -z "$SOURCE_NAME" ] && SOURCE_NAME="$(hostname 2>/dev/null)"
++    fi
++    [ -z "$SOURCE_NAME" ] && SOURCE_NAME="$(uname -n 2>/dev/null)"
++    [ -z "$SOURCE_NAME" ] && SOURCE_NAME="unknown-host"
++}
++
++urlencode() {
++    # POSIX-safe urlencode: no bash C-style for loop or ${var:i:1}
++    # Process od hex output word by word via set --
++    _ue_hex="$(printf '%s' "$1" | od -An -tx1 | tr -d '\n')"
++    # shellcheck disable=SC2086
++    set -- $_ue_hex
++    _ue_result=""
++    for _ue_byte; do
++        [ -z "$_ue_byte" ] && continue
++        _ue_dec=$(printf '%d' "0x${_ue_byte}" 2>/dev/null) || continue
++        # Pass through RFC 3986 unreserved characters: A-Z a-z 0-9 - _ . ~
++        if   { [ "$_ue_dec" -ge 65 ] && [ "$_ue_dec" -le  90 ]; } \
++          || { [ "$_ue_dec" -ge 97 ] && [ "$_ue_dec" -le 122 ]; } \
++          || { [ "$_ue_dec" -ge 48 ] && [ "$_ue_dec" -le  57 ]; } \
++          ||   [ "$_ue_dec" -eq 45 ] \
++          ||   [ "$_ue_dec" -eq 95 ] \
++          ||   [ "$_ue_dec" -eq 46 ] \
++          ||   [ "$_ue_dec" -eq 126 ]; then
++            _ue_result="${_ue_result}$(printf "\\$(printf '%03o' "$_ue_dec")")"
++        else
++            _ue_result="${_ue_result}%$(printf '%02X' "$_ue_dec")"
++        fi
++    done
++    printf '%s' "$_ue_result"
++}
++
++build_query_source() {
++    [ -n "$1" ] && printf "?source=%s" "$(urlencode "$1")"
++}
++
++sanitize_filename_for_multipart() {
++    # No ${var//pat/rep} in ash — use sed + tr
++    printf '%s' "$1" | sed 's/["\\;]/_/g' | tr '\r\n' '__'
++}
++
++file_size_kb() {
++    _sz_bytes="$(wc -c < "$1" 2>/dev/null | tr -d ' \t')"
++    case "$_sz_bytes" in
++        ''|*[!0-9]*) echo -1; return 1 ;;
++    esac
++    echo $(( (_sz_bytes + 1023) / 1024 ))
++}
++
++mktemp_portable() {
++    _mp_t="$(mktemp "${TMPDIR:-/tmp}/thunderstorm.XXXXXX" 2>/dev/null)"
++    if [ -n "$_mp_t" ]; then
++        echo "$_mp_t"
++        return 0
++    fi
++    _mp_t="${TMPDIR:-/tmp}/thunderstorm.$$.$(date +%s 2>/dev/null || echo 0)"
++    : > "$_mp_t" 2>/dev/null || return 1
++    echo "$_mp_t"
++}
++
++_wget_is_busybox() {
++    # BusyBox wget truncates --post-file at the first NUL byte, making it
++    # unable to upload binary files.  Detect it so we can fall back to nc.
++    wget --version 2>&1 | grep -qi busybox
++}
++
++detect_upload_tool() {
++    if command -v curl >/dev/null 2>&1; then
++        UPLOAD_TOOL="curl"
++        return 0
++    fi
++    # Prefer nc over BusyBox wget for binary-safe uploads
++    if command -v wget >/dev/null 2>&1 && ! _wget_is_busybox; then
++        UPLOAD_TOOL="wget"
++        return 0
++    fi
++    if command -v nc >/dev/null 2>&1; then
++        UPLOAD_TOOL="nc"
++        return 0
++    fi
++    # Fall back to BusyBox wget (works for text files, truncates binary at NUL)
++    if command -v wget >/dev/null 2>&1; then
++        UPLOAD_TOOL="wget"
++        log_msg warn "BusyBox wget detected; binary files with NUL bytes may fail to upload"
++        return 0
++    fi
++    return 1
++}
++
++upload_with_curl() {
++    _uc_endpoint="$1"
++    _uc_filepath="$2"
++    _uc_filename="$3"
++    _uc_safe_name="$(sanitize_filename_for_multipart "$_uc_filename")"
++    _uc_resp="$(mktemp_portable)" || return 91
++    TMP_FILES="${TMP_FILES} ${_uc_resp}"
++
++    # Escape double-quotes in filepath for curl's --form
++    _uc_escaped="$(printf '%s' "$_uc_filepath" | sed 's/"/\\"/g')"
++
++    curl -sS --fail --show-error -X POST \
++        "$_uc_endpoint" \
++        --form "file=@\"${_uc_escaped}\";filename=\"${_uc_safe_name}\"" \
++        > "$_uc_resp" 2>&1
++    _uc_code=$?
++    [ "$_uc_code" -ne 0 ] && return "$_uc_code"
++
++    if grep -qi "reason" "$_uc_resp" 2>/dev/null; then
++        _uc_body="$(cat "$_uc_resp" 2>/dev/null | tr '\r\n' '  ')"
++        log_msg error "Server reported rejection for '$_uc_filepath': $_uc_body"
++        return 92
++    fi
++    return 0
++}
++
++upload_with_wget() {
++    _uw_endpoint="$1"
++    _uw_filepath="$2"
++    _uw_filename="$3"
++    _uw_safe_name="$(sanitize_filename_for_multipart "$_uw_filename")"
++    _uw_boundary="----ThunderstormBoundary$$"
++    _uw_body="$(mktemp_portable)" || return 93
++    _uw_resp="$(mktemp_portable)" || return 94
++    TMP_FILES="${TMP_FILES} ${_uw_body} ${_uw_resp}"
++
++    {
++        printf -- "--%s\r\n" "$_uw_boundary"
++        printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' \
++            "$_uw_safe_name"
++        printf 'Content-Type: application/octet-stream\r\n\r\n'
++        cat "$_uw_filepath"
++        printf '\r\n--%s--\r\n' "$_uw_boundary"
++    } > "$_uw_body" 2>/dev/null || return 95
++
++    wget -q -O "$_uw_resp" \
++        --header="Content-Type: multipart/form-data; boundary=${_uw_boundary}" \
++        --post-file="$_uw_body" \
++        "$_uw_endpoint"
++    _uw_code=$?
++    [ "$_uw_code" -ne 0 ] && return "$_uw_code"
++
++    if grep -qi "reason" "$_uw_resp" 2>/dev/null; then
++        _uw_body_content="$(cat "$_uw_resp" 2>/dev/null | tr '\r\n' '  ')"
++        log_msg error "Server reported rejection for '$_uw_filepath': $_uw_body_content"
++        return 96
++    fi
++    return 0
++}
++
++upload_with_nc() {
++    # Raw HTTP POST via netcat — binary-safe, no NUL truncation.
++    # Used as a fallback when only BusyBox wget + nc are available.
++    _nc_endpoint="$1"    # full URL: http://host:port/path?query
++    _nc_filepath="$2"
++    _nc_filename="$3"
++    _nc_safe_name="$(sanitize_filename_for_multipart "$_nc_filename")"
++    _nc_boundary="----ThunderstormBoundary$$"
++    _nc_body="$(mktemp_portable)" || return 97
++    TMP_FILES="${TMP_FILES} ${_nc_body}"
++
++    # Build multipart body
++    {
++        printf -- "--%s\r\n" "$_nc_boundary"
++        printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' \
++            "$_nc_safe_name"
++        printf 'Content-Type: application/octet-stream\r\n\r\n'
++        cat "$_nc_filepath"
++        printf '\r\n--%s--\r\n' "$_nc_boundary"
++    } > "$_nc_body" 2>/dev/null || return 98
++
++    _nc_content_length="$(wc -c < "$_nc_body" | tr -d ' \t')"
++
++    # Parse host and port from the endpoint URL
++    # Strip scheme
++    _nc_hostpath="${_nc_endpoint#*://}"
++    # Extract host:port
++    _nc_hostport="${_nc_hostpath%%/*}"
++    _nc_host="${_nc_hostport%%:*}"
++    _nc_port="${_nc_hostport##*:}"
++    [ "$_nc_port" = "$_nc_host" ] && _nc_port=80
++    # Extract path+query
++    _nc_path="/${_nc_hostpath#*/}"
++
++    # Send raw HTTP via nc (cat merges headers + binary body into one stream)
++    _nc_resp="$(
++        {
++            printf "POST %s HTTP/1.1\r\n" "$_nc_path"
++            printf "Host: %s\r\n" "$_nc_hostport"
++            printf "Content-Type: multipart/form-data; boundary=%s\r\n" "$_nc_boundary"
++            printf "Content-Length: %s\r\n" "$_nc_content_length"
++            printf "Connection: close\r\n"
++            printf "\r\n"
++            cat "$_nc_body"
++        } | nc "$_nc_host" "$_nc_port" -w 30 2>/dev/null
++    )"
++
++    # Check for HTTP 200
++    case "$_nc_resp" in
++        *"200 OK"*|*"200 ok"*) return 0 ;;
++    esac
++
++    # Check for error indicators
++    case "$_nc_resp" in
++        *"400 Bad"*|*"500 Internal"*|*"503 Service"*)
++            _nc_status="$(printf '%s' "$_nc_resp" | head -1 | tr '\r\n' '  ')"
++            log_msg error "Server error for '$_nc_filepath': $_nc_status"
++            return 99
++            ;;
++    esac
++
++    # No response or connection failure
++    [ -z "$_nc_resp" ] && return 1
++    return 0
++}
++
++submit_file() {
++    _sf_endpoint="$1"
++    _sf_filepath="$2"
++    _sf_filename="$_sf_filepath"
++    _sf_try=1
++    _sf_rc=1
++    _sf_wait=2
++
++    while [ "$_sf_try" -le "$RETRIES" ]; do
++        if [ "$DRY_RUN" -eq 1 ]; then
++            log_msg info "DRY-RUN: would submit '$_sf_filepath'"
++            return 0
++        fi
++
++        case "$UPLOAD_TOOL" in
++            curl)
++                upload_with_curl "$_sf_endpoint" "$_sf_filepath" "$_sf_filename"
++                _sf_rc=$? ;;
++            nc)
++                upload_with_nc "$_sf_endpoint" "$_sf_filepath" "$_sf_filename"
++                _sf_rc=$? ;;
++            *)
++                upload_with_wget "$_sf_endpoint" "$_sf_filepath" "$_sf_filename"
++                _sf_rc=$? ;;
++        esac
++
++        [ "$_sf_rc" -eq 0 ] && return 0
++
++        log_msg warn "Upload failed for '$_sf_filepath' (attempt ${_sf_try}/${RETRIES}, code ${_sf_rc})"
++        if [ "$_sf_try" -lt "$RETRIES" ]; then
++            sleep "$_sf_wait"
++            _sf_wait=$((_sf_wait * 2))
++        fi
++        _sf_try=$((_sf_try + 1))
++    done
++
++    return "$_sf_rc"
++}
++
++parse_args() {
++    while [ $# -gt 0 ]; do
++        _pa_arg="$1"
++        case "$_pa_arg" in
++            -h|--help)
++                print_help
++                exit 0
++                ;;
++            -s|--server)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                THUNDERSTORM_SERVER="$2"
++                shift
++                ;;
++            -p|--port)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                THUNDERSTORM_PORT="$2"
++                shift
++                ;;
++            -d|--dir)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                if [ "$SCAN_DIRS_SET" -eq 0 ]; then
++                    SCAN_DIRS=""
++                    SCAN_DIRS_SET=1
++                fi
++                # Append to space-separated list (quote-safe for dirs without spaces)
++                # Dirs with spaces are handled via IFS manipulation during iteration
++                SCAN_DIRS="${SCAN_DIRS:+$SCAN_DIRS
++}$2"
++                shift
++                ;;
++            --max-age)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                MAX_AGE="$2"
++                shift
++                ;;
++            --max-size-kb)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                MAX_FILE_SIZE_KB="$2"
++                shift
++                ;;
++            --source)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                SOURCE_NAME="$2"
++                shift
++                ;;
++            --ssl)
++                USE_SSL=1
++                ;;
++            --sync)
++                ASYNC_MODE=0
++                ;;
++            --retries)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                RETRIES="$2"
++                shift
++                ;;
++            --dry-run)
++                DRY_RUN=1
++                ;;
++            --debug)
++                DEBUG=1
++                ;;
++            --log-file)
++                [ -n "$2" ] || die "Missing value for $_pa_arg"
++                LOGFILE="$2"
++                shift
++                ;;
++            --no-log-file)
++                LOG_TO_FILE=0
++                ;;
++            --syslog)
++                LOG_TO_SYSLOG=1
++                ;;
++            --quiet)
++                LOG_TO_CMDLINE=0
++                ;;
++            --)
++                shift
++                break
++                ;;
++            -*)
++                die "Unknown option: $_pa_arg (use --help)"
++                ;;
++            *)
++                # Positional args treated as additional directories
++                if [ "$SCAN_DIRS_SET" -eq 0 ]; then
++                    SCAN_DIRS=""
++                    SCAN_DIRS_SET=1
++                fi
++                SCAN_DIRS="${SCAN_DIRS:+$SCAN_DIRS
++}$_pa_arg"
++                ;;
++        esac
++        shift
++    done
++}
++
++validate_config() {
++    is_integer "$THUNDERSTORM_PORT"  || die "Port must be numeric: '$THUNDERSTORM_PORT'"
++    is_integer "$MAX_AGE"            || die "max-age must be numeric: '$MAX_AGE'"
++    is_integer "$MAX_FILE_SIZE_KB"   || die "max-size-kb must be numeric: '$MAX_FILE_SIZE_KB'"
++    is_integer "$RETRIES"            || die "retries must be numeric: '$RETRIES'"
++    [ "$THUNDERSTORM_PORT" -gt 0 ]   || die "Port must be greater than 0"
++    [ "$MAX_AGE" -ge 0 ]             || die "max-age must be >= 0"
++    [ "$MAX_FILE_SIZE_KB" -gt 0 ]    || die "max-size-kb must be > 0"
++    [ "$RETRIES" -gt 0 ]             || die "retries must be > 0"
++    [ -n "$THUNDERSTORM_SERVER" ]    || die "Server must not be empty"
++    [ -n "$SCAN_DIRS" ]              || die "At least one directory is required"
++}
++
++main() {
++    _scheme="http"
++    _endpoint_name="check"
++    _query_source=""
++    _api_endpoint=""
++    _elapsed=0
++    _find_mtime=""
++    _results_file=""
++
++    parse_args "$@"
++    _find_mtime="-${MAX_AGE}"
++    detect_source_name
++    validate_config
++    print_banner
++
++    if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
++        log_msg warn "Running without root privileges; some files may be inaccessible"
++    fi
++
++    [ "$USE_SSL"    -eq 1 ] && _scheme="https"
++    [ "$ASYNC_MODE" -eq 1 ] && _endpoint_name="checkAsync"
++
++    _query_source="$(build_query_source "$SOURCE_NAME")"
++    _api_endpoint="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}/api/${_endpoint_name}${_query_source}"
++
++    if [ "$DRY_RUN" -eq 0 ]; then
++        detect_upload_tool || die "Neither 'curl' nor 'wget' is installed; unable to upload samples"
++    else
++        if detect_upload_tool; then
++            log_msg info "Dry-run mode active (upload tool detected: $UPLOAD_TOOL)"
++        else
++            log_msg info "Dry-run mode active (no upload tool required)"
++        fi
++    fi
++
++    log_msg info "Started Thunderstorm Collector (ash) - Version $VERSION"
++    log_msg info "Server: $THUNDERSTORM_SERVER"
++    log_msg info "Port: $THUNDERSTORM_PORT"
++    log_msg info "API endpoint: $_api_endpoint"
++    log_msg info "Max age (days): $MAX_AGE"
++    log_msg info "Max size (KB): $MAX_FILE_SIZE_KB"
++    log_msg info "Source: $SOURCE_NAME"
++    log_msg info "Folders: $(printf '%s' "$SCAN_DIRS" | tr '\n' ' ')"
++    [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
++
++    # Write the newline-separated directory list to a temp file so the while
++    # loop runs in the current shell (not a subshell). A pipe would lose all
++    # counter increments (FILES_SCANNED etc.) due to POSIX subshell semantics.
++    _dirs_file="$(mktemp_portable)" || die "Could not create temp file for directory list"
++    TMP_FILES="${TMP_FILES} ${_dirs_file}"
++    printf '%s\n' "$SCAN_DIRS" > "$_dirs_file"
++
++    exec 3< "$_dirs_file"
++    while IFS= read -r _scandir <&3; do
++        [ -z "$_scandir" ] && continue
++
++        if [ ! -d "$_scandir" ]; then
++            log_msg warn "Skipping non-directory path '$_scandir'"
++            continue
++        fi
++
++        log_msg info "Scanning '$_scandir'"
++
++        _results_file="$(mktemp_portable)" || {
++            log_msg error "Could not create temporary file list for '$_scandir'"
++            continue
++        }
++        TMP_FILES="${TMP_FILES} ${_results_file}"
++
++        # Note: find without -print0 is safe for all filenames EXCEPT those
++        # containing literal newline characters (an extremely rare edge case).
++        # If your environment has such filenames, use thunderstorm-collector.sh
++        # (requires bash) which uses find -print0 + read -d ''.
++        find "$_scandir" -type f -mtime "$_find_mtime" -print \
++            > "$_results_file" 2>/dev/null || true
++
++        exec 4< "$_results_file"
++        while IFS= read -r _file_path <&4; do
++            [ -z "$_file_path" ] && continue
++            [ -f "$_file_path" ] || continue
++
++            FILES_SCANNED=$((FILES_SCANNED + 1))
++
++            _size_kb="$(file_size_kb "$_file_path")"
++            if [ "$_size_kb" -lt 0 ]; then
++                FILES_SKIPPED=$((FILES_SKIPPED + 1))
++                log_msg debug "Skipping unreadable file '$_file_path'"
++                continue
++            fi
++
++            if [ "$_size_kb" -gt "$MAX_FILE_SIZE_KB" ]; then
++                FILES_SKIPPED=$((FILES_SKIPPED + 1))
++                log_msg debug "Skipping '$_file_path' due to size (${_size_kb}KB)"
++                continue
++            fi
++
++            log_msg debug "Submitting '$_file_path'"
++            if submit_file "$_api_endpoint" "$_file_path"; then
++                FILES_SUBMITTED=$((FILES_SUBMITTED + 1))
++            else
++                FILES_FAILED=$((FILES_FAILED + 1))
++                log_msg error "Could not upload '$_file_path'"
++            fi
++        done
++        exec 4<&-
++    done
++    exec 3<&-
++
++    if [ "$START_TS" -gt 0 ] 2>/dev/null; then
++        _elapsed=$(( $(date +%s 2>/dev/null || echo "$START_TS") - START_TS ))
++        [ "$_elapsed" -lt 0 ] && _elapsed=0
++    fi
++
++    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$_elapsed"
++    return 0
++}
++
++main "$@"
+diff --git a/scripts/thunderstorm-collector-ps2.ps1 b/scripts/thunderstorm-collector-ps2.ps1
+new file mode 100644
+index 0000000..9bf89fa
+--- /dev/null
++++ b/scripts/thunderstorm-collector-ps2.ps1
+@@ -0,0 +1,414 @@
++##################################################
++# Script Title: THOR Thunderstorm Collector (PS 2)
++# Script File Name: thunderstorm-collector-ps2.ps1
++# Author: Florian Roth
++# Version: 0.1.0
++# Date Created: 22.02.2026
++# Last Modified: 22.02.2026
++# Compatibility: PowerShell 2.0+
++##################################################
++
++<#
++    .SYNOPSIS
++        The Thunderstorm Collector collects and submits files to THOR Thunderstorm servers for analysis.
++        This version is compatible with PowerShell 2.0+ (uses System.Net.HttpWebRequest instead of Invoke-WebRequest).
++    .DESCRIPTION
++        The Thunderstorm collector processes a local directory (C:\ by default) and selects files for submission.
++        This selection is based on various filters. The filters include file size, age, extension and location.
++    .PARAMETER ThunderstormServer
++        Server name (FQDN) or IP address of your Thunderstorm instance
++    .PARAMETER ThunderstormPort
++        Port number on which the Thunderstorm service is listening (default: 8080)
++    .PARAMETER Source
++        Source of the submission (default: hostname of the system)
++    .PARAMETER Folder
++        Folder to process (default: C:\)
++    .PARAMETER MaxAge
++        Select files based on the number of days in which the file has been created or modified (default: 0 = no age selection)
++    .PARAMETER MaxSize
++        Maximum file size in MegaBytes for submission (default: 20MB)
++    .PARAMETER Extensions
++        Extensions to select for submission (default: preset list)
++    .PARAMETER UseSSL
++        Use HTTPS instead of HTTP for Thunderstorm communication
++    .PARAMETER Debugging
++        Show debug output for troubleshooting purposes
++    .EXAMPLE
++        powershell.exe -ExecutionPolicy Bypass -File thunderstorm-collector-ps2.ps1 -ThunderstormServer ts.local
++    .EXAMPLE
++        powershell.exe -ExecutionPolicy Bypass -File thunderstorm-collector-ps2.ps1 -ThunderstormServer ts.local -MaxAge 1 -UseSSL
++#>
++
++# #####################################################################
++# Parameters ----------------------------------------------------------
++# #####################################################################
++
++param(
++    [Parameter(HelpMessage='Server name (FQDN) or IP address of your Thunderstorm instance')]
++        [ValidateNotNullOrEmpty()]
++        [Alias('TS')]
++        [string]$ThunderstormServer,
++
++    [Parameter(HelpMessage='Port number on which the Thunderstorm service is listening (default: 8080)')]
++        [ValidateNotNullOrEmpty()]
++        [Alias('TP')]
++        [int]$ThunderstormPort = 8080,
++
++    [Parameter(HelpMessage='Source of the submission (default: hostname of the system)')]
++        [Alias('S')]
++        [string]$Source=$env:COMPUTERNAME,
++
++    [Parameter(HelpMessage='Folder to process (default: C:\)')]
++        [ValidateNotNullOrEmpty()]
++        [Alias('F')]
++        [string]$Folder = "C:\",
++
++    [Parameter(HelpMessage='Select files based on days since last modification (default: 0 = no age selection)')]
++        [ValidateNotNullOrEmpty()]
++        [Alias('MA')]
++        [int]$MaxAge,
++
++    [Parameter(HelpMessage='Maximum file size in MegaBytes (default: 20MB)')]
++        [ValidateNotNullOrEmpty()]
++        [Alias('MS')]
++        [int]$MaxSize = 20,
++
++    [Parameter(HelpMessage='Extensions to select for submission')]
++        [ValidateNotNullOrEmpty()]
++        [Alias('E')]
++        [string[]]$Extensions,
++
++    [Parameter(HelpMessage='Use HTTPS instead of HTTP')]
++        [Alias('SSL')]
++        [switch]$UseSSL,
++
++    [Parameter(HelpMessage='Enable debug output')]
++        [Alias('D')]
++        [switch]$Debugging
++)
++
++# Fixing Certain Platform Environments --------------------------------
++$AutoDetectPlatform = ""
++$OutputPath = $PSScriptRoot
++
++# Microsoft Defender ATP - Live Response
++if ( $OutputPath -eq "" -or $OutputPath -like "*Advanced Threat Protection*" ) {
++    $AutoDetectPlatform = "MDATP"
++    if ( $OutputPath -eq "" ) {
++        $OutputPath = "$($env:ProgramData)\thor"
++    }
++}
++
++# #####################################################################
++# Presets -------------------------------------------------------------
++# #####################################################################
++
++# Maximum Size - apply default only when not explicitly passed
++if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
++    [int]$MaxSize = 20
++}
++
++# Extensions - apply recommended preset only when not explicitly passed
++if (-not $PSBoundParameters.ContainsKey('Extensions')) {
++    [string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
++}
++
++# Debug
++$Debug = $Debugging
++
++# Show Help -----------------------------------------------------------
++if ( $Args.Count -eq 0 -and $ThunderstormServer -eq "" ) {
++    Get-Help $MyInvocation.MyCommand.Definition -Detailed
++    Write-Host -ForegroundColor Yellow 'Note: You must at least define a Thunderstorm server (-ThunderstormServer)'
++    return
++}
++
++# #####################################################################
++# Functions -----------------------------------------------------------
++# #####################################################################
++
++function Write-Log {
++    param (
++        [Parameter(Mandatory=$True, Position=0, HelpMessage="Log entry")]
++            [ValidateNotNullOrEmpty()]
++            [String]$Entry,
++
++        [Parameter(Position=1, HelpMessage="Log file to write into")]
++            [ValidateNotNullOrEmpty()]
++            [Alias('SS')]
++            [string]$LogFile = "thunderstorm-collector.log",
++
++        [Parameter(Position=3, HelpMessage="Level")]
++            [ValidateNotNullOrEmpty()]
++            [String]$Level = "Info"
++    )
++
++    # Indicator
++    $Indicator = "[+]"
++    if ( $Level -eq "Warning" ) {
++        $Indicator = "[!]"
++    } elseif ( $Level -eq "Error" ) {
++        $Indicator = "[E]"
++    } elseif ( $Level -eq "Progress" ) {
++        $Indicator = "[.]"
++    } elseif ($Level -eq "Note" ) {
++        $Indicator = "[i]"
++    }
++
++    # Output Pipe
++    if ( $Level -eq "Warning" ) {
++        Write-Warning "$($Indicator) $($Entry)"
++    } elseif ( $Level -eq "Error" ) {
++        Write-Host "$($Indicator) $($Entry)" -ForegroundColor Red
++    } elseif ( $Level -eq "Debug" -and $Debug -eq $False ) {
++        return
++    } else {
++        Write-Host "$($Indicator) $($Entry)"
++    }
++
++    # Log File
++    if ( $global:NoLog -eq $False ) {
++        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
++        "$ts $($env:COMPUTERNAME): $Entry" | Out-File -FilePath $LogFile -Append
++    }
++}
++
++# Submit-File: uploads a file using System.Net.HttpWebRequest (PS 2.0 compatible)
++# Returns the HTTP status code (int) or 0 on connection failure.
++function Submit-File {
++    param(
++        [Parameter(Mandatory=$True)][string]$Url,
++        [Parameter(Mandatory=$True)][string]$FilePath,
++        [Parameter(Mandatory=$True)][byte[]]$FileBytes
++    )
++
++    $boundary = [System.Guid]::NewGuid().ToString()
++    $CRLF = "`r`n"
++
++    # Build multipart header and footer as ASCII bytes
++    $headerText = "--$boundary$CRLF" +
++        "Content-Disposition: form-data; name=`"file`"; filename=`"$FilePath`"$CRLF" +
++        "Content-Type: application/octet-stream$CRLF$CRLF"
++    $footerText = "$CRLF--$boundary--$CRLF"
++
++    $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headerText)
++    $footerBytes = [System.Text.Encoding]::ASCII.GetBytes($footerText)
++
++    $contentLength = $headerBytes.Length + $FileBytes.Length + $footerBytes.Length
++
++    try {
++        $request = [System.Net.HttpWebRequest]::Create($Url)
++        $request.Method = "POST"
++        $request.ContentType = "multipart/form-data; boundary=$boundary"
++        $request.ContentLength = $contentLength
++        $request.Timeout = 120000  # 120 seconds
++        $request.AllowAutoRedirect = $true
++
++        # Write raw bytes directly to the request stream — no encoding layer
++        $stream = $request.GetRequestStream()
++        $stream.Write($headerBytes, 0, $headerBytes.Length)
++        $stream.Write($FileBytes, 0, $FileBytes.Length)
++        $stream.Write($footerBytes, 0, $footerBytes.Length)
++        $stream.Close()
++
++        $response = $request.GetResponse()
++        $statusCode = [int]$response.StatusCode
++        $response.Close()
++        return $statusCode
++    }
++    catch [System.Net.WebException] {
++        $ex = $_.Exception
++        if ( $ex.Response -ne $null ) {
++            $errResponse = $ex.Response
++            $statusCode = [int]$errResponse.StatusCode
++
++            # Extract Retry-After header if present
++            $retryAfter = $errResponse.Headers["Retry-After"]
++            if ( $retryAfter -ne $null ) {
++                $script:LastRetryAfter = $retryAfter
++            }
++
++            $errResponse.Close()
++            return $statusCode
++        }
++        # No response at all (connection refused, DNS failure, etc.)
++        Write-Log "Connection error: $($ex.Message)" -Level "Error"
++        return 0
++    }
++}
++
++# #####################################################################
++# Main Program --------------------------------------------------------
++# #####################################################################
++
++Write-Host "=============================================================="
++Write-Host "    ________                __            __                  "
++Write-Host "   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _    "
++Write-Host "    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \   "
++Write-Host "   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/   "
++Write-Host "                                                              "
++Write-Host "   Florian Roth, Nextron Systems GmbH, 2020-2026              "
++Write-Host "   PowerShell 2.0+ compatible version                         "
++Write-Host "                                                              "
++Write-Host "=============================================================="
++
++# Measure time
++$StartTime = Get-Date
++
++Write-Log "Started Thunderstorm Collector (PS2) with PowerShell v$($PSVersionTable.PSVersion)"
++
++# ---------------------------------------------------------------------
++# Evaluation ----------------------------------------------------------
++# ---------------------------------------------------------------------
++
++# Output Info on Auto-Detection
++if ( $AutoDetectPlatform -ne "" ) {
++    Write-Log "Auto Detect Platform: $($AutoDetectPlatform)"
++    Write-Log "Note: Some automatic changes have been applied"
++}
++
++# TLS Configuration
++$Protocol = "http"
++if ( $UseSSL ) {
++    $Protocol = "https"
++    try {
++        # .NET 4.5+ enum values; TLS 1.2 = 3072, TLS 1.3 = 12288
++        [System.Net.ServicePointManager]::SecurityProtocol = 3072 -bor 12288
++    } catch {
++        try {
++            # Fall back to TLS 1.2 only
++            [System.Net.ServicePointManager]::SecurityProtocol = 3072
++        } catch {
++            Write-Log "WARNING: Could not set TLS 1.2. HTTPS may fail on this system." -Level "Warning"
++        }
++    }
++    Write-Log "HTTPS mode enabled"
++}
++
++# URL Creation
++$SourceParam = ""
++if ( $Source -ne "" ) {
++    Write-Log "Using Source: $($Source)"
++    # URL-encode the source parameter
++    $EncodedSource = [uri]::EscapeDataString($Source)
++    $SourceParam = "?source=$EncodedSource"
++}
++$Url = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
++Write-Log "Sending to URI: $($Url)" -Level "Debug"
++
++# ---------------------------------------------------------------------
++# Run THOR Thunderstorm Collector -------------------------------------
++# ---------------------------------------------------------------------
++
++$SubmittedCount = 0
++$ErrorCount = 0
++
++# PS 2 compatible file enumeration (Get-ChildItem -File not available in PS 2)
++$files = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }
++
++foreach ( $file in $files ) {
++    # -----------------------------------------------------------------
++    # Filter ----------------------------------------------------------
++
++    # Size Check
++    if ( ( $file.Length / 1MB ) -gt $MaxSize ) {
++        Write-Log "$($file.Name) skipped due to size filter" -Level "Debug"
++        continue
++    }
++
++    # Age Check
++    if ( $MaxAge -gt 0 ) {
++        if ( $file.LastWriteTime -lt (Get-Date).AddDays(-$MaxAge) ) {
++            Write-Log "$($file.Name) skipped due to age filter" -Level "Debug"
++            continue
++        }
++    }
++
++    # Extensions Check
++    if ( $Extensions.Length -gt 0 ) {
++        $match = $false
++        foreach ( $ext in $Extensions ) {
++            if ( $file.Extension -eq $ext ) { $match = $true; break }
++        }
++        if ( -not $match ) {
++            Write-Log "$($file.Name) skipped due to extension filter" -Level "Debug"
++            continue
++        }
++    }
++
++    # -----------------------------------------------------------------
++    # Submission ------------------------------------------------------
++
++    Write-Log "Processing $($file.FullName) ..." -Level "Debug"
++
++    # Read file as raw bytes
++    try {
++        $fileBytes = [System.IO.File]::ReadAllBytes($file.FullName)
++    } catch {
++        Write-Log "Read Error: $_" -Level "Error"
++        $ErrorCount++
++        continue
++    }
++
++    # Submit with retry logic
++    $StatusCode = 0
++    $Retries = 0
++    $MaxRetries = 3
++    $Max503Retries = 10
++    $Retries503 = 0
++    $script:LastRetryAfter = $null
++
++    while ( $StatusCode -ne 200 ) {
++
++        Write-Log "Submitting to Thunderstorm server: $($file.FullName) ..." -Level "Info"
++        $StatusCode = Submit-File -Url $Url -FilePath $file.FullName -FileBytes $fileBytes
++
++        if ( $StatusCode -eq 200 ) {
++            $SubmittedCount++
++            break
++        }
++        elseif ( $StatusCode -eq 503 ) {
++            $Retries503++
++            if ( $Retries503 -ge $Max503Retries ) {
++                Write-Log "503: Server still busy after $Max503Retries retries - giving up on $($file.FullName)" -Level "Warning"
++                break
++            }
++            $WaitSecs = 3
++            if ( $script:LastRetryAfter -ne $null ) {
++                try { $WaitSecs = [int]$script:LastRetryAfter } catch { $WaitSecs = 3 }
++            }
++            Write-Log "503: Server seems busy - retrying in $WaitSecs seconds ($Retries503/$Max503Retries)"
++            Start-Sleep -Seconds $WaitSecs
++        }
++        elseif ( $StatusCode -eq 0 ) {
++            # Connection failure
++            $Retries++
++            if ( $Retries -ge $MaxRetries ) {
++                Write-Log "Connection failed after $MaxRetries retries - giving up on $($file.FullName)" -Level "Error"
++                $ErrorCount++
++                break
++            }
++            $SleepTime = 2 * [Math]::Pow(2, $Retries)
++            Write-Log "Connection failed - retrying in $SleepTime seconds ($Retries/$MaxRetries)"
++            Start-Sleep -Seconds $SleepTime
++        }
++        else {
++            $Retries++
++            if ( $Retries -ge $MaxRetries ) {
++                Write-Log "$($StatusCode): Server error after $MaxRetries retries - giving up on $($file.FullName)" -Level "Error"
++                $ErrorCount++
++                break
++            }
++            $SleepTime = 2 * [Math]::Pow(2, $Retries)
++            Write-Log "$($StatusCode): Server has problems - retrying in $SleepTime seconds ($Retries/$MaxRetries)"
++            Start-Sleep -Seconds $SleepTime
++        }
++    }
++}
++
++# ---------------------------------------------------------------------
++# End -----------------------------------------------------------------
++# ---------------------------------------------------------------------
++$ElapsedTime = (Get-Date) - $StartTime
++$TotalTime = "{0:HH:mm:ss}" -f ([datetime]$ElapsedTime.Ticks)
++Write-Log "Submitted $SubmittedCount files ($ErrorCount errors) in $TotalTime" -Level "Info"
+diff --git a/scripts/thunderstorm-collector-py2.py b/scripts/thunderstorm-collector-py2.py
+new file mode 100644
+index 0000000..f040d22
+--- /dev/null
++++ b/scripts/thunderstorm-collector-py2.py
+@@ -0,0 +1,274 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++#
++# THOR Thunderstorm Collector - Python 2 version
++# Florian Roth, Nextron Systems GmbH, 2024
++#
++# Requires: Python 2.7
++# Use thunderstorm-collector.py for Python 3.4+
++#
++# stdlib only — no third-party dependencies.
++
++from __future__ import print_function
++
++import sys
++
++if sys.version_info[0] != 2:
++    sys.exit("[ERROR] This script requires Python 2.7. For Python 3, use thunderstorm-collector.py")
++
++import argparse
++import httplib
++import os
++import re
++import socket
++import ssl
++import time
++import uuid
++from urllib import quote
++
++# Configuration
++schema = "http"
++max_age = 14  # in days
++max_size = 20  # in megabytes
++skip_elements = [
++    r"^\/proc",
++    r"^\/mnt",
++    r"\.dat$",
++    r"\.npm",
++    r"\.vmdk$",
++    r"\.vswp$",
++    r"\.nvram$",
++    r"\.vmsd$",
++    r"\.lck$",
++]
++hard_skips = ["/proc", "/dev", "/sys"]
++
++# Composed values
++current_date = time.time()
++
++# Stats
++num_submitted = 0
++num_processed = 0
++
++# URL to use for submission
++api_endpoint = ""
++
++# Original args
++args = {}
++
++
++def process_dir(workdir):
++    for dirpath, dirnames, filenames in os.walk(workdir, followlinks=False):
++        # Hard skip directories (modify in-place to prevent descent)
++        dirnames[:] = [
++            d for d in dirnames
++            if os.path.join(dirpath, d) not in hard_skips
++            and not os.path.islink(os.path.join(dirpath, d))
++        ]
++
++        for name in filenames:
++            filepath = os.path.join(dirpath, name)
++
++            # Skip symlinks
++            if os.path.islink(filepath):
++                continue
++
++            if args.debug:
++                print("[DEBUG] Checking {} ...".format(filepath))
++
++            # Count
++            global num_processed
++            num_processed += 1
++
++            # Skip files
++            if skip_file(filepath):
++                continue
++
++            # Submit
++            submit_sample(filepath)
++
++
++def skip_file(filepath):
++    # Regex skips
++    for pattern in skip_elements:
++        if re.search(pattern, filepath):
++            if args.debug:
++                print("[DEBUG] Skipping file due to configured skip_file exclusion {}".format(filepath))
++            return True
++
++    # Size
++    if os.path.getsize(filepath) > max_size * 1024 * 1024:
++        if args.debug:
++            print("[DEBUG] Skipping file due to size {}".format(filepath))
++        return True
++
++    # Age
++    mtime = os.path.getmtime(filepath)
++    if mtime < current_date - (max_age * 86400):
++        if args.debug:
++            print("[DEBUG] Skipping file due to age {}".format(filepath))
++        return True
++
++    return False
++
++
++def submit_sample(filepath):
++    print("[SUBMIT] Submitting {} ...".format(filepath))
++
++    try:
++        with open(filepath, "rb") as f:
++            data = f.read()
++    except Exception as e:
++        print("[ERROR] Could not read '{}' - {}".format(filepath, e))
++        return
++
++    boundary = str(uuid.uuid4())
++
++    # Sanitize filename for multipart header safety
++    safe_filename = filepath.replace('"', '_').replace(';', '_').replace('\r', '_').replace('\n', '_')
++
++    # Build multipart/form-data payload manually (no external libs)
++    payload = (
++        "--{boundary}\r\n"
++        "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
++        "Content-Type: application/octet-stream\r\n\r\n"
++    ).format(boundary=boundary, filename=safe_filename).encode("utf-8")
++    payload += data
++    payload += "\r\n--{}--\r\n".format(boundary).encode("utf-8")
++
++    headers = {
++        "Content-Type": "multipart/form-data; boundary={}".format(boundary),
++    }
++
++    retries = 0
++    while retries < 3:
++        try:
++            if args.tls:
++                # ssl.create_default_context() requires Python 2.7.9+
++                # ssl._create_unverified_context() also requires 2.7.9+
++                # Fall back to bare HTTPSConnection for older Python 2.7
++                if args.insecure:
++                    if hasattr(ssl, '_create_unverified_context'):
++                        context = ssl._create_unverified_context()
++                    else:
++                        context = None  # pre-2.7.9: no verification by default
++                else:
++                    if hasattr(ssl, 'create_default_context'):
++                        context = ssl.create_default_context()
++                    else:
++                        context = None  # pre-2.7.9: limited TLS, no SNI
++                if context is not None:
++                    conn = httplib.HTTPSConnection(args.server, args.port, context=context)
++                else:
++                    conn = httplib.HTTPSConnection(args.server, args.port)
++            else:
++                conn = httplib.HTTPConnection(args.server, args.port)
++            conn.request("POST", api_endpoint, body=payload, headers=headers)
++            resp = conn.getresponse()
++
++        except Exception as e:
++            print("[ERROR] Could not submit '{}' - {}".format(filepath, e))
++            retries += 1
++            time.sleep(2 << retries)
++            continue
++
++        if resp.status == 503:
++            retries += 1
++            if retries >= 10:
++                print("[ERROR] Server busy after 10 retries, giving up on '{}'".format(filepath))
++                break
++            retry_after = resp.getheader("Retry-After", "30")
++            try:
++                retry_time = int(retry_after)
++            except (ValueError, TypeError):
++                retry_time = 30
++            time.sleep(retry_time)
++            continue
++        elif resp.status == 200:
++            global num_submitted
++            num_submitted += 1
++            break
++        else:
++            print("[ERROR] HTTP return status: {}, reason: {}".format(resp.status, resp.reason))
++            retries += 1
++            time.sleep(2 << retries)
++            continue
++
++
++# Main
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser(
++        prog="thunderstorm-collector-py2.py",
++        description="Tool to collect files to send to THOR Thunderstorm (Python 2.7 version). Only uses standard library functions.",
++    )
++    parser.add_argument(
++        "-d", "--dirs",
++        nargs="*",
++        default=["/"],
++        help="Directories that should be scanned. (Default: /)",
++    )
++    parser.add_argument(
++        "-s", "--server",
++        required=True,
++        help="FQDN/IP of the THOR Thunderstorm server.",
++    )
++    parser.add_argument(
++        "-p", "--port",
++        type=int,
++        default=8080,
++        help="Port of the THOR Thunderstorm server. (Default: 8080)",
++    )
++    parser.add_argument(
++        "-t", "--tls",
++        action="store_true",
++        help="Use TLS to connect to the THOR Thunderstorm server.",
++    )
++    parser.add_argument(
++        "-k", "--insecure",
++        action="store_true",
++        help="Skip TLS verification and proceed without checking.",
++    )
++    parser.add_argument(
++        "-S", "--source",
++        default=socket.gethostname(),
++        help="Source identifier to be used in the Thunderstorm submission.",
++    )
++    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
++
++    args = parser.parse_args()
++
++    if args.tls:
++        schema = "https"
++
++    source = ""
++    if args.source:
++        source = "?source={}".format(quote(args.source))
++
++    api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
++
++    print("=" * 80)
++    print("   Python Thunderstorm Collector (Python 2)")
++    print("   Florian Roth, Nextron Systems GmbH, 2024")
++    print()
++    print("=" * 80)
++    print("Target Directory: {}".format(", ".join(args.dirs)))
++    print("Thunderstorm Server: {}".format(args.server))
++    print("Thunderstorm Port: {}".format(args.port))
++    print("Using API Endpoint: {}".format(api_endpoint))
++    print("Maximum Age of Files: {}".format(max_age))
++    print("Maximum File Size: {} MB".format(max_size))
++    print("Excluded directories: {}".format(", ".join(hard_skips)))
++    if args.source:
++        print("Source Identifier: {}".format(args.source))
++    print()
++
++    print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
++
++    for walkdir in args.dirs:
++        process_dir(walkdir)
++
++    end_date = time.time()
++    minutes = int((end_date - current_date) / 60)
++    print("Thunderstorm Collector Run finished (Checked: {} Submitted: {} Minutes: {})".format(
++        num_processed, num_submitted, minutes
++    ))
+diff --git a/scripts/thunderstorm-collector.pl b/scripts/thunderstorm-collector.pl
+index 58764d2..e41bb0e 100755
+--- a/scripts/thunderstorm-collector.pl
++++ b/scripts/thunderstorm-collector.pl
+@@ -157,6 +157,8 @@ sub submitSample {
+             sleep($sleep_time)
+         }
+         my $successful = 0;
++        my $is_503 = 0;
++        my $retry_after = 30;
+         eval {
+             my $req = $ua->post($api_endpoint,
+                 Content_Type => 'form-data',
+@@ -166,7 +168,18 @@ sub submitSample {
+                 ],
+             );
+             $successful = $req->is_success;
+-            print "\nError: ", $req->status_line unless $successful;
++            if (!$successful) {
++                if ($req->code == 503) {
++                    $is_503 = 1;
++                    my $ra = $req->header('Retry-After');
++                    if (defined $ra && $ra =~ /^\d+$/) {
++                        $retry_after = int($ra);
++                    }
++                    print "[SUBMIT] Server busy (503), retrying in ${retry_after}s ...\n";
++                } else {
++                    print "\nError: ", $req->status_line, "\n";
++                }
++            }
+         } or do {
+             my $error = $@ || 'Unknown failure';
+             warn "Could not submit '$filepath' - $error";
+@@ -175,6 +188,11 @@ sub submitSample {
+             $num_submitted++;
+             last;
+         }
++        # For 503, use server-specified wait time instead of exponential backoff
++        if ($is_503) {
++            sleep($retry_after);
++            next;
++        }
+     }
+ }
+ 
+diff --git a/scripts/thunderstorm-collector.ps1 b/scripts/thunderstorm-collector.ps1
+index 046c2ce..9ec9d43 100644
+--- a/scripts/thunderstorm-collector.ps1
++++ b/scripts/thunderstorm-collector.ps1
+@@ -80,13 +80,17 @@ param
+         HelpMessage='Select only files smaller than the given number in MegaBytes (default: 20MB) ')]
+         [ValidateNotNullOrEmpty()]
+         [Alias('MS')]
+-        [int]$MaxSize,
++        [int]$MaxSize = 20,
+ 
+     [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')]
+         [ValidateNotNullOrEmpty()]
+         [Alias('E')]
+         [string[]]$Extensions,
+ 
++    [Parameter(HelpMessage='Use HTTPS instead of HTTP for Thunderstorm communication')]
++        [Alias('SSL')]
++        [switch]$UseSSL = $False,
++
+     [Parameter(HelpMessage='Enables debug output and skips cleanup at the end of the scan')]
+         [ValidateNotNullOrEmpty()]
+         [Alias('D')]
+@@ -124,7 +128,10 @@ if ( $OutputPath -eq "" -or $OutputPath.Contains("Advanced Threat Protection") )
+ #[int]$MaxAge = 99
+ 
+ # Maximum Size
+-[int]$MaxSize = 20
++# Apply default only when no -MaxSize parameter was explicitly passed
++if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
++    [int]$MaxSize = 20
++}
+ 
+ # Extensions
+ # Apply recommended preset only when no -Extensions parameter was explicitly passed
+@@ -133,7 +140,7 @@ if (-not $PSBoundParameters.ContainsKey('Extensions')) {
+ }
+ 
+ # Debug
+-$Debug = $False
++$Debug = $Debugging
+ 
+ # Show Help -----------------------------------------------------------
+ # No Thunderstorm server 
+@@ -231,7 +238,19 @@ if ( $Source -ne "" ) {
+     $EncodedSource = [uri]::EscapeDataString($Source)
+     $SourceParam = "?source=$EncodedSource"
+ }
+-$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
++$Protocol = "http"
++if ( $UseSSL ) {
++    $Protocol = "https"
++    # Enforce TLS 1.2+ (required on older .NET / PS versions that default to SSL3/TLS1.0)
++    try {
++        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
++    } catch {
++        # TLS 1.3 not available on older .NET; fall back to TLS 1.2 only
++        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
++    }
++    Write-Log "HTTPS mode enabled (TLS 1.2+)"
++}
++$Url = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
+ Write-Log "Sending to URI: $($Url)" -Level "Debug"
+ 
+ # ---------------------------------------------------------------------
+@@ -299,7 +318,7 @@ try {
+         while ( $($StatusCode) -ne 200 ) {
+             try {
+                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
+-                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes
++                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes -UseBasicParsing
+                 $StatusCode = [int]$Response.StatusCode
+             }
+             # Catch all non 200 status codes
+diff --git a/scripts/thunderstorm-collector.py b/scripts/thunderstorm-collector.py
+index 44a623c..57427be 100755
+--- a/scripts/thunderstorm-collector.py
++++ b/scripts/thunderstorm-collector.py
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env python3
++# Minimum Python version: 3.4 (no f-strings, no 3.6+ features)
+ 
+ import argparse
+ import http.client
+@@ -105,7 +106,7 @@ def submit_sample(filepath):
+ 
+     headers = {
+         "Content-Type": "application/octet-stream",
+-        "Content-Disposition": f"attachment; filename={filepath}",
++        "Content-Disposition": "attachment; filename={}".format(filepath),
+     }
+ 
+     try:
+@@ -119,7 +120,7 @@ def submit_sample(filepath):
+ 
+     boundary = str(uuid.uuid4())
+     headers = {
+-        "Content-Type": f"multipart/form-data; boundary={boundary}",
++        "Content-Type": "multipart/form-data; boundary={}".format(boundary),
+     }
+ 
+     # Sanitize filename for multipart header safety
+@@ -127,12 +128,12 @@ def submit_sample(filepath):
+ 
+     # Create multipart/form-data payload
+     payload = (
+-        f"--{boundary}\r\n"
+-        f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'
+-        f"Content-Type: application/octet-stream\r\n\r\n"
+-    ).encode("utf-8")
++        "--{boundary}\r\n"
++        "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
++        "Content-Type: application/octet-stream\r\n\r\n"
++    ).format(boundary=boundary, filename=safe_filename).encode("utf-8")
+     payload += data
+-    payload += f"\r\n--{boundary}--\r\n".encode("utf-8")
++    payload += "\r\n--{}--\r\n".format(boundary).encode("utf-8")
+ 
+     retries = 0
+     while retries < 3:
+@@ -141,7 +142,7 @@ def submit_sample(filepath):
+                 if args.insecure:
+                     context = ssl._create_unverified_context()
+                 else:
+-                    context = ssl._create_default_https_context()
++                    context = ssl.create_default_context()
+                 conn = http.client.HTTPSConnection(args.server, args.port, context=context)
+             else:
+                 conn = http.client.HTTPConnection(args.server, args.port)
+@@ -157,7 +158,15 @@ def submit_sample(filepath):
+ 
+         # pylint: disable=no-else-continue
+         if resp.status == 503: # Service unavailable
+-            retry_time = int(resp.headers.get("Retry-After", 30))
++            retries += 1
++            if retries >= 10:
++                print("[ERROR] Server busy after 10 retries, giving up on '{}'".format(filepath))
++                break
++            retry_after = resp.headers.get("Retry-After", "30")
++            try:
++                retry_time = int(retry_after)
++            except (ValueError, TypeError):
++                retry_time = 30
+             time.sleep(retry_time)
+             continue
+         elif resp.status == 200:
+@@ -185,7 +194,7 @@ if __name__ == "__main__":
+         "-d",
+         "--dirs",
+         nargs="*",
+-        default="/",
++        default=["/"],
+         help="Directories that should be scanned. (Default: /)",
+     )
+     parser.add_argument(
+@@ -221,7 +230,7 @@ if __name__ == "__main__":
+ 
+     source = ""
+     if args.source:
+-        source = f"?source={quote(args.source)}"
++        source = "?source={}".format(quote(args.source))
+ 
+     api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
+ 

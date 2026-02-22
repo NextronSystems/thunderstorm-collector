@@ -157,6 +157,8 @@ sub submitSample {
             sleep($sleep_time)
         }
         my $successful = 0;
+        my $is_503 = 0;
+        my $retry_after = 30;
         eval {
             my $req = $ua->post($api_endpoint,
                 Content_Type => 'form-data',
@@ -166,7 +168,18 @@ sub submitSample {
                 ],
             );
             $successful = $req->is_success;
-            print "\nError: ", $req->status_line unless $successful;
+            if (!$successful) {
+                if ($req->code == 503) {
+                    $is_503 = 1;
+                    my $ra = $req->header('Retry-After');
+                    if (defined $ra && $ra =~ /^\d+$/) {
+                        $retry_after = int($ra);
+                    }
+                    print "[SUBMIT] Server busy (503), retrying in ${retry_after}s ...\n";
+                } else {
+                    print "\nError: ", $req->status_line, "\n";
+                }
+            }
         } or do {
             my $error = $@ || 'Unknown failure';
             warn "Could not submit '$filepath' - $error";
@@ -174,6 +187,11 @@ sub submitSample {
         if ($successful) {
             $num_submitted++;
             last;
+        }
+        # For 503, use server-specified wait time instead of exponential backoff
+        if ($is_503) {
+            sleep($retry_after);
+            next;
         }
     }
 }
