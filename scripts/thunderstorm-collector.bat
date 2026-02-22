@@ -27,27 +27,27 @@ SETLOCAL EnableDelayedExpansion
 
 :: THUNDERSTORM SERVER -------------------------------------------
 :: The thunderstorm server host name (fqdn) or IP
-SET THUNDERSTORM_SERVER=ygdrasil.nextron
-SET THUNDERSTORM_PORT=8080
+IF "%THUNDERSTORM_SERVER%"=="" SET THUNDERSTORM_SERVER=ygdrasil.nextron
+IF "%THUNDERSTORM_PORT%"=="" SET THUNDERSTORM_PORT=8080
 :: Use http or https
-SET URL_SCHEME=http
+IF "%URL_SCHEME%"=="" SET URL_SCHEME=http
 
 :: SELECTION -----------------------------------------------------
 
 :: The directory that should be walked
-SET COLLECT_DIRS=C:\Users C:\Temp C:\Windows
+IF "%COLLECT_DIRS%"=="" SET COLLECT_DIRS=C:\Users C:\Temp C:\Windows
 :: The pattern of files to include
-SET RELEVANT_EXTENSIONS=.vbs .ps .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
+IF "%RELEVANT_EXTENSIONS%"=="" SET RELEVANT_EXTENSIONS=.vbs .ps .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
 :: Maximum file size to collect (in bytes) (defualt: 3MB)
-SET /A COLLECT_MAX_SIZE=3000000
+IF "%COLLECT_MAX_SIZE%"=="" SET COLLECT_MAX_SIZE=3000000
 :: Maximum file age in days (default: 7300 days = 20 years)
-SET /A MAX_AGE=30
+IF "%MAX_AGE%"=="" SET MAX_AGE=30
 
 :: Debug
-SET DEBUG=0
+IF "%DEBUG%"=="" SET DEBUG=0
 
 :: Source
-SET SOURCE=
+IF "%SOURCE%"=="" SET SOURCE=
 
 :: WELCOME -------------------------------------------------------
 

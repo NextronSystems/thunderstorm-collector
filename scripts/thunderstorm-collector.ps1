@@ -225,9 +225,11 @@ if ( $AutoDetectPlatform -ne "" ) {
 }
 
 # URL Creation
+$SourceParam = ""
 if ( $Source -ne "" ) {
     Write-Log "Using Source: $($Source)"
-    $SourceParam = "?Source=$Source"
+    $EncodedSource = [uri]::EscapeDataString($Source)
+    $SourceParam = "?source=$EncodedSource"
 }
 $Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
@@ -270,17 +272,23 @@ try {
             $fileBytes = [System.IO.File]::ReadAllBytes("$($_.FullName)");
         } catch {
             Write-Log "Read Error: $_" -Level "Error"
+            return
         }
-        $fileEnc = [System.Text.Encoding]::GetEncoding('UTF-8').GetString($fileBytes);
-        $boundary = [System.Guid]::NewGuid().ToString();
-        $LF = "`r`n";
-        $bodyLines = (
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"",
-            "Content-Type: application/octet-stream$LF",
-            $fileEnc,
-            "--$boundary--$LF"
-        ) -join $LF
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $LF = "`r`n"
+        $headerText = "--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"$LF" +
+            "Content-Type: application/octet-stream$LF$LF"
+        $footerText = "$LF--$boundary--$LF"
+
+        $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headerText)
+        $footerBytes = [System.Text.Encoding]::ASCII.GetBytes($footerText)
+        $bodyStream = New-Object System.IO.MemoryStream
+        $bodyStream.Write($headerBytes, 0, $headerBytes.Length)
+        $bodyStream.Write($fileBytes, 0, $fileBytes.Length)
+        $bodyStream.Write($footerBytes, 0, $footerBytes.Length)
+        $bodyBytes = $bodyStream.ToArray()
+        $bodyStream.Dispose()
 
         # Submitting the request
         $StatusCode = 0
@@ -288,7 +296,7 @@ try {
         while ( $($StatusCode) -ne 200 ) {
             try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
-                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body $bodyLines
+                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes
                 $StatusCode = [int]$Response.StatusCode
             }
             # Catch all non 200 status codes

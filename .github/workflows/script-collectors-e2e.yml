@@ -1,0 +1,253 @@
+name: Script Collectors E2E
+
+on:
+  push:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/script-collectors-e2e.yml"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/script-collectors-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  linux-collectors:
+    name: Linux scripts (bash/python/perl)
+    runs-on: ubuntu-latest
+    env:
+      SAMPLE_URL: https://github.com/TwoSevenOneT/EDR-Freeze/releases/download/v1.0-fbd43cf/EDRFreeze-msvc.exe
+      STUB_PORT: "18080"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Perl dependency
+        run: sudo apt-get update && sudo apt-get install -y libwww-perl
+
+      - name: Checkout thunderstorm-stub-server
+        uses: actions/checkout@v4
+        with:
+          repository: Nextron-Labs/thunderstorm-stub-server
+          path: thunderstorm-stub-server
+
+      - name: Build thunderstorm-stub-server
+        working-directory: thunderstorm-stub-server
+        run: go build -o "$RUNNER_TEMP/thunderstorm-stub-server" .
+
+      - name: Prepare test sample
+        run: |
+          set -euo pipefail
+          SAMPLE_DIR="$RUNNER_TEMP/script-collector-e2e-sample"
+          mkdir -p "$SAMPLE_DIR"
+          curl -L --fail "$SAMPLE_URL" -o "$SAMPLE_DIR/EDRFreeze-msvc.exe"
+          EXPECTED_SHA256="$(sha256sum "$SAMPLE_DIR/EDRFreeze-msvc.exe" | awk '{print $1}')"
+          echo "SAMPLE_DIR=$SAMPLE_DIR" >> "$GITHUB_ENV"
+          echo "EXPECTED_SHA256=$EXPECTED_SHA256" >> "$GITHUB_ENV"
+
+      - name: Start thunderstorm-stub-server
+        run: |
+          set -euo pipefail
+          UPLOADS_DIR="$RUNNER_TEMP/stub-uploads"
+          LOG_FILE="$RUNNER_TEMP/stub-audit.jsonl"
+          STUB_LOG="$RUNNER_TEMP/stub-server.log"
+          mkdir -p "$UPLOADS_DIR"
+          "$RUNNER_TEMP/thunderstorm-stub-server" \
+            --port "$STUB_PORT" \
+            --uploads-dir "$UPLOADS_DIR" \
+            --log-file "$LOG_FILE" \
+            >"$STUB_LOG" 2>&1 &
+          echo $! > "$RUNNER_TEMP/stub-server.pid"
+          echo "UPLOADS_DIR=$UPLOADS_DIR" >> "$GITHUB_ENV"
+          echo "STUB_LOG=$STUB_LOG" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Stub server did not become ready in time" >&2
+          exit 1
+
+      - name: Run bash collector
+        run: |
+          bash ./scripts/thunderstorm-collector.sh \
+            --server 127.0.0.1 \
+            --port "$STUB_PORT" \
+            --dir "$SAMPLE_DIR" \
+            --source linux-sh-e2e \
+            --max-age 30 \
+            --max-size-kb 50000 \
+            --sync
+
+      - name: Run Python collector
+        run: |
+          python3 ./scripts/thunderstorm-collector.py \
+            -s 127.0.0.1 \
+            -p "$STUB_PORT" \
+            -d "$SAMPLE_DIR" \
+            -S linux-py-e2e
+
+      - name: Run Perl collector
+        run: |
+          perl ./scripts/thunderstorm-collector.pl -- \
+            --dir "$SAMPLE_DIR" \
+            --server 127.0.0.1 \
+            --port "$STUB_PORT" \
+            --source linux-pl-e2e
+
+      - name: Verify uploaded file integrity
+        run: |
+          python3 ./scripts/tests/verify_uploads.py \
+            --uploads-dir "$UPLOADS_DIR" \
+            --expected-sha256 "$EXPECTED_SHA256" \
+            --min-count 3 \
+            --timeout-seconds 120
+
+      - name: Stop thunderstorm-stub-server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/stub-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/stub-server.pid")" || true
+          fi
+
+      - name: Print stub server log
+        if: always()
+        run: |
+          if [ -n "${STUB_LOG:-}" ] && [ -f "$STUB_LOG" ]; then
+            echo "==== thunderstorm-stub-server log ===="
+            cat "$STUB_LOG"
+          fi
+
+  windows-collectors:
+    name: Windows scripts (PowerShell/Batch)
+    runs-on: windows-latest
+    env:
+      SAMPLE_URL: https://github.com/TwoSevenOneT/EDR-Freeze/releases/download/v1.0-fbd43cf/EDRFreeze-msvc.exe
+      STUB_PORT: "18080"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Checkout thunderstorm-stub-server
+        uses: actions/checkout@v4
+        with:
+          repository: Nextron-Labs/thunderstorm-stub-server
+          path: thunderstorm-stub-server
+
+      - name: Build thunderstorm-stub-server
+        shell: pwsh
+        working-directory: thunderstorm-stub-server
+        run: go build -o "$env:RUNNER_TEMP\thunderstorm-stub-server.exe" .
+
+      - name: Prepare test sample and directories
+        shell: pwsh
+        run: |
+          $sampleDir = "C:\ts-e2e-sample"
+          $uploadsDir = "C:\ts-e2e-uploads"
+          New-Item -ItemType Directory -Path $sampleDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $uploadsDir -Force | Out-Null
+          $samplePath = Join-Path $sampleDir "EDRFreeze-msvc.exe"
+          Invoke-WebRequest -Uri $env:SAMPLE_URL -OutFile $samplePath
+          $hash = (Get-FileHash -Path $samplePath -Algorithm SHA256).Hash.ToLower()
+          "SAMPLE_DIR=$sampleDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "UPLOADS_DIR=$uploadsDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "EXPECTED_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Start thunderstorm-stub-server
+        shell: pwsh
+        run: |
+          $stdoutLogFile = Join-Path $env:RUNNER_TEMP "stub-server.stdout.log"
+          $stderrLogFile = Join-Path $env:RUNNER_TEMP "stub-server.stderr.log"
+          $auditFile = Join-Path $env:RUNNER_TEMP "stub-audit.jsonl"
+          $proc = Start-Process `
+            -FilePath "$env:RUNNER_TEMP\thunderstorm-stub-server.exe" `
+            -ArgumentList @("--port", $env:STUB_PORT, "--uploads-dir", $env:UPLOADS_DIR, "--log-file", $auditFile) `
+            -RedirectStandardOutput $stdoutLogFile `
+            -RedirectStandardError $stderrLogFile `
+            -PassThru
+          "STUB_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "STUB_STDOUT_LOG=$stdoutLogFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "STUB_STDERR_LOG=$stderrLogFile" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          for ($i = 0; $i -lt 60; $i++) {
+            try {
+              Invoke-RestMethod -Uri "http://127.0.0.1:$($env:STUB_PORT)/api/status" | Out-Null
+              exit 0
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          throw "Stub server did not become ready in time"
+
+      - name: Run PowerShell collector
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector.ps1 `
+            -ThunderstormServer 127.0.0.1 `
+            -ThunderstormPort $env:STUB_PORT `
+            -Folder $env:SAMPLE_DIR `
+            -Source windows-ps-e2e `
+            -MaxAge 30 `
+            -MaxSize 100
+
+      - name: Run Batch collector
+        shell: pwsh
+        run: |
+          $env:THUNDERSTORM_SERVER = "127.0.0.1"
+          $env:THUNDERSTORM_PORT = $env:STUB_PORT
+          $env:URL_SCHEME = "http"
+          $env:COLLECT_DIRS = $env:SAMPLE_DIR
+          $env:RELEVANT_EXTENSIONS = ".exe"
+          $env:COLLECT_MAX_SIZE = "50000000"
+          $env:MAX_AGE = "30"
+          $env:SOURCE = "windows-bat-e2e"
+          $env:DEBUG = "1"
+          cmd /c scripts\thunderstorm-collector.bat
+
+      - name: Verify uploaded file integrity
+        shell: pwsh
+        run: |
+          python .\scripts\tests\verify_uploads.py `
+            --uploads-dir "$env:UPLOADS_DIR" `
+            --expected-sha256 "$env:EXPECTED_SHA256" `
+            --min-count 2 `
+            --timeout-seconds 180
+
+      - name: Stop thunderstorm-stub-server
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:STUB_PID) {
+            Stop-Process -Id ([int]$env:STUB_PID) -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Print stub server log
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:STUB_STDOUT_LOG -and (Test-Path $env:STUB_STDOUT_LOG)) {
+            Write-Host "==== thunderstorm-stub-server stdout ===="
+            Get-Content -Path $env:STUB_STDOUT_LOG
+          }
+          if ($env:STUB_STDERR_LOG -and (Test-Path $env:STUB_STDERR_LOG)) {
+            Write-Host "==== thunderstorm-stub-server stderr ===="
+            Get-Content -Path $env:STUB_STDERR_LOG
+          }
