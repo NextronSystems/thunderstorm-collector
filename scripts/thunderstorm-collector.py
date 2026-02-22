@@ -8,6 +8,7 @@ import ssl
 import time
 import uuid
 import socket
+from urllib.parse import quote
 
 # Configuration
 schema = "http"
@@ -41,42 +42,34 @@ args = {}
 
 # Functions
 def process_dir(workdir):
-    startdir = os.getcwd()
-    os.chdir(workdir)
+    for dirpath, dirnames, filenames in os.walk(workdir, followlinks=False):
+        # Hard skip directories (modify in-place to prevent descent)
+        dirnames[:] = [
+            d for d in dirnames
+            if os.path.join(dirpath, d) not in hard_skips
+            and not os.path.islink(os.path.join(dirpath, d))
+        ]
 
-    for name in os.listdir("."):
-        filepath = os.path.join(workdir, name)
+        for name in filenames:
+            filepath = os.path.join(dirpath, name)
 
-        # Hard skips
-        if filepath in hard_skips:
-            continue
+            # Skip symlinks
+            if os.path.islink(filepath):
+                continue
 
-        # Skip symlinks
-        # TODO: revisit on how to upload symlinks to thunderstorm
-        if os.path.islink(filepath):
-            continue
+            if args.debug:
+                print("[DEBUG] Checking {} ...".format(filepath))
 
-        # Directory
-        if os.path.isdir(filepath):
-            process_dir(filepath)
-            continue
+            # Count
+            global num_processed
+            num_processed += 1
 
-        # File
-        if args.debug:
-            print("[DEBUG] Checking {} ...".format(filepath))
+            # Skip files
+            if skip_file(filepath):
+                continue
 
-        # Count
-        global num_processed
-        num_processed += 1
-
-        # Skip files
-        if skip_file(filepath):
-            continue
-
-        # Submit
-        submit_sample(filepath)
-
-    os.chdir(startdir)
+            # Submit
+            submit_sample(filepath)
 
 
 def skip_file(filepath):
@@ -129,10 +122,13 @@ def submit_sample(filepath):
         "Content-Type": f"multipart/form-data; boundary={boundary}",
     }
 
+    # Sanitize filename for multipart header safety
+    safe_filename = filepath.replace('"', '_').replace(';', '_').replace('\r', '_').replace('\n', '_')
+
     # Create multipart/form-data payload
     payload = (
         f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filepath}"\r\n'
+        f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'
         f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode("utf-8")
     payload += data
@@ -161,19 +157,22 @@ def submit_sample(filepath):
 
         # pylint: disable=no-else-continue
         if resp.status == 503: # Service unavailable
-            retry_time = resp.headers.get("Retry-After", 30)
+            retry_time = int(resp.headers.get("Retry-After", 30))
             time.sleep(retry_time)
             continue
         elif resp.status == 200:
+            global num_submitted
+            num_submitted += 1
             break
-        print(
-            "[ERROR] HTTP return status: {}, reason: {}".format(
-                resp.status, resp.reason
+        else:
+            print(
+                "[ERROR] HTTP return status: {}, reason: {}".format(
+                    resp.status, resp.reason
+                )
             )
-        )
-
-    global num_submitted
-    num_submitted += 1
+            retries += 1
+            time.sleep(2 << retries)
+            continue
 
 
 # Main
@@ -193,7 +192,7 @@ if __name__ == "__main__":
         "-s", "--server", required=True, help="FQDN/IP of the THOR Thunderstorm server."
     )
     parser.add_argument(
-        "-p", "--port", help="Port of the THOR Thunderstorm server. (Default: 8080)"
+        "-p", "--port", type=int, default=8080, help="Port of the THOR Thunderstorm server. (Default: 8080)"
     )
     parser.add_argument(
         "-t",
@@ -222,7 +221,7 @@ if __name__ == "__main__":
 
     source = ""
     if args.source:
-        source = f"?source={args.source}"
+        source = f"?source={quote(args.source)}"
 
     api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
 

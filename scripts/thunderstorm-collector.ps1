@@ -127,10 +127,10 @@ if ( $OutputPath -eq "" -or $OutputPath.Contains("Advanced Threat Protection") )
 [int]$MaxSize = 20
 
 # Extensions
-# Recommended Preset
-[string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
-# Collect Every Extension
-#[string[]]$Extensions = @()
+# Apply recommended preset only when no -Extensions parameter was explicitly passed
+if (-not $PSBoundParameters.ContainsKey('Extensions')) {
+    [string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
+}
 
 # Debug
 $Debug = $False
@@ -225,9 +225,11 @@ if ( $AutoDetectPlatform -ne "" ) {
 }
 
 # URL Creation
+$SourceParam = ""
 if ( $Source -ne "" ) {
     Write-Log "Using Source: $($Source)"
-    $SourceParam = "?Source=$Source"
+    $EncodedSource = [uri]::EscapeDataString($Source)
+    $SourceParam = "?source=$EncodedSource"
 }
 $Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
@@ -270,39 +272,53 @@ try {
             $fileBytes = [System.IO.File]::ReadAllBytes("$($_.FullName)");
         } catch {
             Write-Log "Read Error: $_" -Level "Error"
+            return
         }
-        $fileEnc = [System.Text.Encoding]::GetEncoding('UTF-8').GetString($fileBytes);
-        $boundary = [System.Guid]::NewGuid().ToString();
-        $LF = "`r`n";
-        $bodyLines = (
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"",
-            "Content-Type: application/octet-stream$LF",
-            $fileEnc,
-            "--$boundary--$LF"
-        ) -join $LF
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $LF = "`r`n"
+        $headerText = "--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"$LF" +
+            "Content-Type: application/octet-stream$LF$LF"
+        $footerText = "$LF--$boundary--$LF"
+
+        $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headerText)
+        $footerBytes = [System.Text.Encoding]::ASCII.GetBytes($footerText)
+        $bodyStream = New-Object System.IO.MemoryStream
+        $bodyStream.Write($headerBytes, 0, $headerBytes.Length)
+        $bodyStream.Write($fileBytes, 0, $fileBytes.Length)
+        $bodyStream.Write($footerBytes, 0, $footerBytes.Length)
+        $bodyBytes = $bodyStream.ToArray()
+        $bodyStream.Dispose()
 
         # Submitting the request
         $StatusCode = 0
         $Retries = 0
+        $MaxRetries = 3
+        $Max503Retries = 10
+        $Retries503 = 0
         while ( $($StatusCode) -ne 200 ) {
             try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
-                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body $bodyLines
+                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes
                 $StatusCode = [int]$Response.StatusCode
             }
             # Catch all non 200 status codes
             catch {
                 $StatusCode = $_.Exception.Response.StatusCode.value__
                 if ( $StatusCode -eq 503 ) {
+                    $Retries503 = $Retries503 + 1
+                    if ( $Retries503 -ge $Max503Retries ) {
+                        Write-Log "503: Server still busy after $Max503Retries retries - giving up on $($_.FullName)" -Level "Warning"
+                        break
+                    }
                     $WaitSecs = 3
                     if ( $_.Exception.Response.Headers['Retry-After'] ) {
                         $WaitSecs = [int]$_.Exception.Response.Headers['Retry-After']
                     }
-                    Write-Log "503: Server seems busy - retrying in $($WaitSecs) seconds"
+                    Write-Log "503: Server seems busy - retrying in $($WaitSecs) seconds ($Retries503/$Max503Retries)"
                     Start-Sleep -Seconds $($WaitSecs)
                 } else {
-                    if ( $Retries -eq 3) {
+                    if ( $Retries -eq $MaxRetries ) {
                         Write-Log "$($StatusCode): Server still has problems - giving up"
                         break
                     }

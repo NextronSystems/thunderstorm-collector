@@ -48,10 +48,17 @@ GetOptions(
 if ( $source eq "" ) {
     $source = hostname;
 }
+# URL-encode source parameter
+sub urlencode {
+    my $s = shift;
+    $s =~ s/([^A-Za-z0-9\-_.~])/sprintf("%%%02X", ord($1))/ge;
+    return $s;
+}
+
 # Add Source to URL if available
 if ( $source ne "" ) {
     print "[DEBUG] No source specified, using hostname: $source\n" if $debug;
-    $source = "?source=$source";
+    $source = "?source=" . urlencode($source);
 }
 
 # Composed Values
@@ -121,13 +128,13 @@ sub processDir {
         }
         next if $skipRegex;
         # Size
-        if ( ( $size / 1024 / 1024 ) gt $max_size ) {
+        if ( ( $size / 1024 / 1024 ) > $max_size ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to file size $filepath\n"; }
             next;
         }
         # Age
         #print("MDATE: $mdate CURR_DATE: $current_date\n");
-        if ( $mdate lt ( $current_date - ($max_age * 86400) ) ) {
+        if ( $mdate < ( $current_date - ($max_age * 86400) ) ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to age $filepath\n"; }
             next;
         }       
@@ -154,17 +161,18 @@ sub submitSample {
             my $req = $ua->post($api_endpoint,
                 Content_Type => 'form-data',
                 Content => [
-                    "file" => [ $filepath ],
+                    # Second element overrides the filename sent in Content-Disposition
+                    "file" => [ $filepath, $filepath ],
                 ],
             );
             $successful = $req->is_success;
-            $num_submitted++;
             print "\nError: ", $req->status_line unless $successful;
         } or do {
             my $error = $@ || 'Unknown failure';
             warn "Could not submit '$filepath' - $error";
         };
         if ($successful) {
+            $num_submitted++;
             last;
         }
     }
