@@ -82,10 +82,13 @@ param
         [Alias('MS')]
         [int]$MaxSize = 20,
 
-    [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')]
+    [Parameter(HelpMessage='Extensions to select for submission (default: recommended preset)')]
         [ValidateNotNullOrEmpty()]
         [Alias('E')]
         [string[]]$Extensions,
+
+    [Parameter(HelpMessage='Submit all file extensions (overrides -Extensions)')]
+        [switch]$AllExtensions = $False,
 
     [Parameter(HelpMessage='Use HTTPS instead of HTTP for Thunderstorm communication')]
         [Alias('SSL')]
@@ -134,8 +137,11 @@ if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
 }
 
 # Extensions
-# Apply recommended preset only when no -Extensions parameter was explicitly passed
-if (-not $PSBoundParameters.ContainsKey('Extensions')) {
+# -AllExtensions overrides any -Extensions value
+if ($AllExtensions) {
+    [string[]]$Extensions = @()
+} elseif (-not $PSBoundParameters.ContainsKey('Extensions')) {
+    # Apply recommended preset only when no -Extensions parameter was explicitly passed
     [string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
 }
 
