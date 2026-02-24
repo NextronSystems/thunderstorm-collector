@@ -36,9 +36,9 @@ hard_skips = [
 # Network and special filesystem types to exclude via /proc/mounts
 NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs",
                     "afp", "webdav", "davfs2", "fuse.rclone", "fuse.s3fs"}
-SPECIAL_FS_TYPES = {"proc", "procfs", "sysfs", "devtmpfs", "devpts", "tmpfs",
+SPECIAL_FS_TYPES = {"proc", "procfs", "sysfs", "devtmpfs", "devpts",
                     "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
-                    "securityfs", "hugetlbfs", "mqueue", "overlay", "autofs",
+                    "securityfs", "hugetlbfs", "mqueue", "autofs",
                     "fusectl", "rpc_pipefs", "nsfs", "configfs", "binfmt_misc",
                     "selinuxfs", "efivarfs", "ramfs"}
 

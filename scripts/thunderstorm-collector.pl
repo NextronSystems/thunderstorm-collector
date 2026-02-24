@@ -38,7 +38,7 @@ our @hardSkips = ('/proc', '/dev', '/sys', '/run', '/snap', '/.snapshots');
 
 # Network and special filesystem types (mount points with these types are excluded)
 our %networkFsTypes = map { $_ => 1 } qw(nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs);
-our %specialFsTypes = map { $_ => 1 } qw(proc procfs sysfs devtmpfs devpts tmpfs cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue overlay autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs);
+our %specialFsTypes = map { $_ => 1 } qw(proc procfs sysfs devtmpfs devpts cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs);
 
 # Cloud storage folder names (lowercase)
 our %cloudDirNames = map { $_ => 1 } ('onedrive', 'dropbox', '.dropbox', 'googledrive', 'google drive',
