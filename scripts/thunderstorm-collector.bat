@@ -103,6 +103,16 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
         pushd !TARGETDIR!
         FOR /R . %%F IN (*.*) DO (
             SETLOCAL
+            :: Junction/symlink protection - skip known Windows junction patterns
+            :: Windows 7+ creates "Application Data" junction in AppData\Local that loops back
+            :: Pattern matches: "Application Data\Application Data" (junction loop detected)
+            SET SKIP_JUNCTION=0
+            ECHO %%~pF | FIND /I "Application Data\\Application Data" >nul 2>nul
+            IF !ERRORLEVEL! == 0 SET SKIP_JUNCTION=1
+            ECHO %%~pF | FIND /I "Local\\Application Data" >nul 2>nul
+            IF !ERRORLEVEL! == 0 SET SKIP_JUNCTION=1
+            :: Only process if not under a junction
+            IF !SKIP_JUNCTION! == 0 (
             :: Marker if processed due to selected extensions
             SET PROCESSED=false
             :: Extension Check
@@ -137,6 +147,7 @@ FOR %%T IN (%COLLECT_DIRS%) DO (
             :: Note that file was skipped due to wrong extension
             IF %DEBUG% == 1 (
                 IF !PROCESSED! == false ECHO Skipping %%F due to extension ...
+            )
             )
             ENDLOCAL
         )
