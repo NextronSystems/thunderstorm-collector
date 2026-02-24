@@ -33,6 +33,52 @@ hard_skips = [
     "/sys/kernel/debug", "/sys/kernel/slab", "/sys/kernel/tracing",
 ]
 
+# Network and special filesystem types to exclude via /proc/mounts
+NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs",
+                    "afp", "webdav", "davfs2", "fuse.rclone", "fuse.s3fs"}
+SPECIAL_FS_TYPES = {"proc", "procfs", "sysfs", "devtmpfs", "devpts", "tmpfs",
+                    "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
+                    "securityfs", "hugetlbfs", "mqueue", "overlay", "autofs",
+                    "fusectl", "rpc_pipefs", "nsfs", "configfs", "binfmt_misc",
+                    "selinuxfs", "efivarfs", "ramfs"}
+
+# Cloud storage folder names (lowercase for comparison)
+CLOUD_DIR_NAMES = {"onedrive", "dropbox", ".dropbox", "googledrive", "google drive",
+                   "icloud drive", "iclouddrive", "nextcloud", "owncloud", "mega",
+                   "megasync", "tresorit", "tresorit drive", "syncthing"}
+
+
+def get_excluded_mounts():
+    """Parse /proc/mounts and return mount points for network/special filesystems."""
+    excluded = []
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    mount_point, fs_type = parts[1], parts[2]
+                    if fs_type in NETWORK_FS_TYPES or fs_type in SPECIAL_FS_TYPES:
+                        excluded.append(mount_point)
+    except (IOError, OSError):
+        pass
+    return excluded
+
+
+def is_cloud_path(filepath):
+    """Check if a path contains a known cloud storage folder name."""
+    segments = filepath.replace("\\", "/").lower().split("/")
+    for seg in segments:
+        if seg in CLOUD_DIR_NAMES:
+            return True
+        # Dynamic patterns: "onedrive - orgname", "onedrive-tenant", "nextcloud-account"
+        if seg.startswith("onedrive - ") or seg.startswith("onedrive-") or seg.startswith("nextcloud-"):
+            return True
+    # macOS: ~/Library/CloudStorage
+    if "/library/cloudstorage" in filepath.lower():
+        return True
+    return False
+
+
 # Composed values
 current_date = time.time()
 
@@ -54,6 +100,7 @@ def process_dir(workdir):
             d for d in dirnames
             if os.path.join(dirpath, d) not in hard_skips
             and not os.path.islink(os.path.join(dirpath, d))
+            and not is_cloud_path(os.path.join(dirpath, d))
         ]
 
         for name in filenames:
@@ -275,13 +322,18 @@ if __name__ == "__main__":
     print("   Florian Roth, Nextron Systems GmbH, 2024")
     print()
     print("=" * 80)
+    # Extend hard_skips with mount points of network/special filesystems
+    for mp in get_excluded_mounts():
+        if mp not in hard_skips:
+            hard_skips.append(mp)
+
     print("Target Directory: {}".format(", ".join(args.dirs)))
     print("Thunderstorm Server: {}".format(args.server))
     print("Thunderstorm Port: {}".format(args.port))
     print("Using API Endpoint: {}".format(api_endpoint))
     print("Maximum Age of Files: {}".format(max_age))
     print("Maximum File Size: {} MB".format(max_size))
-    print("Excluded directories: {}".format(", ".join(hard_skips)))
+    print("Excluded directories: {}".format(", ".join(hard_skips[:10]) + (" ..." if len(hard_skips) > 10 else "")))
     print("Source Identifier: {}".format(args.source)) if args.source else None
     print()
 

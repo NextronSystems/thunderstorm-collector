@@ -45,41 +45,54 @@ START_TS="$(date +%s 2>/dev/null || echo 0)"
 SOURCE_NAME=""
 
 # Filesystem exclusions -------------------------------------------------------
-# Pseudo-filesystems, virtual mounts, and cloud storage paths that should never
-# be walked. These are pruned at the find level for efficiency.
+# Pseudo-filesystems, virtual mounts, network shares, and cloud storage that
+# should never be walked. Pruned at the find level for efficiency.
 
-EXCLUDE_PATHS_START=(
+# Hardcoded paths — always excluded
+EXCLUDE_PATHS=(
     /proc /sys /dev /run
     /sys/kernel/debug /sys/kernel/slab /sys/kernel/tracing /sys/devices
-)
-
-EXCLUDE_FS_DIRS=(
     /snap /.snapshots
 )
 
-EXCLUDE_CLOUD_DIRS=(
-    # Common cloud sync folders (Loki-RS reference)
-    /*/OneDrive /*/Dropbox /*/.dropbox
-    "/*/ Google Drive" /*/GoogleDrive
-    "/*/ iCloud Drive" /*/Nextcloud /*/ownCloud
-    /*/MEGA /*/MEGAsync /*/Tresorit
-    /*/SyncThing
-    /Library/CloudStorage
-)
+# Network and special filesystem types — mount points with these types are
+# discovered from /proc/mounts and excluded automatically.
+NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs"
+SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts tmpfs cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue overlay autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs"
 
-# Build find exclusion arguments
-build_find_excludes() {
-    local args=()
-    local p
-    for p in "${EXCLUDE_PATHS_START[@]}"; do
-        [ -d "$p" ] && args+=(-path "$p" -prune -o)
+# Cloud storage folder names — if any path segment matches (case-insensitive),
+# the directory is pruned. Covers OneDrive, Dropbox, Google Drive, iCloud,
+# Nextcloud, ownCloud, MEGA, Tresorit, Syncthing.
+CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive Google Drive iCloud Drive iCloudDrive Nextcloud ownCloud MEGA MEGAsync Tresorit SyncThing"
+
+# get_excluded_mounts: parse /proc/mounts and return mount points for
+# network and special filesystem types (one per line).
+get_excluded_mounts() {
+    [ -r /proc/mounts ] || return 0
+    while IFS=' ' read -r _dev _mp _fstype _rest; do
+        case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
+            *" $_fstype "*) printf '%s\n' "$_mp" ;;
+        esac
+    done < /proc/mounts
+}
+
+# is_cloud_path: check if a path contains a known cloud storage folder name.
+# Returns 0 (true) if it matches, 1 (false) otherwise.
+is_cloud_path() {
+    local path_lower
+    path_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    local name name_lower
+    for name in $CLOUD_DIR_NAMES; do
+        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+        case "$path_lower" in
+            *"/$name_lower"/*|*"/$name_lower") return 0 ;;
+        esac
     done
-    for p in "${EXCLUDE_FS_DIRS[@]}"; do
-        [ -d "$p" ] && args+=(-path "$p" -prune -o)
-    done
-    # Symlink exclusion: -type f already excludes symlinks, but explicitly
-    # skip symlink directories to avoid descending into linked trees
-    printf '%s\n' "${args[@]}"
+    # macOS: ~/Library/CloudStorage
+    case "$path_lower" in
+        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+    esac
+    return 1
 }
 
 # Helpers ---------------------------------------------------------------------
@@ -639,22 +652,28 @@ main() {
             continue
         }
         TMP_FILES="${TMP_FILES} ${find_results_file}"
-        # Build find command with filesystem exclusions
+        # Build find exclusions: hardcoded paths + mount points of special/network FS
         local find_excludes=()
         local _ep
-        for _ep in "${EXCLUDE_PATHS_START[@]}"; do
+        for _ep in "${EXCLUDE_PATHS[@]}"; do
             [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
         done
-        for _ep in "${EXCLUDE_FS_DIRS[@]}"; do
-            [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
-        done
-        # -not -xtype l: skip broken symlinks; -type f already skips symlinks to files
+        while IFS= read -r _ep; do
+            [ -n "$_ep" ] && [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
+        done <<< "$(get_excluded_mounts)"
         find "$scandir" "${find_excludes[@]}" -type f -mtime "$find_mtime" -print0 > "$find_results_file" 2>/dev/null || true
 
         while IFS= read -r -d '' file_path; do
             FILES_SCANNED=$((FILES_SCANNED + 1))
 
             [ -f "$file_path" ] || continue
+
+            # Skip files inside cloud storage folders
+            if is_cloud_path "$file_path"; then
+                FILES_SKIPPED=$((FILES_SKIPPED + 1))
+                log_msg debug "Skipping cloud storage path '$file_path'"
+                continue
+            fi
 
             size_kb="$(file_size_kb "$file_path")"
             if [ "$size_kb" -lt 0 ]; then

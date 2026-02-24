@@ -36,6 +36,44 @@ our $max_size = 10;     # in megabytes
 our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
 our @hardSkips = ('/proc', '/dev', '/sys', '/run', '/snap', '/.snapshots');
 
+# Network and special filesystem types (mount points with these types are excluded)
+our %networkFsTypes = map { $_ => 1 } qw(nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs);
+our %specialFsTypes = map { $_ => 1 } qw(proc procfs sysfs devtmpfs devpts tmpfs cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue overlay autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs);
+
+# Cloud storage folder names (lowercase)
+our %cloudDirNames = map { $_ => 1 } ('onedrive', 'dropbox', '.dropbox', 'googledrive', 'google drive',
+    'icloud drive', 'iclouddrive', 'nextcloud', 'owncloud', 'mega', 'megasync', 'tresorit', 'syncthing');
+
+sub get_excluded_mounts {
+    my @excluded;
+    if (open(my $fh, '<', '/proc/mounts')) {
+        while (my $line = <$fh>) {
+            my @parts = split(/\s+/, $line);
+            if (scalar @parts >= 3) {
+                my ($mount_point, $fs_type) = ($parts[1], $parts[2]);
+                if ($networkFsTypes{$fs_type} || $specialFsTypes{$fs_type}) {
+                    push @excluded, $mount_point;
+                }
+            }
+        }
+        close($fh);
+    }
+    return @excluded;
+}
+
+sub is_cloud_path {
+    my ($path) = @_;
+    my $lower = lc($path);
+    $lower =~ s/\\/\//g;
+    my @segments = split(/\//, $lower);
+    for my $seg (@segments) {
+        return 1 if $cloudDirNames{$seg};
+        return 1 if ($seg =~ /^onedrive[\s-]/ || $seg =~ /^nextcloud-/);
+    }
+    return 1 if ($lower =~ /\/library\/cloudstorage/);
+    return 0;
+}
+
 # Command Line Parameters
 GetOptions(
     "dir|d=s"      => \$targetdir,  # --dir or -d
@@ -135,9 +173,11 @@ sub processDir {
         }
         next if $skipHard;
 
+        # Skip cloud storage paths
+        next if is_cloud_path($filepath);
+
         # Is a Directory
         if (-d $filepath){
-            #print "IS DIR!\n";
             # Skip symbolic links
             if (-l $filepath) { next; }
             # Process Dir
@@ -255,6 +295,14 @@ print "Using API Endpoint: $api_endpoint\n";
 print "Maximum Age of Files: $max_age\n";
 print "Maximum File Size: $max_size\n";
 print "\n";
+
+# Extend hardSkips with mount points of network/special filesystems
+{
+    my %seen = map { $_ => 1 } @hardSkips;
+    for my $mp (get_excluded_mounts()) {
+        push @hardSkips, $mp unless $seen{$mp}++;
+    }
+}
 
 # Instanciate an object
 $ua = LWP::UserAgent->new;

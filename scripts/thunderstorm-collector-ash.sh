@@ -56,6 +56,37 @@ SOURCE_NAME=""
 # Space-separated list of paths to prune during find.
 EXCLUDE_PATHS="/proc /sys /dev /run /snap /.snapshots"
 
+# Network and special filesystem types
+NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs"
+SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts tmpfs cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue overlay autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs"
+
+# Cloud storage folder names (lowercase for comparison)
+CLOUD_DIR_NAMES="onedrive dropbox .dropbox googledrive nextcloud owncloud mega megasync tresorit syncthing"
+
+# get_excluded_mounts: parse /proc/mounts, return mount points for network/special FS
+get_excluded_mounts() {
+    [ -r /proc/mounts ] || return 0
+    while IFS=' ' read -r _gem_dev _gem_mp _gem_fs _gem_rest; do
+        case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
+            *" $_gem_fs "*) printf '%s\n' "$_gem_mp" ;;
+        esac
+    done < /proc/mounts
+}
+
+# is_cloud_path: check if a path contains a known cloud storage folder name
+is_cloud_path() {
+    _icp_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    for _icp_name in $CLOUD_DIR_NAMES; do
+        case "$_icp_lower" in
+            *"/$_icp_name"/*|*"/$_icp_name") return 0 ;;
+        esac
+    done
+    case "$_icp_lower" in
+        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+    esac
+    return 1
+}
+
 # Helpers ---------------------------------------------------------------------
 
 timestamp() {
@@ -667,6 +698,11 @@ main() {
         for _ep in $EXCLUDE_PATHS; do
             [ -d "$_ep" ] && _find_cmd="$_find_cmd -path \"$_ep\" -prune -o"
         done
+        # Exclude mount points of network and special filesystems
+        _mount_excludes="$(get_excluded_mounts)"
+        for _ep in $_mount_excludes; do
+            [ -d "$_ep" ] && _find_cmd="$_find_cmd -path \"$_ep\" -prune -o"
+        done
         _find_cmd="$_find_cmd -type f -mtime \"$_find_mtime\" -print"
         eval "$_find_cmd" > "$_results_file" 2>/dev/null || true
 
@@ -676,6 +712,13 @@ main() {
             [ -f "$_file_path" ] || continue
 
             FILES_SCANNED=$((FILES_SCANNED + 1))
+
+            # Skip files inside cloud storage folders
+            if is_cloud_path "$_file_path"; then
+                FILES_SKIPPED=$((FILES_SKIPPED + 1))
+                log_msg debug "Skipping cloud storage path '$_file_path'"
+                continue
+            fi
 
             _size_kb="$(file_size_kb "$_file_path")"
             if [ "$_size_kb" -lt 0 ]; then
