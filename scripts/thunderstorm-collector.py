@@ -3,6 +3,7 @@
 
 import argparse
 import http.client
+import json
 import os
 import re
 import ssl
@@ -26,7 +27,11 @@ skip_elements = [
     r"\.vmsd$",
     r"\.lck$",
 ]
-hard_skips = ["/proc", "/dev", "/sys"]
+hard_skips = [
+    "/proc", "/dev", "/sys", "/run",
+    "/snap", "/.snapshots",
+    "/sys/kernel/debug", "/sys/kernel/slab", "/sys/kernel/tracing",
+]
 
 # Composed values
 current_date = time.time()
@@ -184,6 +189,37 @@ def submit_sample(filepath):
             continue
 
 
+def collection_marker(server, port, tls, insecure, source, collector_version, marker_type, scan_id=None, stats=None):
+    """POST a begin/end collection marker to /api/collection.
+    Returns the scan_id from the response, or None if unsupported/failed."""
+    body = {
+        "type": marker_type,
+        "source": source,
+        "collector": "python3/{}".format(collector_version),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if scan_id:
+        body["scan_id"] = scan_id
+    if stats:
+        body["stats"] = stats
+
+    try:
+        if tls:
+            ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
+            conn = http.client.HTTPSConnection(server, port, context=ctx, timeout=10)
+        else:
+            conn = http.client.HTTPConnection(server, port, timeout=10)
+        payload = json.dumps(body).encode("utf-8")
+        conn.request("POST", "/api/collection", body=payload,
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        resp_body = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(resp_body)
+        return data.get("scan_id")
+    except Exception:
+        return None
+
+
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -251,13 +287,36 @@ if __name__ == "__main__":
 
     print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
 
+    # Send collection begin marker
+    scan_id = collection_marker(
+        args.server, args.port, args.tls, args.insecure,
+        args.source or socket.gethostname(), "0.1",
+        "begin"
+    )
+    if scan_id:
+        print("[INFO] Collection scan_id: {}".format(scan_id))
+        api_endpoint = "{}&scan_id={}".format(api_endpoint, quote(scan_id))
+
     # Walk directory
     for walkdir in args.dirs:
         process_dir(walkdir)
 
-    # End message
+    # Send collection end marker with stats
     end_date = time.time()
-    minutes = int((end_date - current_date) / 60)
+    elapsed = int(end_date - current_date)
+    minutes = elapsed // 60
+    collection_marker(
+        args.server, args.port, args.tls, args.insecure,
+        args.source or socket.gethostname(), "0.1",
+        "end",
+        scan_id=scan_id,
+        stats={
+            "scanned": num_processed,
+            "submitted": num_submitted,
+            "elapsed_seconds": elapsed,
+        }
+    )
+
     print(
         "Thunderstorm Collector Run finished (Checked: {} Submitted: {} Minutes: {})".format(
             num_processed, num_submitted, minutes

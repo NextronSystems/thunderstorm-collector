@@ -52,6 +52,10 @@ SCRIPT_NAME="${0##*/}"
 START_TS="$(date +%s 2>/dev/null || echo 0)"
 SOURCE_NAME=""
 
+# Filesystem exclusions (POSIX-compatible) ------------------------------------
+# Space-separated list of paths to prune during find.
+EXCLUDE_PATHS="/proc /sys /dev /run /snap /.snapshots"
+
 # Helpers ---------------------------------------------------------------------
 
 timestamp() {
@@ -384,6 +388,46 @@ upload_with_nc() {
     return 0
 }
 
+# collection_marker -- POST a begin/end marker to /api/collection
+# Args: $1=base_url  $2=type(begin|end)  $3=scan_id(optional)  $4=stats_json(optional)
+# Returns: scan_id from response (empty if unsupported/failed)
+collection_marker() {
+    _cm_base_url="$1"
+    _cm_type="$2"
+    _cm_scan_id="${3:-}"
+    _cm_stats="${4:-}"
+    _cm_url="${_cm_base_url%/api/*}/api/collection"
+    _cm_resp="${TMPDIR:-/tmp}/thunderstorm.marker.$$"
+
+    _cm_body="{\"type\":\"${_cm_type}\""
+    _cm_body="${_cm_body},\"source\":\"${SOURCE_NAME}\""
+    _cm_body="${_cm_body},\"collector\":\"ash/${VERSION}\""
+    _cm_body="${_cm_body},\"timestamp\":\"$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u)\""
+    [ -n "$_cm_scan_id" ] && _cm_body="${_cm_body},\"scan_id\":\"${_cm_scan_id}\""
+    [ -n "$_cm_stats"   ] && _cm_body="${_cm_body},${_cm_stats}"
+    _cm_body="${_cm_body}}"
+
+    : > "$_cm_resp" 2>/dev/null || true
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -o "$_cm_resp" \
+            -H "Content-Type: application/json" \
+            -d "$_cm_body" \
+            --max-time 10 \
+            "$_cm_url" 2>/dev/null || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$_cm_resp" \
+            --header "Content-Type: application/json" \
+            --post-data "$_cm_body" \
+            --timeout=10 \
+            "$_cm_url" 2>/dev/null || true
+    fi
+
+    _cm_id="$(grep -o '"scan_id":"[^"]*"' "$_cm_resp" 2>/dev/null \
+        | head -1 | sed 's/"scan_id":"//;s/"//')"
+    rm -f "$_cm_resp"
+    printf '%s' "$_cm_id"
+}
+
 submit_file() {
     _sf_endpoint="$1"
     _sf_filepath="$2"
@@ -538,6 +582,8 @@ main() {
     _endpoint_name="check"
     _query_source=""
     _api_endpoint=""
+    _base_url=""
+    _SCAN_ID=""
     _elapsed=0
     _find_mtime=""
     _results_file=""
@@ -556,7 +602,8 @@ main() {
     [ "$ASYNC_MODE" -eq 1 ] && _endpoint_name="checkAsync"
 
     _query_source="$(build_query_source "$SOURCE_NAME")"
-    _api_endpoint="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}/api/${_endpoint_name}${_query_source}"
+    _base_url="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
+    _api_endpoint="${_base_url}/api/${_endpoint_name}${_query_source}"
 
     if [ "$DRY_RUN" -eq 0 ]; then
         detect_upload_tool || die "Neither 'curl' nor 'wget' is installed; unable to upload samples"
@@ -577,6 +624,15 @@ main() {
     log_msg info "Source: $SOURCE_NAME"
     log_msg info "Folders: $(printf '%s' "$SCAN_DIRS" | tr '\n' ' ')"
     [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
+
+    # Send collection begin marker; capture scan_id if server returns one
+    if [ "$DRY_RUN" -eq 0 ]; then
+        _SCAN_ID="$(collection_marker "$_base_url" "begin" "" "")"
+        if [ -n "$_SCAN_ID" ]; then
+            log_msg info "Collection scan_id: $_SCAN_ID"
+            _api_endpoint="${_api_endpoint}&scan_id=$(urlencode "$_SCAN_ID")"
+        fi
+    fi
 
     # Write the newline-separated directory list to a temp file so the while
     # loop runs in the current shell (not a subshell). A pipe would lose all
@@ -606,8 +662,13 @@ main() {
         # containing literal newline characters (an extremely rare edge case).
         # If your environment has such filenames, use thunderstorm-collector.sh
         # (requires bash) which uses find -print0 + read -d ''.
-        find "$_scandir" -type f -mtime "$_find_mtime" -print \
-            > "$_results_file" 2>/dev/null || true
+        # Build find exclusions from EXCLUDE_PATHS
+        _find_cmd="find \"$_scandir\""
+        for _ep in $EXCLUDE_PATHS; do
+            [ -d "$_ep" ] && _find_cmd="$_find_cmd -path \"$_ep\" -prune -o"
+        done
+        _find_cmd="$_find_cmd -type f -mtime \"$_find_mtime\" -print"
+        eval "$_find_cmd" > "$_results_file" 2>/dev/null || true
 
         exec 4< "$_results_file"
         while IFS= read -r _file_path <&4; do
@@ -647,6 +708,13 @@ main() {
     fi
 
     log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$_elapsed"
+
+    # Send collection end marker with run statistics
+    if [ "$DRY_RUN" -eq 0 ]; then
+        _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${_elapsed}}"
+        collection_marker "$_base_url" "end" "$_SCAN_ID" "$_stats" >/dev/null
+    fi
+
     return 0
 }
 
