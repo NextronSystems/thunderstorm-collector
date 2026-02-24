@@ -4,50 +4,55 @@ SETLOCAL EnableDelayedExpansion
 :: ----------------------------------------------------------------
 :: THOR Thunderstorm Collector
 :: Windows Batch
-:: Florian Roth
-:: v0.4
+:: Florian Roth, Nextron Systems GmbH
+:: v0.5
 ::
-:: A Windows Batch script that uses a compiled Curl for Windows
+:: A Windows Batch script that uses Curl for Windows
 :: to upload files to a THOR Thunderstorm server
 ::
 :: Requirements:
-:: Curl for Windows (place ./bin/curl.exe from the package into the script folder)
-:: https://curl.haxx.se/windows/
+:: Curl for Windows (place curl.exe into the script folder or PATH)
+:: https://curl.se/windows/
 ::
-:: Note on Windows 10
-:: Windows 10 already includes a curl since build 17063, so all versions newer than
-:: version 1709 (Redstone 3) from October 2017 already meet the requirements
+:: Note on Windows 10+
+:: Windows 10 already includes curl since build 17063 (version 1709+)
 ::
-:: Note on very old Windows versions:
-:: The last version of curl that works with Windows 7 / Windows 2008 R2
-:: and earlier is v7.46.0 and can be still be downloaded from here:
-:: https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
+:: Note on Windows 7 / Server 2008 R2:
+:: Curl 8.x requires the Universal C Runtime (KB2999226 or KB3118401).
+:: Install the Visual C++ 2015 Redistributable or the UCRT update,
+:: then place the curl.exe + libcurl DLL in the script folder.
+:: ----------------------------------------------------------------
 
 :: CONFIGURATION -------------------------------------------------
 
-:: THUNDERSTORM SERVER -------------------------------------------
-:: The thunderstorm server host name (fqdn) or IP
-IF "%THUNDERSTORM_SERVER%"=="" SET THUNDERSTORM_SERVER=ygdrasil.nextron
-IF "%THUNDERSTORM_PORT%"=="" SET THUNDERSTORM_PORT=8080
-:: Use http or https
-IF "%URL_SCHEME%"=="" SET URL_SCHEME=http
+:: THUNDERSTORM SERVER
+SET _TS=%THUNDERSTORM_SERVER%
+SET _TP=%THUNDERSTORM_PORT%
+SET _SCHEME=%URL_SCHEME%
+IF "%_TS%"=="" SET _TS=ygdrasil.nextron
+IF "%_TP%"=="" SET _TP=8080
+IF "%_SCHEME%"=="" SET _SCHEME=http
 
-:: SELECTION -----------------------------------------------------
+:: SELECTION
+SET _DIRS=%COLLECT_DIRS%
+SET _EXTS=%RELEVANT_EXTENSIONS%
+SET _MAXSZ=%COLLECT_MAX_SIZE%
+SET _MAXAGE=%MAX_AGE%
+IF "%_DIRS%"=="" SET _DIRS=C:\Users C:\Temp C:\Windows
+IF "%_EXTS%"=="" SET _EXTS=.vbs .ps .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
+IF "%_MAXSZ%"=="" SET _MAXSZ=3000000
+IF "%_MAXAGE%"=="" SET _MAXAGE=30
 
-:: The directory that should be walked
-IF "%COLLECT_DIRS%"=="" SET COLLECT_DIRS=C:\Users C:\Temp C:\Windows
-:: The pattern of files to include
-IF "%RELEVANT_EXTENSIONS%"=="" SET RELEVANT_EXTENSIONS=.vbs .ps .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
-:: Maximum file size to collect (in bytes) (defualt: 3MB)
-IF "%COLLECT_MAX_SIZE%"=="" SET COLLECT_MAX_SIZE=3000000
-:: Maximum file age in days (default: 7300 days = 20 years)
-IF "%MAX_AGE%"=="" SET MAX_AGE=30
+:: DEBUG & SOURCE
+SET _DBG=%DEBUG%
+SET _SRC=%SOURCE%
+IF "%_DBG%"=="" SET _DBG=0
 
-:: Debug
-IF "%DEBUG%"=="" SET DEBUG=0
-
-:: Source
-IF "%SOURCE%"=="" SET SOURCE=
+:: Counters
+SET /A _SUBMITTED=0
+SET /A _SKIPPED=0
+SET /A _FAILED=0
+SET /A _SCANNED=0
 
 :: WELCOME -------------------------------------------------------
 
@@ -57,100 +62,152 @@ ECHO   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _
 ECHO    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \
 ECHO   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/
 ECHO.
-ECHO   Windows Batch Collector
-ECHO   Florian Roth, 2020
+ECHO   Windows Batch Collector v0.5
+ECHO   Florian Roth, Nextron Systems GmbH, 2020-2026
 ECHO.
 ECHO =============================================================
 ECHO.
 
-:: REQUIREMENTS -------------------------------------------------
-:: CURL in PATH
+:: REQUIREMENTS --------------------------------------------------
+:: Prefer curl next to the script (bundled with UCRT DLLs), then current dir, then PATH
+SET _CURL=
+IF EXIST "%~dp0curl.exe" (
+    SET "_CURL=%~dp0curl.exe"
+    GOTO :CURLOK
+)
+IF EXIST "%CD%\curl.exe" (
+    SET "_CURL=%CD%\curl.exe"
+    GOTO :CURLOK
+)
 where /q curl.exe
 IF NOT ERRORLEVEL 1 (
-    GOTO CHECKDONE
+    FOR /F "tokens=*" %%C IN ('where curl.exe') DO (
+        IF NOT DEFINED _CURL SET "_CURL=%%C"
+    )
+    GOTO :CURLOK
 )
-:: CURL in current directory
-IF EXIST %CD%\curl.exe (
-    GOTO CHECKDONE
-)
-ECHO Cannot find curl in PATH or the current directory. Download it from https://curl.haxx.se/windows/ and place curl.exe from the ./bin sub folder into the collector script folder.
-ECHO If you're collecting on Windows systems older than Windows Vista, use curl version 7.46.0 from https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
+ECHO [!] Cannot find curl in PATH or the script directory.
+ECHO     Download from https://curl.se/windows/ and place curl.exe next to this script.
 EXIT /b 1
-:CHECKDONE
-ECHO Curl has been found. We're ready to go.
+:CURLOK
+ECHO [+] Curl found: %_CURL%
 
-:: COLLECTION --------------------------------------------------
-
-:: SOURCE
-IF "%SOURCE%"=="" (
-    FOR /F "tokens=*" %%i IN ('hostname') DO SET SOURCE=%%i
-    ECHO No Source provided, using hostname=!SOURCE!
-)
-IF "%SOURCE%" NEQ "" (
-    SET SOURCE=?source=%SOURCE%
+:: SOURCE --------------------------------------------------------
+IF "%_SRC%"=="" (
+    FOR /F "tokens=*" %%i IN ('hostname') DO SET _SRC=%%i
+    ECHO [+] Source: !_SRC!
 )
 
-:: Directory walk and upload
-ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE: %MAX_AGE% days EXTENSIONS: %RELEVANT_EXTENSIONS%
-ECHO This could take a while depending on the disk size and number of files. (set DEBUG=1 to see all skips)
-FOR %%T IN (%COLLECT_DIRS%) DO (
-    SET TARGETDIR=%%T
-    IF NOT EXIST !TARGETDIR! (
-        ECHO Warning: Target directory !TARGETDIR! does not exist. Skipping ...
-    ) ELSE (
-        ECHO Checking !TARGETDIR! ...
-        :: Nested FOR does not accept delayed-expansion variables, so we need to use a workaround via pushd/popd
-        pushd !TARGETDIR!
-        FOR /R . %%F IN (*.*) DO (
-            SETLOCAL
-            :: Junction/symlink protection - skip known Windows junction patterns
-            :: Windows 7+ creates "Application Data" junction in AppData\Local that loops back
-            :: Pattern matches: "Application Data\Application Data" (junction loop detected)
-            SET SKIP_JUNCTION=0
-            ECHO %%~pF | FIND /I "Application Data\\Application Data" >nul 2>nul
-            IF !ERRORLEVEL! == 0 SET SKIP_JUNCTION=1
-            ECHO %%~pF | FIND /I "Local\\Application Data" >nul 2>nul
-            IF !ERRORLEVEL! == 0 SET SKIP_JUNCTION=1
-            :: Only process if not under a junction
-            IF !SKIP_JUNCTION! == 0 (
-            :: Marker if processed due to selected extensions
-            SET PROCESSED=false
-            :: Extension Check
-            FOR %%E IN (%RELEVANT_EXTENSIONS%) DO (
-                :: Check if one of the relevant extensions matches the file extension
-                IF /I "%%~xF"=="%%E" (
-                    SET PROCESSED=true
-                    :: When the folder is empty [root directory] add extra characters
-                    IF "%%~pF"=="\" (
-                        SET FOLDER=%%~dF%%~pF\\
-                    ) ELSE (
-                        SET FOLDER=%%~dF%%~pF
-                    )
-                    :: File Size Check
-                    IF %%~zF GTR %COLLECT_MAX_SIZE% (
-                        :: File is too big
-                        IF %DEBUG% == 1 ECHO Skipping %%F due to big file size ...
-                    ) ELSE (
-                        :: Age check
-                        FORFILES /P "!FOLDER:~0,-1!" /M "%%~nF%%~xF" /D -%MAX_AGE% >nul 2>nul && (
-                            :: File is too old
-                            IF %DEBUG% == 1 ECHO Skipping %%F due to age ...
-                        ) || (
-                            :: Upload
-                            ECHO Uploading %%F ..
-                            :: We'll start the upload process in background to speed up the submission process
-                            START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
-                        )
-                    )
-                )
-            )
-            :: Note that file was skipped due to wrong extension
-            IF %DEBUG% == 1 (
-                IF !PROCESSED! == false ECHO Skipping %%F due to extension ...
-            )
-            )
-            ENDLOCAL
-        )
-        popd
+:: COLLECTION MARKERS --------------------------------------------
+:: POST begin marker to /api/collection (forward-compatible: 404 = continue)
+SET _SCANID=
+FOR /F "usebackq tokens=*" %%R IN (`"%_CURL%" -s -X POST -H "Content-Type: application/json" -d "{\"type\":\"begin\",\"source\":\"%_SRC%\",\"collector\":\"batch/0.5\"}" %_SCHEME%://%_TS%:%_TP%/api/collection 2^>nul`) DO (
+    SET _RESP=%%R
+)
+IF DEFINED _RESP (
+    :: Extract scan_id from JSON response (simple pattern match)
+    FOR /F "tokens=2 delims=:}" %%A IN ('ECHO !_RESP! ^| FIND /I "scan_id"') DO (
+        SET _SCANID=%%~A
+        :: Remove surrounding quotes and spaces
+        SET _SCANID=!_SCANID:"=!
+        SET _SCANID=!_SCANID: =!
     )
 )
+IF DEFINED _SCANID (
+    ECHO [+] Collection started, scan_id: !_SCANID!
+    SET _IDPARAM=^&scan_id=!_SCANID!
+) ELSE (
+    SET _IDPARAM=
+)
+
+:: BUILD FILE LIST -----------------------------------------------
+:: Phase 1: Use FORFILES to generate a filtered file list.
+:: FORFILES does NOT follow junctions/reparse points, solving the infinite loop issue.
+
+SET _FILELIST=%TEMP%\thunderstorm_files_%RANDOM%.txt
+IF EXIST "%_FILELIST%" DEL "%_FILELIST%" 2>nul
+
+:: Calculate cutoff date for age filter (today minus _MAXAGE days)
+:: FORFILES /D +MM/DD/YYYY selects files modified on or after that date
+SET _DATEFILTER=
+IF %_MAXAGE% GTR 0 (
+    :: Use PowerShell to compute the date (available on Vista+)
+    FOR /F "usebackq tokens=*" %%D IN (`powershell -NoProfile -Command "(Get-Date).AddDays(-%_MAXAGE%).ToString('MM/dd/yyyy')"`) DO SET _DATEFILTER=/D +%%D
+)
+
+ECHO [+] Scanning %_DIRS% ...
+ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_EXTS%
+
+FOR %%T IN (%_DIRS%) DO (
+    IF NOT EXIST "%%T" (
+        ECHO [!] Warning: %%T does not exist, skipping.
+    ) ELSE (
+        IF %_DBG% == 1 ECHO [D] Scanning %%T ...
+        :: FORFILES /S = recurse (skips junctions), /C = command per file
+        :: @path outputs quoted full path, @isdir filters out directories
+        IF DEFINED _DATEFILTER (
+            FORFILES /P "%%T" /S !_DATEFILTER! /C "cmd /c if @isdir==FALSE echo @path" >>"%_FILELIST%" 2>nul
+        ) ELSE (
+            FORFILES /P "%%T" /S /C "cmd /c if @isdir==FALSE echo @path" >>"%_FILELIST%" 2>nul
+        )
+    )
+)
+
+:: Count total files found
+SET /A _TOTAL=0
+IF EXIST "%_FILELIST%" (
+    FOR /F "usebackq" %%C IN (`type "%_FILELIST%" ^| find /c /v ""`) DO SET /A _TOTAL=%%C
+)
+ECHO [+] Found %_TOTAL% files within age limit.
+
+:: PHASE 2: FILTER AND UPLOAD ------------------------------------
+IF %_TOTAL% == 0 GOTO :DONE
+
+FOR /F "usebackq delims=" %%F IN ("%_FILELIST%") DO (
+    SET /A _SCANNED+=1
+    :: %%~F strips surrounding quotes from FORFILES output
+    SET "_FILE=%%~F"
+
+    :: Extension check
+    SET _EXTMATCH=0
+    FOR %%E IN (%_EXTS%) DO (
+        IF /I "%%~xF"=="%%E" SET _EXTMATCH=1
+    )
+    IF !_EXTMATCH! == 0 (
+        IF %_DBG% == 1 ECHO [D] Skip: !_FILE! ^(extension^)
+        SET /A _SKIPPED+=1
+    ) ELSE (
+        :: Size check
+        SET "_SZ=%%~zF"
+        IF !_SZ! GTR %_MAXSZ% (
+            IF %_DBG% == 1 ECHO [D] Skip: !_FILE! ^(size: !_SZ!^)
+            SET /A _SKIPPED+=1
+        ) ELSE (
+            :: Upload
+            ECHO [+] Uploading: !_FILE!
+            "%_CURL%" -s -o nul -F "file=@!_FILE!" %_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=%_SRC%%_IDPARAM%
+            IF !ERRORLEVEL! == 0 (
+                SET /A _SUBMITTED+=1
+            ) ELSE (
+                ECHO [-] Failed: !_FILE! ^(curl exit: !ERRORLEVEL!^)
+                SET /A _FAILED+=1
+            )
+        )
+    )
+)
+
+:DONE
+:: COLLECTION END MARKER -----------------------------------------
+IF DEFINED _SCANID (
+    "%_CURL%" -s -o nul -X POST -H "Content-Type: application/json" -d "{\"type\":\"end\",\"source\":\"%_SRC%\",\"collector\":\"batch/0.5\",\"scan_id\":\"%_SCANID%\",\"stats\":{\"scanned\":%_SCANNED%,\"submitted\":%_SUBMITTED%,\"skipped\":%_SKIPPED%,\"failed\":%_FAILED%}}" %_SCHEME%://%_TS%:%_TP%/api/collection 2>nul
+)
+
+:: CLEANUP -------------------------------------------------------
+IF EXIST "%_FILELIST%" DEL "%_FILELIST%" 2>nul
+
+:: SUMMARY -------------------------------------------------------
+ECHO.
+ECHO [+] Done. scanned=%_SCANNED% submitted=%_SUBMITTED% skipped=%_SKIPPED% failed=%_FAILED%
+
+ENDLOCAL
+EXIT /b 0
