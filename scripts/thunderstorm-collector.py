@@ -3,6 +3,7 @@
 
 import argparse
 import http.client
+import json
 import os
 import re
 import ssl
@@ -26,7 +27,57 @@ skip_elements = [
     r"\.vmsd$",
     r"\.lck$",
 ]
-hard_skips = ["/proc", "/dev", "/sys"]
+hard_skips = [
+    "/proc", "/dev", "/sys", "/run",
+    "/snap", "/.snapshots",
+    "/sys/kernel/debug", "/sys/kernel/slab", "/sys/kernel/tracing",
+]
+
+# Network and special filesystem types to exclude via /proc/mounts
+NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs",
+                    "afp", "webdav", "davfs2", "fuse.rclone", "fuse.s3fs"}
+SPECIAL_FS_TYPES = {"proc", "procfs", "sysfs", "devtmpfs", "devpts", "tmpfs",
+                    "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
+                    "securityfs", "hugetlbfs", "mqueue", "overlay", "autofs",
+                    "fusectl", "rpc_pipefs", "nsfs", "configfs", "binfmt_misc",
+                    "selinuxfs", "efivarfs", "ramfs"}
+
+# Cloud storage folder names (lowercase for comparison)
+CLOUD_DIR_NAMES = {"onedrive", "dropbox", ".dropbox", "googledrive", "google drive",
+                   "icloud drive", "iclouddrive", "nextcloud", "owncloud", "mega",
+                   "megasync", "tresorit", "tresorit drive", "syncthing"}
+
+
+def get_excluded_mounts():
+    """Parse /proc/mounts and return mount points for network/special filesystems."""
+    excluded = []
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    mount_point, fs_type = parts[1], parts[2]
+                    if fs_type in NETWORK_FS_TYPES or fs_type in SPECIAL_FS_TYPES:
+                        excluded.append(mount_point)
+    except (IOError, OSError):
+        pass
+    return excluded
+
+
+def is_cloud_path(filepath):
+    """Check if a path contains a known cloud storage folder name."""
+    segments = filepath.replace("\\", "/").lower().split("/")
+    for seg in segments:
+        if seg in CLOUD_DIR_NAMES:
+            return True
+        # Dynamic patterns: "onedrive - orgname", "onedrive-tenant", "nextcloud-account"
+        if seg.startswith("onedrive - ") or seg.startswith("onedrive-") or seg.startswith("nextcloud-"):
+            return True
+    # macOS: ~/Library/CloudStorage
+    if "/library/cloudstorage" in filepath.lower():
+        return True
+    return False
+
 
 # Composed values
 current_date = time.time()
@@ -49,6 +100,7 @@ def process_dir(workdir):
             d for d in dirnames
             if os.path.join(dirpath, d) not in hard_skips
             and not os.path.islink(os.path.join(dirpath, d))
+            and not is_cloud_path(os.path.join(dirpath, d))
         ]
 
         for name in filenames:
@@ -184,6 +236,37 @@ def submit_sample(filepath):
             continue
 
 
+def collection_marker(server, port, tls, insecure, source, collector_version, marker_type, scan_id=None, stats=None):
+    """POST a begin/end collection marker to /api/collection.
+    Returns the scan_id from the response, or None if unsupported/failed."""
+    body = {
+        "type": marker_type,
+        "source": source,
+        "collector": "python3/{}".format(collector_version),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if scan_id:
+        body["scan_id"] = scan_id
+    if stats:
+        body["stats"] = stats
+
+    try:
+        if tls:
+            ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
+            conn = http.client.HTTPSConnection(server, port, context=ctx, timeout=10)
+        else:
+            conn = http.client.HTTPConnection(server, port, timeout=10)
+        payload = json.dumps(body).encode("utf-8")
+        conn.request("POST", "/api/collection", body=payload,
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        resp_body = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(resp_body)
+        return data.get("scan_id")
+    except Exception:
+        return None
+
+
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -239,25 +322,53 @@ if __name__ == "__main__":
     print("   Florian Roth, Nextron Systems GmbH, 2024")
     print()
     print("=" * 80)
+    # Extend hard_skips with mount points of network/special filesystems
+    for mp in get_excluded_mounts():
+        if mp not in hard_skips:
+            hard_skips.append(mp)
+
     print("Target Directory: {}".format(", ".join(args.dirs)))
     print("Thunderstorm Server: {}".format(args.server))
     print("Thunderstorm Port: {}".format(args.port))
     print("Using API Endpoint: {}".format(api_endpoint))
     print("Maximum Age of Files: {}".format(max_age))
     print("Maximum File Size: {} MB".format(max_size))
-    print("Excluded directories: {}".format(", ".join(hard_skips)))
+    print("Excluded directories: {}".format(", ".join(hard_skips[:10]) + (" ..." if len(hard_skips) > 10 else "")))
     print("Source Identifier: {}".format(args.source)) if args.source else None
     print()
 
     print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
 
+    # Send collection begin marker
+    scan_id = collection_marker(
+        args.server, args.port, args.tls, args.insecure,
+        args.source or socket.gethostname(), "0.1",
+        "begin"
+    )
+    if scan_id:
+        print("[INFO] Collection scan_id: {}".format(scan_id))
+        api_endpoint = "{}&scan_id={}".format(api_endpoint, quote(scan_id))
+
     # Walk directory
     for walkdir in args.dirs:
         process_dir(walkdir)
 
-    # End message
+    # Send collection end marker with stats
     end_date = time.time()
-    minutes = int((end_date - current_date) / 60)
+    elapsed = int(end_date - current_date)
+    minutes = elapsed // 60
+    collection_marker(
+        args.server, args.port, args.tls, args.insecure,
+        args.source or socket.gethostname(), "0.1",
+        "end",
+        scan_id=scan_id,
+        stats={
+            "scanned": num_processed,
+            "submitted": num_submitted,
+            "elapsed_seconds": elapsed,
+        }
+    )
+
     print(
         "Thunderstorm Collector Run finished (Checked: {} Submitted: {} Minutes: {})".format(
             num_processed, num_submitted, minutes

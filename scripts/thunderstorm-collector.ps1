@@ -82,10 +82,13 @@ param
         [Alias('MS')]
         [int]$MaxSize = 20,
 
-    [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')]
+    [Parameter(HelpMessage='Extensions to select for submission (default: recommended preset)')]
         [ValidateNotNullOrEmpty()]
         [Alias('E')]
         [string[]]$Extensions,
+
+    [Parameter(HelpMessage='Submit all file extensions (overrides -Extensions)')]
+        [switch]$AllExtensions = $False,
 
     [Parameter(HelpMessage='Use HTTPS instead of HTTP for Thunderstorm communication')]
         [Alias('SSL')]
@@ -134,8 +137,11 @@ if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
 }
 
 # Extensions
-# Apply recommended preset only when no -Extensions parameter was explicitly passed
-if (-not $PSBoundParameters.ContainsKey('Extensions')) {
+# -AllExtensions overrides any -Extensions value
+if ($AllExtensions) {
+    [string[]]$Extensions = @()
+} elseif (-not $PSBoundParameters.ContainsKey('Extensions')) {
+    # Apply recommended preset only when no -Extensions parameter was explicitly passed
     [string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
 }
 
@@ -250,27 +256,73 @@ if ( $UseSSL ) {
     }
     Write-Log "HTTPS mode enabled (TLS 1.2+)"
 }
-$Url = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
+$BaseUrl = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)"
+$Url = "$BaseUrl/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
+$ScanId = ""
+
+function Send-CollectionMarker {
+    param(
+        [string]$MarkerType,
+        [string]$ScanId = "",
+        [hashtable]$Stats = $null
+    )
+    $MarkerUrl = "$BaseUrl/api/collection"
+    $Body = @{
+        type      = $MarkerType
+        source    = $ThunderstormSource
+        collector = "powershell3/1.0"
+        timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    }
+    if ($ScanId) { $Body["scan_id"] = $ScanId }
+    if ($Stats)  { $Body["stats"]   = $Stats  }
+
+    try {
+        $JsonBody = $Body | ConvertTo-Json -Compress
+        $Response = Invoke-WebRequest -Uri $MarkerUrl -Method Post `
+            -ContentType "application/json" -Body $JsonBody `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        $ResponseData = $Response.Content | ConvertFrom-Json
+        return $ResponseData.scan_id
+    } catch {
+        # Silently ignore — server may not support this endpoint yet
+        return ""
+    }
+}
 
 # ---------------------------------------------------------------------
 # Run THOR Thunderstorm Collector -------------------------------------
 # ---------------------------------------------------------------------
 $ProgressPreference = "SilentlyContinue"
+$FilesScanned = 0
+$FilesSubmitted = 0
+$FilesSkipped = 0
+$FilesFailed = 0
+
+# Send collection begin marker
+$ScanId = Send-CollectionMarker -MarkerType "begin"
+if ($ScanId) {
+    Write-Log "Collection scan_id: $ScanId"
+    $Url = "$Url&scan_id=$([uri]::EscapeDataString($ScanId))"
+}
+
 try {
     Get-ChildItem -Path $Folder -File -Recurse -ErrorAction SilentlyContinue |
     ForEach-Object {
         # -------------------------------------------------------------
         # Filter ------------------------------------------------------
+        $FilesScanned++
         # Size Check
         if ( ( $_.Length / 1MB ) -gt $($MaxSize) ) {
             Write-Log "$_ skipped due to size filter" -Level "Debug"
+            $FilesSkipped++
             return
         }
         # Age Check
         if ( $($MaxAge) -gt 0 ) {
             if ( $_.LastWriteTime -lt (Get-Date).AddDays(-$($MaxAge)) ) {
                 Write-Log "$_ skipped due to age filter" -Level "Debug"
+                $FilesSkipped++
                 return
             }
         }
@@ -278,6 +330,7 @@ try {
         if ( $Extensions.Length -gt 0 ) {
             if ( $Extensions -contains $_.extension ) { } else {
                 Write-Log "$_ skipped due to extension filter" -Level "Debug"
+                $FilesSkipped++
                 return
             }
         }
@@ -320,6 +373,7 @@ try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
                 $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes -UseBasicParsing
                 $StatusCode = [int]$Response.StatusCode
+                $FilesSubmitted++
             }
             # Catch all non 200 status codes
             catch {
@@ -327,6 +381,7 @@ try {
                 if ( $StatusCode -eq 503 ) {
                     $Retries503 = $Retries503 + 1
                     if ( $Retries503 -ge $Max503Retries ) {
+                        $FilesFailed++
                         Write-Log "503: Server still busy after $Max503Retries retries - giving up on $($_.FullName)" -Level "Warning"
                         break
                     }
@@ -359,3 +414,13 @@ try {
 $ElapsedTime = $(get-date) - $StartTime
 $TotalTime = "{0:HH:mm:ss}" -f ([datetime]$elapsedTime.Ticks)
 Write-Log "Scan took $($TotalTime) to complete" -Level "Information"
+Write-Log "Results: scanned=$FilesScanned submitted=$FilesSubmitted skipped=$FilesSkipped failed=$FilesFailed"
+
+# Send collection end marker with stats
+Send-CollectionMarker -MarkerType "end" -ScanId $ScanId -Stats @{
+    scanned          = $FilesScanned
+    submitted        = $FilesSubmitted
+    skipped          = $FilesSkipped
+    failed           = $FilesFailed
+    elapsed_seconds  = [int]$ElapsedTime.TotalSeconds
+} | Out-Null

@@ -78,11 +78,11 @@ The most feature-complete Linux/macOS collector. Supports both `curl` and `wget`
 
 | Environment | Bash | curl | wget | Result |
 |---|---|---|---|---|
-| Fedora 43 | 5.2 | ✅ | ✅ | ✅ 28/28 tests |
-| CentOS 7 | 4.2 | ✅ | ✅ | ✅ |
-| Debian 9 (Stretch) | 4.4 | ✅ | ✅ | ✅ |
-| Alpine 3.18 | 5.2 | ✅ | ✅ | ✅ |
-| Bash 3.2 (compiled, macOS-equivalent) | 3.2 | ✅ | ✅ | ✅ |
+| Fedora 43 | 5.2 | ✅ | ✅ | ✅ 28/28 tests, 10/10 files |
+| CentOS 7 | 4.2 | ✅ | ✅ | ✅ 10/10 files |
+| Debian 9 (Stretch) | 4.4 | ✅ | ✅ | ✅ 10/10 files |
+| Alpine 3.18 | 5.2 | ✅ | ✅ | ✅ 10/10 files |
+| Bash 3.2 (compiled, macOS-equivalent) | 3.2 | ✅ | ✅ | ✅ 10/10 files |
 
 **Usage:**
 ```bash
@@ -120,9 +120,9 @@ A POSIX-compliant rewrite that runs on any Bourne-compatible shell. Designed for
 | Environment | Shell | curl | nc | wget | Result |
 |---|---|---|---|---|---|
 | BusyBox 1.36 | ash | — | ✅ | ⚠️ truncates | ✅ 10/10 files (via nc) |
-| Alpine 3.18 | ash | ✅ | ✅ | ✅ | ✅ |
-| Fedora 43 | dash | ✅ | ✅ | ✅ | ✅ |
-| Debian 9 (Stretch) | dash | ✅ | ✅ | ✅ | ✅ |
+| Alpine 3.18 | ash | ✅ | ✅ | ✅ | ✅ 10/10 files |
+| Fedora 43 | dash | ✅ | ✅ | ✅ | ✅ 10/10 files |
+| Debian 9 (Stretch) | dash | ✅ | ✅ | ✅ | ✅ 10/10 files |
 
 **Usage:**
 ```sh
@@ -159,10 +159,10 @@ Cross-platform collector using only the Python 3 standard library. No external p
 
 | Environment | Python | Result |
 |---|---|---|
-| Fedora 43 | 3.14 | ✅ |
-| Alpine 3.18 | 3.11 | ✅ |
-| CentOS 7 | 3.6 | ✅ |
-| Debian 9 (Stretch) | 3.5 | ✅ (after f-string removal) |
+| Fedora 43 | 3.14 | ✅ 10/10 files |
+| Alpine 3.18 | 3.11 | ✅ 10/10 files |
+| CentOS 7 | 3.6 | ✅ 10/10 files |
+| Debian 9 (Stretch) | 3.5 | ✅ 10/10 files (requires .format(), f-strings removed) |
 
 **Usage:**
 ```bash
@@ -233,10 +233,10 @@ python thunderstorm-collector-py2.py -s thunderstorm.local -p 443 -t -k
 
 | Environment | Perl | LWP | Result |
 |---|---|---|---|
-| Fedora 43 | 5.40 | ✅ | ✅ |
-| CentOS 7 | 5.16 | ✅ | ✅ |
-| Debian 9 (Stretch) | 5.24 | ✅ | ✅ |
-| Alpine 3.18 | 5.36 | ✅ | ✅ |
+| Fedora 43 | 5.40 | ✅ | ✅ 10/10 files |
+| CentOS 7 | 5.16 | ✅ | ✅ 10/10 files |
+| Debian 9 (Stretch) | 5.24 | ✅ | ✅ 10/10 files |
+| Alpine 3.18 | 5.36 | ✅ | ✅ 10/10 files |
 
 **Usage:**
 ```bash

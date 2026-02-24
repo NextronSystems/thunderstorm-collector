@@ -44,6 +44,57 @@ SCRIPT_NAME="${0##*/}"
 START_TS="$(date +%s 2>/dev/null || echo 0)"
 SOURCE_NAME=""
 
+# Filesystem exclusions -------------------------------------------------------
+# Pseudo-filesystems, virtual mounts, network shares, and cloud storage that
+# should never be walked. Pruned at the find level for efficiency.
+
+# Hardcoded paths — always excluded
+EXCLUDE_PATHS=(
+    /proc /sys /dev /run
+    /sys/kernel/debug /sys/kernel/slab /sys/kernel/tracing /sys/devices
+    /snap /.snapshots
+)
+
+# Network and special filesystem types — mount points with these types are
+# discovered from /proc/mounts and excluded automatically.
+NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs"
+SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts tmpfs cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue overlay autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs"
+
+# Cloud storage folder names — if any path segment matches (case-insensitive),
+# the directory is pruned. Covers OneDrive, Dropbox, Google Drive, iCloud,
+# Nextcloud, ownCloud, MEGA, Tresorit, Syncthing.
+CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive Google Drive iCloud Drive iCloudDrive Nextcloud ownCloud MEGA MEGAsync Tresorit SyncThing"
+
+# get_excluded_mounts: parse /proc/mounts and return mount points for
+# network and special filesystem types (one per line).
+get_excluded_mounts() {
+    [ -r /proc/mounts ] || return 0
+    while IFS=' ' read -r _dev _mp _fstype _rest; do
+        case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
+            *" $_fstype "*) printf '%s\n' "$_mp" ;;
+        esac
+    done < /proc/mounts
+}
+
+# is_cloud_path: check if a path contains a known cloud storage folder name.
+# Returns 0 (true) if it matches, 1 (false) otherwise.
+is_cloud_path() {
+    local path_lower
+    path_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    local name name_lower
+    for name in $CLOUD_DIR_NAMES; do
+        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+        case "$path_lower" in
+            *"/$name_lower"/*|*"/$name_lower") return 0 ;;
+        esac
+    done
+    # macOS: ~/Library/CloudStorage
+    case "$path_lower" in
+        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+    esac
+    return 1
+}
+
 # Helpers ---------------------------------------------------------------------
 
 timestamp() {
@@ -327,6 +378,51 @@ upload_with_wget() {
     return 0
 }
 
+# collection_marker -- POST a begin/end marker to /api/collection
+# Args: $1=base_url  $2=type(begin|end)  $3=scan_id(optional)  $4=stats_json(optional)
+# Returns: scan_id extracted from response (empty if unsupported or failed)
+collection_marker() {
+    local base_url="$1"
+    local marker_type="$2"
+    local scan_id="${3:-}"
+    local stats_json="${4:-}"
+    local marker_url="${base_url%/api/*}/api/collection"
+    local body scan_id_out resp_file
+
+    resp_file="$(mktemp_portable)" || return 1
+
+    # Build JSON body
+    body="{\"type\":\"${marker_type}\""
+    body="${body},\"source\":\"${SOURCE_NAME}\""
+    body="${body},\"collector\":\"bash/${VERSION}\""
+    body="${body},\"timestamp\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u)\""
+    [ -n "$scan_id"    ] && body="${body},\"scan_id\":\"${scan_id}\""
+    [ -n "$stats_json" ] && body="${body},${stats_json}"
+    body="${body}}"
+
+    # Attempt POST — silent failure is intentional (server may not support this yet)
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -o "$resp_file" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            --max-time 10 \
+            "$marker_url" 2>/dev/null || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$resp_file" \
+            --header "Content-Type: application/json" \
+            --post-data "$body" \
+            --timeout=10 \
+            "$marker_url" 2>/dev/null || true
+    fi
+
+    # Extract scan_id from response: {"scan_id":"<value>"}
+    scan_id_out="$(grep -o '"scan_id":"[^"]*"' "$resp_file" 2>/dev/null \
+        | head -1 | sed 's/"scan_id":"//;s/"//')"
+
+    rm -f "$resp_file"
+    printf '%s' "$scan_id_out"
+}
+
 submit_file() {
     local endpoint="$1"
     local filepath="$2"
@@ -483,6 +579,8 @@ main() {
     local endpoint_name="check"
     local query_source=""
     local api_endpoint=""
+    local base_url=""
+    local SCAN_ID=""
     local scandir
     local file_path
     local size_kb
@@ -508,7 +606,8 @@ main() {
     fi
 
     query_source="$(build_query_source "$SOURCE_NAME")"
-    api_endpoint="${scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}/api/${endpoint_name}${query_source}"
+    base_url="${scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
+    api_endpoint="${base_url}/api/${endpoint_name}${query_source}"
 
     if [ "$DRY_RUN" -eq 0 ]; then
         if ! detect_upload_tool; then
@@ -532,6 +631,15 @@ main() {
     log_msg info "Folders: ${SCAN_FOLDERS[*]}"
     [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
 
+    # Send collection begin marker; capture scan_id if server returns one
+    if [ "$DRY_RUN" -eq 0 ]; then
+        SCAN_ID="$(collection_marker "$base_url" "begin" "" "")"
+        if [ -n "$SCAN_ID" ]; then
+            log_msg info "Collection scan_id: $SCAN_ID"
+            api_endpoint="${api_endpoint}&scan_id=$(urlencode "$SCAN_ID")"
+        fi
+    fi
+
     for scandir in "${SCAN_FOLDERS[@]}"; do
         if [ ! -d "$scandir" ]; then
             log_msg warn "Skipping non-directory path '$scandir'"
@@ -544,12 +652,28 @@ main() {
             continue
         }
         TMP_FILES="${TMP_FILES} ${find_results_file}"
-        find "$scandir" -type f -mtime "$find_mtime" -print0 > "$find_results_file" 2>/dev/null || true
+        # Build find exclusions: hardcoded paths + mount points of special/network FS
+        local find_excludes=()
+        local _ep
+        for _ep in "${EXCLUDE_PATHS[@]}"; do
+            [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
+        done
+        while IFS= read -r _ep; do
+            [ -n "$_ep" ] && [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
+        done <<< "$(get_excluded_mounts)"
+        find "$scandir" "${find_excludes[@]}" -type f -mtime "$find_mtime" -print0 > "$find_results_file" 2>/dev/null || true
 
         while IFS= read -r -d '' file_path; do
             FILES_SCANNED=$((FILES_SCANNED + 1))
 
             [ -f "$file_path" ] || continue
+
+            # Skip files inside cloud storage folders
+            if is_cloud_path "$file_path"; then
+                FILES_SKIPPED=$((FILES_SKIPPED + 1))
+                log_msg debug "Skipping cloud storage path '$file_path'"
+                continue
+            fi
 
             size_kb="$(file_size_kb "$file_path")"
             if [ "$size_kb" -lt 0 ]; then
@@ -580,6 +704,13 @@ main() {
     fi
 
     log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$elapsed"
+
+    # Send collection end marker with run statistics
+    if [ "$DRY_RUN" -eq 0 ]; then
+        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${elapsed}}"
+        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null
+    fi
+
     return 0
 }
 

@@ -78,6 +78,9 @@ param(
         [Alias('E')]
         [string[]]$Extensions,
 
+    [Parameter(HelpMessage='Submit all file extensions (overrides -Extensions)')]
+        [switch]$AllExtensions = $False,
+
     [Parameter(HelpMessage='Use HTTPS instead of HTTP')]
         [Alias('SSL')]
         [switch]$UseSSL,
@@ -108,8 +111,12 @@ if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
     [int]$MaxSize = 20
 }
 
-# Extensions - apply recommended preset only when not explicitly passed
-if (-not $PSBoundParameters.ContainsKey('Extensions')) {
+# Extensions
+# -AllExtensions overrides any -Extensions value
+if ($AllExtensions) {
+    [string[]]$Extensions = @()
+} elseif (-not $PSBoundParameters.ContainsKey('Extensions')) {
+    # Apply recommended preset only when not explicitly passed
     [string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
 }
 
@@ -293,8 +300,49 @@ if ( $Source -ne "" ) {
     $EncodedSource = [uri]::EscapeDataString($Source)
     $SourceParam = "?source=$EncodedSource"
 }
-$Url = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
+$BaseUrl = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)"
+$Url = "$BaseUrl/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
+$ScanId = ""
+
+function Send-CollectionMarker {
+    param(
+        [string]$MarkerType,
+        [string]$ScanId = "",
+        [hashtable]$Stats = $null
+    )
+    $MarkerUrl = "$BaseUrl/api/collection"
+    $SourceVal = if ($ThunderstormSource) { $ThunderstormSource } else { $env:COMPUTERNAME }
+    $Body = @{
+        type      = $MarkerType
+        source    = $SourceVal
+        collector = "powershell2/1.0"
+        timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    }
+    if ($ScanId) { $Body["scan_id"] = $ScanId }
+    if ($Stats)  { $Body["stats"]   = $Stats  }
+
+    try {
+        $JsonBody = $Body | ConvertTo-Json -Compress
+        $JsonBytes = [System.Text.Encoding]::UTF8.GetBytes($JsonBody)
+        $Req = [System.Net.HttpWebRequest]::Create($MarkerUrl)
+        $Req.Method = "POST"
+        $Req.ContentType = "application/json"
+        $Req.ContentLength = $JsonBytes.Length
+        $Req.Timeout = 10000
+        $Stream = $Req.GetRequestStream()
+        $Stream.Write($JsonBytes, 0, $JsonBytes.Length)
+        $Stream.Close()
+        $Resp = $Req.GetResponse()
+        $Reader = New-Object System.IO.StreamReader($Resp.GetResponseStream())
+        $RespBody = $Reader.ReadToEnd()
+        $Reader.Close()
+        $RespObj = $RespBody | ConvertFrom-Json
+        return $RespObj.scan_id
+    } catch {
+        return ""
+    }
+}
 
 # ---------------------------------------------------------------------
 # Run THOR Thunderstorm Collector -------------------------------------
@@ -302,6 +350,15 @@ Write-Log "Sending to URI: $($Url)" -Level "Debug"
 
 $SubmittedCount = 0
 $ErrorCount = 0
+$ScannedCount = 0
+$SkippedCount = 0
+
+# Send collection begin marker
+$ScanId = Send-CollectionMarker -MarkerType "begin"
+if ($ScanId) {
+    Write-Log "Collection scan_id: $ScanId"
+    $Url = "$Url&scan_id=$([uri]::EscapeDataString($ScanId))"
+}
 
 # PS 2 compatible file enumeration (Get-ChildItem -File not available in PS 2)
 $files = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }
@@ -310,9 +367,11 @@ foreach ( $file in $files ) {
     # -----------------------------------------------------------------
     # Filter ----------------------------------------------------------
 
+    $ScannedCount++
     # Size Check
     if ( ( $file.Length / 1MB ) -gt $MaxSize ) {
         Write-Log "$($file.Name) skipped due to size filter" -Level "Debug"
+        $SkippedCount++
         continue
     }
 
@@ -320,6 +379,7 @@ foreach ( $file in $files ) {
     if ( $MaxAge -gt 0 ) {
         if ( $file.LastWriteTime -lt (Get-Date).AddDays(-$MaxAge) ) {
             Write-Log "$($file.Name) skipped due to age filter" -Level "Debug"
+            $SkippedCount++
             continue
         }
     }
@@ -332,6 +392,7 @@ foreach ( $file in $files ) {
         }
         if ( -not $match ) {
             Write-Log "$($file.Name) skipped due to extension filter" -Level "Debug"
+            $SkippedCount++
             continue
         }
     }
@@ -412,3 +473,13 @@ foreach ( $file in $files ) {
 $ElapsedTime = (Get-Date) - $StartTime
 $TotalTime = "{0:HH:mm:ss}" -f ([datetime]$ElapsedTime.Ticks)
 Write-Log "Submitted $SubmittedCount files ($ErrorCount errors) in $TotalTime" -Level "Info"
+Write-Log "Results: scanned=$ScannedCount submitted=$SubmittedCount skipped=$SkippedCount failed=$ErrorCount"
+
+# Send collection end marker with stats
+Send-CollectionMarker -MarkerType "end" -ScanId $ScanId -Stats @{
+    scanned         = $ScannedCount
+    submitted       = $SubmittedCount
+    skipped         = $SkippedCount
+    failed          = $ErrorCount
+    elapsed_seconds = [int]$ElapsedTime.TotalSeconds
+} | Out-Null

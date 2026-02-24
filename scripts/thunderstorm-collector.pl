@@ -1,4 +1,4 @@
-#!/usr/bin/perl -s 
+#!/usr/bin/perl -s
 #
 # THOR Thunderstorm Collector
 # Florian Roth
@@ -7,7 +7,7 @@
 #
 # Requires LWP::UserAgent
 #   - on Linux: apt-get install libwww-perl
-#   - other: perl -MCPAN -e 'install Bundle::LWP' 
+#   - other: perl -MCPAN -e 'install Bundle::LWP'
 #
 # Usage examples:
 #   $> perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
@@ -20,8 +20,9 @@ use Getopt::Long;
 use LWP::UserAgent;
 use File::Spec::Functions qw( catfile );
 use Sys::Hostname;
+use POSIX qw(strftime);
 
-use Cwd; # module for finding the current working directory 
+use Cwd; # module for finding the current working directory
 
 # Configuration
 our $debug = 0;
@@ -33,7 +34,45 @@ my $source = "";
 our $max_age = 3;       # in days
 our $max_size = 10;     # in megabytes
 our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
-our @hardSkips = ('/proc', '/dev', '/sys');
+our @hardSkips = ('/proc', '/dev', '/sys', '/run', '/snap', '/.snapshots');
+
+# Network and special filesystem types (mount points with these types are excluded)
+our %networkFsTypes = map { $_ => 1 } qw(nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs);
+our %specialFsTypes = map { $_ => 1 } qw(proc procfs sysfs devtmpfs devpts tmpfs cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue overlay autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs);
+
+# Cloud storage folder names (lowercase)
+our %cloudDirNames = map { $_ => 1 } ('onedrive', 'dropbox', '.dropbox', 'googledrive', 'google drive',
+    'icloud drive', 'iclouddrive', 'nextcloud', 'owncloud', 'mega', 'megasync', 'tresorit', 'syncthing');
+
+sub get_excluded_mounts {
+    my @excluded;
+    if (open(my $fh, '<', '/proc/mounts')) {
+        while (my $line = <$fh>) {
+            my @parts = split(/\s+/, $line);
+            if (scalar @parts >= 3) {
+                my ($mount_point, $fs_type) = ($parts[1], $parts[2]);
+                if ($networkFsTypes{$fs_type} || $specialFsTypes{$fs_type}) {
+                    push @excluded, $mount_point;
+                }
+            }
+        }
+        close($fh);
+    }
+    return @excluded;
+}
+
+sub is_cloud_path {
+    my ($path) = @_;
+    my $lower = lc($path);
+    $lower =~ s/\\/\//g;
+    my @segments = split(/\//, $lower);
+    for my $seg (@segments) {
+        return 1 if $cloudDirNames{$seg};
+        return 1 if ($seg =~ /^onedrive[\s-]/ || $seg =~ /^nextcloud-/);
+    }
+    return 1 if ($lower =~ /\/library\/cloudstorage/);
+    return 0;
+}
 
 # Command Line Parameters
 GetOptions(
@@ -62,8 +101,10 @@ if ( $source ne "" ) {
 }
 
 # Composed Values
-our $api_endpoint = "$scheme://$server:$port/api/checkAsync$source";
+our $base_url = "$scheme://$server:$port";
+our $api_endpoint = "$base_url/api/checkAsync$source";
 our $current_date = time;
+our $SCAN_ID = "";
 
 # Stats
 our $num_submitted = 0;
@@ -72,40 +113,80 @@ our $num_processed = 0;
 # Objects
 our $ua;
 
+# Send a begin/end collection marker to /api/collection
+# Returns scan_id from response, or "" if unsupported/failed
+sub collection_marker {
+    my ($marker_type, $scan_id, $stats_ref) = @_;
+    my $marker_url = "$base_url/api/collection";
+
+    my $timestamp = POSIX::strftime("%Y-%m-%dT%H:%M:%SZ", gmtime());
+    my $src_escaped = $source;
+    $src_escaped =~ s/[\\"]/\\$&/g;
+
+    my $body = "{\"type\":\"$marker_type\",\"source\":\"$src_escaped\",\"collector\":\"perl/0.2\",\"timestamp\":\"$timestamp\"";
+    $body .= ",\"scan_id\":\"$scan_id\"" if $scan_id;
+    if ($stats_ref) {
+        $body .= ",\"stats\":{";
+        my @pairs;
+        for my $k (keys %$stats_ref) { push @pairs, "\"$k\":$stats_ref->{$k}"; }
+        $body .= join(",", @pairs) . "}";
+    }
+    $body .= "}";
+
+    my $resp = eval {
+        $ua->post($marker_url,
+            "Content-Type" => "application/json",
+            Content => $body,
+        );
+    };
+    return "" unless $resp && $resp->is_success;
+
+    my $resp_body = $resp->content;
+    my $returned_id = "";
+    if ($resp_body =~ /"scan_id"\s*:\s*"([^"]+)"/) {
+        $returned_id = $1;
+    }
+    return $returned_id;
+}
+
 # Process Folders
-sub processDir { 
-    my ($workdir) = shift; 
-    my ($startdir) = &cwd; 
-    # keep track of where we began 
-    chdir($workdir) or do { print "[ERROR] Unable to enter dir $workdir:$!\n"; return; }; 
-    opendir(DIR, ".") or do { print "[ERROR] Unable to open $workdir:$!\n"; return; }; 
-    
+sub processDir {
+    my ($workdir) = shift;
+    my ($startdir) = &cwd;
+    # keep track of where we began
+    chdir($workdir) or do { print "[ERROR] Unable to enter dir $workdir:$!\n"; return; };
+    opendir(DIR, ".") or do { print "[ERROR] Unable to open $workdir:$!\n"; return; };
+
     my @names = readdir(DIR) or do { print "[ERROR] Unable to read $workdir:$!\n"; return; };
-    closedir(DIR); 
-    
-    foreach my $name (@names){ 
-        next if ($name eq "."); 
-        next if ($name eq ".."); 
+    closedir(DIR);
+
+    foreach my $name (@names){
+        next if ($name eq ".");
+        next if ($name eq "..");
 
         #print("Workdir: $workdir Name: $name\n");
         my $filepath = catfile($workdir, $name);
         # Hard directory skips
         my $skipHard = 0;
-        foreach ( @hardSkips ) { 
-            $skipHard = 1 if ( $filepath eq $_ ); 
+        foreach ( @hardSkips ) {
+            $skipHard = 1 if ( $filepath eq $_ );
         }
         next if $skipHard;
-        
+
+        # Skip cloud storage paths
+        next if is_cloud_path($filepath);
+
         # Is a Directory
-        if (-d $filepath){ 
-            #print "IS DIR!\n";
+        if (-d $filepath){
             # Skip symbolic links
             if (-l $filepath) { next; }
             # Process Dir
-            &processDir($filepath); 
-            next; 
+            &processDir($filepath);
+            next;
         } else {
-            if ( $debug ) { print "[DEBUG] Checking $filepath ...\n"; }
+            # Skip symbolic links to files
+            if (-l $filepath) { next; }
+            if ( $debug ) { print "[DEBUG] Checking $filepath ...\n"; }
         }
 
         # Characteristics
@@ -120,11 +201,11 @@ sub processDir {
         # Skip Folders / elements
         my $skipRegex = 0;
         # Regex Checks
-        foreach ( @skipElements ) { 
+        foreach ( @skipElements ) {
             if ( $filepath =~ $_ ) {
                 if ( $debug ) { print "[DEBUG] Skipping file due to configured exclusion $filepath\n"; }
                 $skipRegex = 1;
-            } 
+            }
         }
         next if $skipRegex;
         # Size
@@ -137,14 +218,14 @@ sub processDir {
         if ( $mdate < ( $current_date - ($max_age * 86400) ) ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to age $filepath\n"; }
             next;
-        }       
-        
+        }
+
         # Submit
         &submitSample($filepath);
 
-        chdir($startdir) or die "Unable to change back to dir $startdir:$!\n"; 
-    } 
-} 
+        chdir($startdir) or die "Unable to change back to dir $startdir:$!\n";
+    }
+}
 
 sub submitSample {
     my ($filepath) = shift;
@@ -197,7 +278,7 @@ sub submitSample {
 }
 
 # MAIN ----------------------------------------------------------------
-# Default Values 
+# Default Values
 print "==============================================================\n";
 print "    ________                __            __                  \n";
 print "   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _    \n";
@@ -215,14 +296,37 @@ print "Maximum Age of Files: $max_age\n";
 print "Maximum File Size: $max_size\n";
 print "\n";
 
-# Instanciate an object 
+# Extend hardSkips with mount points of network/special filesystems
+{
+    my %seen = map { $_ => 1 } @hardSkips;
+    for my $mp (get_excluded_mounts()) {
+        push @hardSkips, $mp unless $seen{$mp}++;
+    }
+}
+
+# Instanciate an object
 $ua = LWP::UserAgent->new;
 
 print "Starting the walk at: $targetdir ...\n";
+
+# Send collection begin marker
+$SCAN_ID = collection_marker("begin", "", undef);
+if ($SCAN_ID) {
+    print "[INFO] Collection scan_id: $SCAN_ID\n";
+    $api_endpoint .= "&scan_id=" . urlencode($SCAN_ID);
+}
+
 # Start the walk
 &processDir($targetdir);
 
-# End message
+# Send collection end marker with stats
 my $end_date = time;
-my $minutes = int(( $end_date - $current_date ) / 60);
+my $elapsed = $end_date - $current_date;
+collection_marker("end", $SCAN_ID, {
+    scanned  => $num_processed,
+    submitted => $num_submitted,
+    elapsed_seconds => $elapsed,
+});
+
+my $minutes = int( $elapsed / 60 );
 print "Thunderstorm Collector Run finished (Checked: $num_processed Submitted: $num_submitted Minutes: $minutes)\n";
