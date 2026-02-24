@@ -415,9 +415,9 @@ collection_marker() {
             "$marker_url" 2>/dev/null || true
     fi
 
-    # Extract scan_id from response: {"scan_id":"<value>"}
-    scan_id_out="$(grep -o '"scan_id":"[^"]*"' "$resp_file" 2>/dev/null \
-        | head -1 | sed 's/"scan_id":"//;s/"//')"
+    # Extract scan_id from response: {"scan_id":"<value>"} or {"scan_id": "<value>"}
+    scan_id_out="$(grep -oE '"scan_id"\s*:\s*"[^"]*"' "$resp_file" 2>/dev/null \
+        | head -1 | sed 's/"scan_id"[[:space:]]*:[[:space:]]*"//;s/"//')"
 
     rm -f "$resp_file"
     printf '%s' "$scan_id_out"
