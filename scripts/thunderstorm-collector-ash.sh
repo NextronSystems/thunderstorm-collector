@@ -453,8 +453,8 @@ collection_marker() {
             "$_cm_url" 2>/dev/null || true
     fi
 
-    _cm_id="$(grep -o '"scan_id":"[^"]*"' "$_cm_resp" 2>/dev/null \
-        | head -1 | sed 's/"scan_id":"//;s/"//')"
+    _cm_id="$(grep -oE '"scan_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$_cm_resp" 2>/dev/null \
+        | head -1 | sed 's/"scan_id"[[:space:]]*:[[:space:]]*"//;s/"//')"
     rm -f "$_cm_resp"
     printf '%s' "$_cm_id"
 }
