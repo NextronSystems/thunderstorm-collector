@@ -50,9 +50,9 @@ hard_skips = [
 
 NETWORK_FS_TYPES = set(["nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs",
                         "afp", "webdav", "davfs2", "fuse.rclone", "fuse.s3fs"])
-SPECIAL_FS_TYPES = set(["proc", "procfs", "sysfs", "devtmpfs", "devpts", "tmpfs",
+SPECIAL_FS_TYPES = set(["proc", "procfs", "sysfs", "devtmpfs", "devpts",
                         "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
-                        "securityfs", "hugetlbfs", "mqueue", "overlay", "autofs",
+                        "securityfs", "hugetlbfs", "mqueue", "autofs",
                         "fusectl", "rpc_pipefs", "nsfs", "configfs", "binfmt_misc",
                         "selinuxfs", "efivarfs", "ramfs"])
 CLOUD_DIR_NAMES = set(["onedrive", "dropbox", ".dropbox", "googledrive", "google drive",
