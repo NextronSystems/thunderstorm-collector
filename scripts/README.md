@@ -29,7 +29,13 @@ All collectors are tested against a comprehensive matrix of operating systems an
 | FreeBSD 14.3 | ✅ | ✅ | ✅ | ✅ |
 | OpenBSD 7.8 | ✅ | ✅ | — | ✅ |
 
-**Total: 43 tests, 43 passing** (tested 2025-02-25)
+### ARM / Embedded
+
+| Device | OS | Bash | sh | Python3 | Perl |
+|--------|-----|------|-----|---------|------|
+| Raspberry Pi 5 (aarch64) | Debian 13 (trixie) | ✅ | ✅ | ✅ | ✅ |
+
+**Total: 47 tests, 47 passing** (tested 2025-02-25)
 
 ---
 
