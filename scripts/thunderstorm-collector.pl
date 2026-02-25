@@ -1,4 +1,4 @@
-#!/usr/bin/perl -s
+#!/usr/bin/perl
 #
 # THOR Thunderstorm Collector
 # Florian Roth
@@ -10,9 +10,9 @@
 #   - other: perl -MCPAN -e 'install Bundle::LWP'
 #
 # Usage examples:
-#   $> perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
-#   $> perl thunderstorm-collector.pl -- --dir / --server thunderstorm.internal.net
-#   $> perl thunderstorm-collector.pl -- --dir / --server thunderstorm.internal.net --so "My Source"
+#   $> perl thunderstorm-collector.pl -s thunderstorm.internal.net
+#   $> perl thunderstorm-collector.pl --dir / --server thunderstorm.internal.net
+#   $> perl thunderstorm-collector.pl --dir / --server thunderstorm.internal.net --source "My Source"
 
 use warnings;
 use strict;
@@ -31,8 +31,14 @@ my $server = "";
 my $port = 8080;
 my $scheme = "http";
 my $source = "";
-our $max_age = 3;       # in days
-our $max_size = 10;     # in megabytes
+my $ssl = 0;
+my $insecure = 0;
+my $sync_mode = 0;
+my $dry_run = 0;
+my $retries_opt = 3;
+our $max_age = 14;      # in days (harmonized with bash/ash)
+our $max_size_kb = 2048; # in KB (harmonized with bash/ash)
+our $max_size = int($max_size_kb / 1024) || 1; # compat: MB for internal checks
 our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
 our @hardSkips = ('/proc', '/dev', '/sys', '/run', '/snap', '/.snapshots');
 
@@ -76,12 +82,21 @@ sub is_cloud_path {
 
 # Command Line Parameters
 GetOptions(
-    "dir|d=s"      => \$targetdir,  # --dir or -d
-    "server|s=s"   => \$server,     # --server or -s
-    "port|p=i"     => \$port,       # --port or -p
-    "source|so=s"  => \$source,     # --source or -so
-    "debug"        => \$debug       # --debug
+    "dir|d=s"        => \$targetdir,    # --dir or -d
+    "server|s=s"     => \$server,       # --server or -s
+    "port|p=i"       => \$port,         # --port or -p
+    "source=s"       => \$source,       # --source (no short option to avoid conflict)
+    "ssl"            => \$ssl,          # --ssl (use HTTPS)
+    "insecure|k"     => \$insecure,     # --insecure or -k (skip TLS verify)
+    "sync"           => \$sync_mode,    # --sync (use /api/check)
+    "dry-run"        => \$dry_run,      # --dry-run
+    "retries=i"      => \$retries_opt,  # --retries N
+    "max-age=i"      => \$max_age,      # --max-age N (days)
+    "max-size-kb=i"  => \$max_size_kb,  # --max-size-kb N
+    "debug"          => \$debug         # --debug
 );
+$max_size = int($max_size_kb / 1024) || 1;
+$scheme = "https" if $ssl;
 
 # Use Hostname as Source if not set
 if ( $source eq "" ) {
@@ -102,7 +117,8 @@ if ( $source ne "" ) {
 
 # Composed Values
 our $base_url = "$scheme://$server:$port";
-our $api_endpoint = "$base_url/api/checkAsync$source";
+my $api_path = $sync_mode ? "/api/check" : "/api/checkAsync";
+our $api_endpoint = "$base_url$api_path$source";
 our $current_date = time;
 our $SCAN_ID = "";
 
@@ -209,7 +225,7 @@ sub processDir {
         }
         next if $skipRegex;
         # Size
-        if ( ( $size / 1024 / 1024 ) > $max_size ) {
+        if ( ( $size / 1024 ) > $max_size_kb ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to file size $filepath\n"; }
             next;
         }
@@ -229,9 +245,14 @@ sub processDir {
 
 sub submitSample {
     my ($filepath) = shift;
+    if ($dry_run) {
+        print "[DRY-RUN] Would submit $filepath ...\n";
+        $num_submitted++;
+        return;
+    }
     print "[SUBMIT] Submitting $filepath ...\n";
     my $retry = 0;
-    for ($retry = 0; $retry < 4; $retry++) {
+    for ($retry = 0; $retry < $retries_opt; $retry++) {
         if ($retry > 0) {
             my $sleep_time = 2 << $retry;
             print "[SUBMIT] Waiting $sleep_time seconds to retry submitting $filepath ...\n";
@@ -292,8 +313,8 @@ print "Target Directory: '$targetdir'\n";
 print "Thunderstorm Server: '$server'\n";
 print "Thunderstorm Port: '$port'\n";
 print "Using API Endpoint: $api_endpoint\n";
-print "Maximum Age of Files: $max_age\n";
-print "Maximum File Size: $max_size\n";
+print "Maximum Age of Files: $max_age days\n";
+print "Maximum File Size: $max_size_kb KB\n";
 print "\n";
 
 # Extend hardSkips with mount points of network/special filesystems
@@ -304,8 +325,11 @@ print "\n";
     }
 }
 
-# Instanciate an object
+# Instantiate an object
 $ua = LWP::UserAgent->new;
+if ($ssl && $insecure) {
+    $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0x00);
+}
 
 print "Starting the walk at: $targetdir ...\n";
 
