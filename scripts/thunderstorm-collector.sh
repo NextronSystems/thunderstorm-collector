@@ -21,6 +21,7 @@ SYSLOG_FACILITY="user"
 THUNDERSTORM_SERVER="ygdrasil.nextron"
 THUNDERSTORM_PORT=8080
 USE_SSL=0
+INSECURE=0
 ASYNC_MODE=1
 
 MAX_AGE=14
@@ -183,6 +184,7 @@ Options:
   --max-size-kb <kb>         Max file size in KB (default: 2000)
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
+  -k, --insecure             Skip TLS certificate verification
   --sync                     Use /api/check (default: /api/checkAsync)
   --retries <num>            Retry attempts per file (default: 3)
   --dry-run                  Do not upload, only show what would be submitted
@@ -313,7 +315,7 @@ upload_with_curl() {
     resp_file="$(mktemp_portable)" || return 91
     TMP_FILES="${TMP_FILES} ${resp_file}"
 
-    curl -sS --fail --show-error -X POST \
+    curl -sS --fail --show-error -X POST $curl_insecure \
         "$endpoint" \
         --form "file=@\"${curl_filepath}\";filename=\"${safe_filename}\"" \
         > "$resp_file" 2>&1
@@ -402,7 +404,7 @@ collection_marker() {
 
     # Attempt POST — silent failure is intentional (server may not support this yet)
     if command -v curl >/dev/null 2>&1; then
-        curl -s -o "$resp_file" \
+        curl -s -o "$resp_file" $curl_insecure \
             -H "Content-Type: application/json" \
             -d "$body" \
             --max-time 10 \
@@ -511,6 +513,9 @@ parse_args() {
             --ssl)
                 USE_SSL=1
                 ;;
+            -k|--insecure)
+                INSECURE=1
+                ;;
             --sync)
                 ASYNC_MODE=0
                 ;;
@@ -600,6 +605,10 @@ main() {
 
     if [ "$USE_SSL" -eq 1 ]; then
         scheme="https"
+    fi
+    local curl_insecure=""
+    if [ "$INSECURE" -eq 1 ]; then
+        curl_insecure="-k"
     fi
     if [ "$ASYNC_MODE" -eq 1 ]; then
         endpoint_name="checkAsync"

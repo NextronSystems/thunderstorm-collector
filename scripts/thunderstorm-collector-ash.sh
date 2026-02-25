@@ -28,6 +28,7 @@ SYSLOG_FACILITY="user"
 THUNDERSTORM_SERVER="ygdrasil.nextron"
 THUNDERSTORM_PORT=8080
 USE_SSL=0
+INSECURE=0
 ASYNC_MODE=1
 
 MAX_AGE=14
@@ -172,6 +173,7 @@ Options:
   --max-size-kb <kb>         Max file size in KB (default: 2000)
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
+  -k, --insecure             Skip TLS certificate verification
   --sync                     Use /api/check (default: /api/checkAsync)
   --retries <num>            Retry attempts per file (default: 3)
   --dry-run                  Do not upload, only show what would be submitted
@@ -304,7 +306,7 @@ upload_with_curl() {
     # Escape double-quotes in filepath for curl's --form
     _uc_escaped="$(printf '%s' "$_uc_filepath" | sed 's/"/\\"/g')"
 
-    curl -sS --fail --show-error -X POST \
+    curl -sS --fail --show-error -X POST $CURL_INSECURE \
         "$_uc_endpoint" \
         --form "file=@\"${_uc_escaped}\";filename=\"${_uc_safe_name}\"" \
         > "$_uc_resp" 2>&1
@@ -440,7 +442,7 @@ collection_marker() {
 
     : > "$_cm_resp" 2>/dev/null || true
     if command -v curl >/dev/null 2>&1; then
-        curl -s -o "$_cm_resp" \
+        curl -s -o "$_cm_resp" $CURL_INSECURE \
             -H "Content-Type: application/json" \
             -d "$_cm_body" \
             --max-time 10 \
@@ -546,6 +548,9 @@ parse_args() {
             --ssl)
                 USE_SSL=1
                 ;;
+            -k|--insecure)
+                INSECURE=1
+                ;;
             --sync)
                 ASYNC_MODE=0
                 ;;
@@ -630,6 +635,8 @@ main() {
     fi
 
     [ "$USE_SSL"    -eq 1 ] && _scheme="https"
+    CURL_INSECURE=""
+    [ "$INSECURE"   -eq 1 ] && CURL_INSECURE="-k"
     [ "$ASYNC_MODE" -eq 1 ] && _endpoint_name="checkAsync"
 
     _query_source="$(build_query_source "$SOURCE_NAME")"
