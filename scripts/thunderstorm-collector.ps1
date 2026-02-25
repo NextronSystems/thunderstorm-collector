@@ -80,12 +80,19 @@ param
         HelpMessage='Select only files smaller than the given number in MegaBytes (default: 20MB) ')]
         [ValidateNotNullOrEmpty()]
         [Alias('MS')]
-        [int]$MaxSize,
+        [int]$MaxSize = 20,
 
-    [Parameter(HelpMessage='Extensions to select for submission (default: all of them)')]
+    [Parameter(HelpMessage='Extensions to select for submission (default: recommended preset)')]
         [ValidateNotNullOrEmpty()]
         [Alias('E')]
         [string[]]$Extensions,
+
+    [Parameter(HelpMessage='Submit all file extensions (overrides -Extensions)')]
+        [switch]$AllExtensions = $False,
+
+    [Parameter(HelpMessage='Use HTTPS instead of HTTP for Thunderstorm communication')]
+        [Alias('SSL')]
+        [switch]$UseSSL = $False,
 
     [Parameter(HelpMessage='Enables debug output and skips cleanup at the end of the scan')]
         [ValidateNotNullOrEmpty()]
@@ -124,16 +131,26 @@ if ( $OutputPath -eq "" -or $OutputPath.Contains("Advanced Threat Protection") )
 #[int]$MaxAge = 99
 
 # Maximum Size
-[int]$MaxSize = 20
+# Apply default only when no -MaxSize parameter was explicitly passed
+if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
+    [int]$MaxSize = 20
+}
 
 # Extensions
-# Recommended Preset
-[string[]]$Extensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
-# Collect Every Extension
-#[string[]]$Extensions = @()
+# -AllExtensions overrides any -Extensions value
+# Note: PS 2.0 permanently binds parameter validation to $Extensions,
+# so we use a separate $ActiveExtensions variable for the working copy.
+if ($AllExtensions) {
+    [string[]]$ActiveExtensions = @()
+} elseif ($PSBoundParameters.ContainsKey('Extensions')) {
+    [string[]]$ActiveExtensions = $Extensions
+} else {
+    # Apply recommended preset only when no -Extensions parameter was explicitly passed
+    [string[]]$ActiveExtensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
+}
 
 # Debug
-$Debug = $False
+$Debug = $Debugging
 
 # Show Help -----------------------------------------------------------
 # No Thunderstorm server 
@@ -225,38 +242,99 @@ if ( $AutoDetectPlatform -ne "" ) {
 }
 
 # URL Creation
+$SourceParam = ""
 if ( $Source -ne "" ) {
     Write-Log "Using Source: $($Source)"
-    $SourceParam = "?Source=$Source"
+    $EncodedSource = [uri]::EscapeDataString($Source)
+    $SourceParam = "?source=$EncodedSource"
 }
-$Url = "http://$($ThunderstormServer):$($ThunderstormPort)/api/checkAsync$($SourceParam)"
+$Protocol = "http"
+if ( $UseSSL ) {
+    $Protocol = "https"
+    # Enforce TLS 1.2+ (required on older .NET / PS versions that default to SSL3/TLS1.0)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    } catch {
+        # TLS 1.3 not available on older .NET; fall back to TLS 1.2 only
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    }
+    Write-Log "HTTPS mode enabled (TLS 1.2+)"
+}
+$BaseUrl = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)"
+$Url = "$BaseUrl/api/checkAsync$($SourceParam)"
 Write-Log "Sending to URI: $($Url)" -Level "Debug"
+$ScanId = ""
+
+function Send-CollectionMarker {
+    param(
+        [string]$MarkerType,
+        [string]$ScanId = "",
+        [hashtable]$Stats = $null
+    )
+    $MarkerUrl = "$BaseUrl/api/collection"
+    $Body = @{
+        type      = $MarkerType
+        source    = $ThunderstormSource
+        collector = "powershell3/1.0"
+        timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    }
+    if ($ScanId) { $Body["scan_id"] = $ScanId }
+    if ($Stats)  { $Body["stats"]   = $Stats  }
+
+    try {
+        $JsonBody = $Body | ConvertTo-Json -Compress
+        $Response = Invoke-WebRequest -Uri $MarkerUrl -Method Post `
+            -ContentType "application/json" -Body $JsonBody `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        $ResponseData = $Response.Content | ConvertFrom-Json
+        return $ResponseData.scan_id
+    } catch {
+        # Silently ignore — server may not support this endpoint yet
+        return ""
+    }
+}
 
 # ---------------------------------------------------------------------
 # Run THOR Thunderstorm Collector -------------------------------------
 # ---------------------------------------------------------------------
 $ProgressPreference = "SilentlyContinue"
+$FilesScanned = 0
+$FilesSubmitted = 0
+$FilesSkipped = 0
+$FilesFailed = 0
+
+# Send collection begin marker
+$ScanId = Send-CollectionMarker -MarkerType "begin"
+if ($ScanId) {
+    Write-Log "Collection scan_id: $ScanId"
+    $Url = "$Url&scan_id=$([uri]::EscapeDataString($ScanId))"
+}
+
 try {
     Get-ChildItem -Path $Folder -File -Recurse -ErrorAction SilentlyContinue |
     ForEach-Object {
         # -------------------------------------------------------------
         # Filter ------------------------------------------------------
+        $FilesScanned++
         # Size Check
         if ( ( $_.Length / 1MB ) -gt $($MaxSize) ) {
             Write-Log "$_ skipped due to size filter" -Level "Debug"
+            $FilesSkipped++
             return
         }
         # Age Check
         if ( $($MaxAge) -gt 0 ) {
             if ( $_.LastWriteTime -lt (Get-Date).AddDays(-$($MaxAge)) ) {
                 Write-Log "$_ skipped due to age filter" -Level "Debug"
+                $FilesSkipped++
                 return
             }
         }
         # Extensions Check
-        if ( $Extensions.Length -gt 0 ) {
-            if ( $Extensions -contains $_.extension ) { } else {
+        if ( $ActiveExtensions.Length -gt 0 ) {
+            if ( $ActiveExtensions -contains $_.extension ) { } else {
                 Write-Log "$_ skipped due to extension filter" -Level "Debug"
+                $FilesSkipped++
                 return
             }
         }
@@ -270,39 +348,55 @@ try {
             $fileBytes = [System.IO.File]::ReadAllBytes("$($_.FullName)");
         } catch {
             Write-Log "Read Error: $_" -Level "Error"
+            return
         }
-        $fileEnc = [System.Text.Encoding]::GetEncoding('UTF-8').GetString($fileBytes);
-        $boundary = [System.Guid]::NewGuid().ToString();
-        $LF = "`r`n";
-        $bodyLines = (
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"",
-            "Content-Type: application/octet-stream$LF",
-            $fileEnc,
-            "--$boundary--$LF"
-        ) -join $LF
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $LF = "`r`n"
+        $headerText = "--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"$LF" +
+            "Content-Type: application/octet-stream$LF$LF"
+        $footerText = "$LF--$boundary--$LF"
+
+        $headerBytes = [System.Text.Encoding]::ASCII.GetBytes($headerText)
+        $footerBytes = [System.Text.Encoding]::ASCII.GetBytes($footerText)
+        $bodyStream = New-Object System.IO.MemoryStream
+        $bodyStream.Write($headerBytes, 0, $headerBytes.Length)
+        $bodyStream.Write($fileBytes, 0, $fileBytes.Length)
+        $bodyStream.Write($footerBytes, 0, $footerBytes.Length)
+        $bodyBytes = $bodyStream.ToArray()
+        $bodyStream.Dispose()
 
         # Submitting the request
         $StatusCode = 0
         $Retries = 0
+        $MaxRetries = 3
+        $Max503Retries = 10
+        $Retries503 = 0
         while ( $($StatusCode) -ne 200 ) {
             try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
-                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body $bodyLines
+                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyBytes -UseBasicParsing
                 $StatusCode = [int]$Response.StatusCode
+                $FilesSubmitted++
             }
             # Catch all non 200 status codes
             catch {
                 $StatusCode = $_.Exception.Response.StatusCode.value__
                 if ( $StatusCode -eq 503 ) {
+                    $Retries503 = $Retries503 + 1
+                    if ( $Retries503 -ge $Max503Retries ) {
+                        $FilesFailed++
+                        Write-Log "503: Server still busy after $Max503Retries retries - giving up on $($_.FullName)" -Level "Warning"
+                        break
+                    }
                     $WaitSecs = 3
                     if ( $_.Exception.Response.Headers['Retry-After'] ) {
                         $WaitSecs = [int]$_.Exception.Response.Headers['Retry-After']
                     }
-                    Write-Log "503: Server seems busy - retrying in $($WaitSecs) seconds"
+                    Write-Log "503: Server seems busy - retrying in $($WaitSecs) seconds ($Retries503/$Max503Retries)"
                     Start-Sleep -Seconds $($WaitSecs)
                 } else {
-                    if ( $Retries -eq 3) {
+                    if ( $Retries -eq $MaxRetries ) {
                         Write-Log "$($StatusCode): Server still has problems - giving up"
                         break
                     }
@@ -324,3 +418,13 @@ try {
 $ElapsedTime = $(get-date) - $StartTime
 $TotalTime = "{0:HH:mm:ss}" -f ([datetime]$elapsedTime.Ticks)
 Write-Log "Scan took $($TotalTime) to complete" -Level "Information"
+Write-Log "Results: scanned=$FilesScanned submitted=$FilesSubmitted skipped=$FilesSkipped failed=$FilesFailed"
+
+# Send collection end marker with stats
+Send-CollectionMarker -MarkerType "end" -ScanId $ScanId -Stats @{
+    scanned          = $FilesScanned
+    submitted        = $FilesSubmitted
+    skipped          = $FilesSkipped
+    failed           = $FilesFailed
+    elapsed_seconds  = [int]$ElapsedTime.TotalSeconds
+} | Out-Null

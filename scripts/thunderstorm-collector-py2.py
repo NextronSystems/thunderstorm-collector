@@ -1,24 +1,36 @@
-#!/usr/bin/env python3
-# Minimum Python version: 3.4 (no f-strings, no 3.6+ features)
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# THOR Thunderstorm Collector - Python 2 version
+# Florian Roth, Nextron Systems GmbH, 2024
+#
+# Requires: Python 2.7
+# Use thunderstorm-collector.py for Python 3.4+
+#
+# stdlib only — no third-party dependencies.
+
+from __future__ import print_function
+
+import sys
+
+if sys.version_info[0] != 2:
+    sys.exit("[ERROR] This script requires Python 2.7. For Python 3, use thunderstorm-collector.py")
 
 import argparse
-import http.client
+import httplib
 import json
 import os
 import re
+import socket
 import ssl
 import time
 import uuid
-import socket
-from urllib.parse import quote
+from urllib import quote
 
 # Configuration
 schema = "http"
-max_age = 14  # in days (overridden by --max-age)
-max_size = 2048  # in KB (overridden by --max-size-kb)
-sync_mode = False
-dry_run = False
-retries = 3
+max_age = 14  # in days
+max_size = 20  # in megabytes
 skip_elements = [
     r"^\/proc",
     r"^\/mnt",
@@ -36,23 +48,19 @@ hard_skips = [
     "/sys/kernel/debug", "/sys/kernel/slab", "/sys/kernel/tracing",
 ]
 
-# Network and special filesystem types to exclude via /proc/mounts
-NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs",
-                    "afp", "webdav", "davfs2", "fuse.rclone", "fuse.s3fs"}
-SPECIAL_FS_TYPES = {"proc", "procfs", "sysfs", "devtmpfs", "devpts",
-                    "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
-                    "securityfs", "hugetlbfs", "mqueue", "autofs",
-                    "fusectl", "rpc_pipefs", "nsfs", "configfs", "binfmt_misc",
-                    "selinuxfs", "efivarfs", "ramfs"}
-
-# Cloud storage folder names (lowercase for comparison)
-CLOUD_DIR_NAMES = {"onedrive", "dropbox", ".dropbox", "googledrive", "google drive",
-                   "icloud drive", "iclouddrive", "nextcloud", "owncloud", "mega",
-                   "megasync", "tresorit", "tresorit drive", "syncthing"}
+NETWORK_FS_TYPES = set(["nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs",
+                        "afp", "webdav", "davfs2", "fuse.rclone", "fuse.s3fs"])
+SPECIAL_FS_TYPES = set(["proc", "procfs", "sysfs", "devtmpfs", "devpts",
+                        "cgroup", "cgroup2", "pstore", "bpf", "tracefs", "debugfs",
+                        "securityfs", "hugetlbfs", "mqueue", "autofs",
+                        "fusectl", "rpc_pipefs", "nsfs", "configfs", "binfmt_misc",
+                        "selinuxfs", "efivarfs", "ramfs"])
+CLOUD_DIR_NAMES = set(["onedrive", "dropbox", ".dropbox", "googledrive", "google drive",
+                       "icloud drive", "iclouddrive", "nextcloud", "owncloud", "mega",
+                       "megasync", "tresorit", "syncthing"])
 
 
 def get_excluded_mounts():
-    """Parse /proc/mounts and return mount points for network/special filesystems."""
     excluded = []
     try:
         with open("/proc/mounts", "r") as f:
@@ -68,15 +76,12 @@ def get_excluded_mounts():
 
 
 def is_cloud_path(filepath):
-    """Check if a path contains a known cloud storage folder name."""
     segments = filepath.replace("\\", "/").lower().split("/")
     for seg in segments:
         if seg in CLOUD_DIR_NAMES:
             return True
-        # Dynamic patterns: "onedrive - orgname", "onedrive-tenant", "nextcloud-account"
         if seg.startswith("onedrive - ") or seg.startswith("onedrive-") or seg.startswith("nextcloud-"):
             return True
-    # macOS: ~/Library/CloudStorage
     if "/library/cloudstorage" in filepath.lower():
         return True
     return False
@@ -95,7 +100,7 @@ api_endpoint = ""
 # Original args
 args = {}
 
-# Functions
+
 def process_dir(workdir):
     for dirpath, dirnames, filenames in os.walk(workdir, followlinks=False):
         # Hard skip directories (modify in-place to prevent descent)
@@ -133,15 +138,11 @@ def skip_file(filepath):
     for pattern in skip_elements:
         if re.search(pattern, filepath):
             if args.debug:
-                print(
-                    "[DEBUG] Skipping file due to configured skip_file exclusion {}".format(
-                        filepath
-                    )
-                )
+                print("[DEBUG] Skipping file due to configured skip_file exclusion {}".format(filepath))
             return True
 
-    # Size (max_size is in KB)
-    if os.path.getsize(filepath) > max_size * 1024:
+    # Size
+    if os.path.getsize(filepath) > max_size * 1024 * 1024:
         if args.debug:
             print("[DEBUG] Skipping file due to size {}".format(filepath))
         return True
@@ -157,12 +158,6 @@ def skip_file(filepath):
 
 
 def submit_sample(filepath):
-    if dry_run:
-        print("[DRY-RUN] Would submit {} ...".format(filepath))
-        global num_submitted
-        num_submitted += 1
-        return
-
     print("[SUBMIT] Submitting {} ...".format(filepath))
 
     try:
@@ -173,14 +168,11 @@ def submit_sample(filepath):
         return
 
     boundary = str(uuid.uuid4())
-    headers = {
-        "Content-Type": "multipart/form-data; boundary={}".format(boundary),
-    }
 
     # Sanitize filename for multipart header safety
     safe_filename = filepath.replace('"', '_').replace(';', '_').replace('\r', '_').replace('\n', '_')
 
-    # Create multipart/form-data payload
+    # Build multipart/form-data payload manually (no external libs)
     payload = (
         "--{boundary}\r\n"
         "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
@@ -189,34 +181,48 @@ def submit_sample(filepath):
     payload += data
     payload += "\r\n--{}--\r\n".format(boundary).encode("utf-8")
 
-    attempt = 0
-    while attempt < retries:
+    headers = {
+        "Content-Type": "multipart/form-data; boundary={}".format(boundary),
+    }
+
+    retries = 0
+    while retries < 3:
         try:
             if args.tls:
+                # ssl.create_default_context() requires Python 2.7.9+
+                # ssl._create_unverified_context() also requires 2.7.9+
+                # Fall back to bare HTTPSConnection for older Python 2.7
                 if args.insecure:
-                    context = ssl._create_unverified_context()
+                    if hasattr(ssl, '_create_unverified_context'):
+                        context = ssl._create_unverified_context()
+                    else:
+                        context = None  # pre-2.7.9: no verification by default
                 else:
-                    context = ssl.create_default_context()
-                conn = http.client.HTTPSConnection(args.server, args.port, context=context)
+                    if hasattr(ssl, 'create_default_context'):
+                        context = ssl.create_default_context()
+                    else:
+                        context = None  # pre-2.7.9: limited TLS, no SNI
+                if context is not None:
+                    conn = httplib.HTTPSConnection(args.server, args.port, context=context)
+                else:
+                    conn = httplib.HTTPSConnection(args.server, args.port)
             else:
-                conn = http.client.HTTPConnection(args.server, args.port)
+                conn = httplib.HTTPConnection(args.server, args.port)
             conn.request("POST", api_endpoint, body=payload, headers=headers)
-
             resp = conn.getresponse()
 
         except Exception as e:
             print("[ERROR] Could not submit '{}' - {}".format(filepath, e))
-            attempt += 1
-            time.sleep(2 << attempt)
+            retries += 1
+            time.sleep(2 << retries)
             continue
 
-        # pylint: disable=no-else-continue
-        if resp.status == 503: # Service unavailable
-            attempt += 1
-            if attempt >= retries:
-                print("[ERROR] Server busy after {} retries, giving up on '{}'".format(retries, filepath))
+        if resp.status == 503:
+            retries += 1
+            if retries >= 10:
+                print("[ERROR] Server busy after 10 retries, giving up on '{}'".format(filepath))
                 break
-            retry_after = resp.headers.get("Retry-After", "30")
+            retry_after = resp.getheader("Retry-After", "30")
             try:
                 retry_time = int(retry_after)
             except (ValueError, TypeError):
@@ -224,26 +230,23 @@ def submit_sample(filepath):
             time.sleep(retry_time)
             continue
         elif resp.status == 200:
+            global num_submitted
             num_submitted += 1
             break
         else:
-            print(
-                "[ERROR] HTTP return status: {}, reason: {}".format(
-                    resp.status, resp.reason
-                )
-            )
-            attempt += 1
-            time.sleep(2 << attempt)
+            print("[ERROR] HTTP return status: {}, reason: {}".format(resp.status, resp.reason))
+            retries += 1
+            time.sleep(2 << retries)
             continue
 
 
-def collection_marker(server, port, tls, insecure, source, collector_version, marker_type, scan_id=None, stats=None):
+def collection_marker(server, port, use_tls, insecure, source, collector_version, marker_type, scan_id=None, stats=None):
     """POST a begin/end collection marker to /api/collection.
     Returns the scan_id from the response, or None if unsupported/failed."""
     body = {
         "type": marker_type,
         "source": source,
-        "collector": "python3/{}".format(collector_version),
+        "collector": "python2/{}".format(collector_version),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if scan_id:
@@ -252,16 +255,19 @@ def collection_marker(server, port, tls, insecure, source, collector_version, ma
         body["stats"] = stats
 
     try:
-        if tls:
-            ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
-            conn = http.client.HTTPSConnection(server, port, context=ctx, timeout=10)
+        if use_tls:
+            if hasattr(ssl, "create_default_context"):
+                ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
+                conn = httplib.HTTPSConnection(server, port, context=ctx, timeout=10)
+            else:
+                conn = httplib.HTTPSConnection(server, port, timeout=10)
         else:
-            conn = http.client.HTTPConnection(server, port, timeout=10)
-        payload = json.dumps(body).encode("utf-8")
+            conn = httplib.HTTPConnection(server, port, timeout=10)
+        payload = json.dumps(body)
         conn.request("POST", "/api/collection", body=payload,
                      headers={"Content-Type": "application/json"})
         resp = conn.getresponse()
-        resp_body = resp.read().decode("utf-8", errors="replace")
+        resp_body = resp.read()
         data = json.loads(resp_body)
         return data.get("scan_id")
     except Exception:
@@ -271,70 +277,44 @@ def collection_marker(server, port, tls, insecure, source, collector_version, ma
 # Main
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        prog="thunderstorm-collector.py",
-        description="Tool to collect files to sent to THOR Thunderstorm. Only uses standard library functions of Python.",
+        prog="thunderstorm-collector-py2.py",
+        description="Tool to collect files to send to THOR Thunderstorm (Python 2.7 version). Only uses standard library functions.",
     )
     parser.add_argument(
-        "-d",
-        "--dirs",
+        "-d", "--dirs",
         nargs="*",
         default=["/"],
         help="Directories that should be scanned. (Default: /)",
     )
     parser.add_argument(
-        "-s", "--server", required=True, help="FQDN/IP of the THOR Thunderstorm server."
+        "-s", "--server",
+        required=True,
+        help="FQDN/IP of the THOR Thunderstorm server.",
     )
     parser.add_argument(
-        "-p", "--port", type=int, default=8080, help="Port of the THOR Thunderstorm server. (Default: 8080)"
+        "-p", "--port",
+        type=int,
+        default=8080,
+        help="Port of the THOR Thunderstorm server. (Default: 8080)",
     )
     parser.add_argument(
-        "-t",
-        "--tls",
+        "-t", "--tls",
         action="store_true",
         help="Use TLS to connect to the THOR Thunderstorm server.",
     )
     parser.add_argument(
-        "-k",
-        "--insecure",
+        "-k", "--insecure",
         action="store_true",
         help="Skip TLS verification and proceed without checking.",
     )
     parser.add_argument(
-        "-S",
-        "--source",
+        "-S", "--source",
         default=socket.gethostname(),
         help="Source identifier to be used in the Thunderstorm submission.",
-    )
-    parser.add_argument(
-        "--max-age", type=int, default=14,
-        help="Max file age in days (default: 14)"
-    )
-    parser.add_argument(
-        "--max-size-kb", type=int, default=2048,
-        help="Max file size in KB (default: 2048)"
-    )
-    parser.add_argument(
-        "--sync", action="store_true",
-        help="Use /api/check (synchronous) instead of /api/checkAsync"
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Do not upload, only show what would be submitted"
-    )
-    parser.add_argument(
-        "--retries", type=int, default=3,
-        help="Retry attempts per file (default: 3)"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
 
     args = parser.parse_args()
-
-    # Apply parsed args to module-level config
-    max_age = args.max_age
-    max_size = args.max_size_kb
-    dry_run = args.dry_run
-    retries = args.retries
-    sync_mode = args.sync
 
     if args.tls:
         schema = "https"
@@ -343,27 +323,27 @@ if __name__ == "__main__":
     if args.source:
         source = "?source={}".format(quote(args.source))
 
-    api_path = "/api/check" if sync_mode else "/api/checkAsync"
-    api_endpoint = "{}://{}:{}{}{}".format(schema, args.server, args.port, api_path, source)
+    api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
 
     print("=" * 80)
-    print("   Python Thunderstorm Collector")
+    print("   Python Thunderstorm Collector (Python 2)")
     print("   Florian Roth, Nextron Systems GmbH, 2024")
     print()
     print("=" * 80)
+    print("Target Directory: {}".format(", ".join(args.dirs)))
+    print("Thunderstorm Server: {}".format(args.server))
     # Extend hard_skips with mount points of network/special filesystems
     for mp in get_excluded_mounts():
         if mp not in hard_skips:
             hard_skips.append(mp)
 
-    print("Target Directory: {}".format(", ".join(args.dirs)))
-    print("Thunderstorm Server: {}".format(args.server))
     print("Thunderstorm Port: {}".format(args.port))
     print("Using API Endpoint: {}".format(api_endpoint))
-    print("Maximum Age of Files: {} days".format(max_age))
-    print("Maximum File Size: {} KB".format(max_size))
+    print("Maximum Age of Files: {}".format(max_age))
+    print("Maximum File Size: {} MB".format(max_size))
     print("Excluded directories: {}".format(", ".join(hard_skips[:10]) + (" ..." if len(hard_skips) > 10 else "")))
-    print("Source Identifier: {}".format(args.source)) if args.source else None
+    if args.source:
+        print("Source Identifier: {}".format(args.source))
     print()
 
     print("Starting the walk at: {} ...".format(", ".join(args.dirs)))
@@ -378,7 +358,6 @@ if __name__ == "__main__":
         print("[INFO] Collection scan_id: {}".format(scan_id))
         api_endpoint = "{}&scan_id={}".format(api_endpoint, quote(scan_id))
 
-    # Walk directory
     for walkdir in args.dirs:
         process_dir(walkdir)
 
@@ -398,8 +377,6 @@ if __name__ == "__main__":
         }
     )
 
-    print(
-        "Thunderstorm Collector Run finished (Checked: {} Submitted: {} Minutes: {})".format(
-            num_processed, num_submitted, minutes
-        )
-    )
+    print("Thunderstorm Collector Run finished (Checked: {} Submitted: {} Minutes: {})".format(
+        num_processed, num_submitted, minutes
+    ))

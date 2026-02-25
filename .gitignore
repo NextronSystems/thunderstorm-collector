@@ -2,3 +2,4 @@ curl.exe
 settings.json
 *.log
 go/dist/
+__pycache__/
