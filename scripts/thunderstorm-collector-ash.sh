@@ -62,7 +62,11 @@ NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fu
 SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs"
 
 # Cloud storage folder names (lowercase for comparison)
-CLOUD_DIR_NAMES="onedrive dropbox .dropbox googledrive nextcloud owncloud mega megasync tresorit syncthing"
+CLOUD_DIR_NAMES="onedrive dropbox .dropbox googledrive nextcloud owncloud mega megasync tresorit syncthing iclouddrive"
+
+# Cloud directory names that contain spaces — checked separately since the
+# space-separated CLOUD_DIR_NAMES list cannot hold them.
+CLOUD_DIR_NAMES_SPACED="google drive|icloud drive|onedrive -"
 
 # get_excluded_mounts: parse /proc/mounts, return mount points for network/special FS
 get_excluded_mounts() {
@@ -82,6 +86,15 @@ is_cloud_path() {
             *"/$_icp_name"/*|*"/$_icp_name") return 0 ;;
         esac
     done
+    # Check cloud directory names that contain spaces (pipe-separated)
+    _icp_old_ifs="$IFS"
+    IFS='|'
+    for _icp_name in $CLOUD_DIR_NAMES_SPACED; do
+        case "$_icp_lower" in
+            *"/$_icp_name"*) IFS="$_icp_old_ifs"; return 0 ;;
+        esac
+    done
+    IFS="$_icp_old_ifs"
     case "$_icp_lower" in
         */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
     esac
@@ -269,7 +282,8 @@ mktemp_portable() {
 _wget_is_busybox() {
     # BusyBox wget truncates --post-file at the first NUL byte, making it
     # unable to upload binary files.  Detect it so we can fall back to nc.
-    wget --version 2>&1 | grep -qi busybox
+    # Note: BusyBox wget does not support --version; use --help instead.
+    wget --help 2>&1 | grep -qi busybox
 }
 
 detect_upload_tool() {

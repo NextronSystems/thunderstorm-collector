@@ -30,7 +30,10 @@ from urllib import quote
 # Configuration
 schema = "http"
 max_age = 14  # in days
-max_size = 20  # in megabytes
+max_size_kb = 2048  # in KB (harmonized with other implementations)
+sync_mode = False
+dry_run = False
+retries = 3
 skip_elements = [
     r"^\/proc",
     r"^\/mnt",
@@ -141,14 +144,21 @@ def skip_file(filepath):
                 print("[DEBUG] Skipping file due to configured skip_file exclusion {}".format(filepath))
             return True
 
-    # Size
-    if os.path.getsize(filepath) > max_size * 1024 * 1024:
+    # Size (max_size_kb is in KB)
+    try:
+        file_size = os.path.getsize(filepath)
+        mtime = os.path.getmtime(filepath)
+    except (OSError, IOError):
+        if args.debug:
+            print("[DEBUG] Skipping unreadable file {}".format(filepath))
+        return True
+
+    if file_size > max_size_kb * 1024:
         if args.debug:
             print("[DEBUG] Skipping file due to size {}".format(filepath))
         return True
 
     # Age
-    mtime = os.path.getmtime(filepath)
     if mtime < current_date - (max_age * 86400):
         if args.debug:
             print("[DEBUG] Skipping file due to age {}".format(filepath))
@@ -158,6 +168,12 @@ def skip_file(filepath):
 
 
 def submit_sample(filepath):
+    if dry_run:
+        print("[DRY-RUN] Would submit {} ...".format(filepath))
+        global num_submitted
+        num_submitted += 1
+        return
+
     print("[SUBMIT] Submitting {} ...".format(filepath))
 
     try:
@@ -185,8 +201,8 @@ def submit_sample(filepath):
         "Content-Type": "multipart/form-data; boundary={}".format(boundary),
     }
 
-    retries = 0
-    while retries < 3:
+    attempt = 0
+    while attempt < retries:
         try:
             if args.tls:
                 # ssl.create_default_context() requires Python 2.7.9+
@@ -213,14 +229,14 @@ def submit_sample(filepath):
 
         except Exception as e:
             print("[ERROR] Could not submit '{}' - {}".format(filepath, e))
-            retries += 1
-            time.sleep(2 << retries)
+            attempt += 1
+            time.sleep(2 << attempt)
             continue
 
         if resp.status == 503:
-            retries += 1
-            if retries >= 10:
-                print("[ERROR] Server busy after 10 retries, giving up on '{}'".format(filepath))
+            attempt += 1
+            if attempt >= retries:
+                print("[ERROR] Server busy after {} retries, giving up on '{}'".format(retries, filepath))
                 break
             retry_after = resp.getheader("Retry-After", "30")
             try:
@@ -230,13 +246,12 @@ def submit_sample(filepath):
             time.sleep(retry_time)
             continue
         elif resp.status == 200:
-            global num_submitted
             num_submitted += 1
             break
         else:
             print("[ERROR] HTTP return status: {}, reason: {}".format(resp.status, resp.reason))
-            retries += 1
-            time.sleep(2 << retries)
+            attempt += 1
+            time.sleep(2 << attempt)
             continue
 
 
@@ -312,9 +327,36 @@ if __name__ == "__main__":
         default=socket.gethostname(),
         help="Source identifier to be used in the Thunderstorm submission.",
     )
+    parser.add_argument(
+        "--max-age", type=int, default=14,
+        help="Max file age in days (default: 14)"
+    )
+    parser.add_argument(
+        "--max-size-kb", type=int, default=2048,
+        help="Max file size in KB (default: 2048)"
+    )
+    parser.add_argument(
+        "--sync", action="store_true",
+        help="Use /api/check (synchronous) instead of /api/checkAsync"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Do not upload, only show what would be submitted"
+    )
+    parser.add_argument(
+        "--retries", type=int, default=3,
+        help="Retry attempts per file (default: 3)"
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
 
     args = parser.parse_args()
+
+    # Apply parsed args to module-level config
+    max_age = args.max_age
+    max_size_kb = args.max_size_kb
+    dry_run = args.dry_run
+    retries = args.retries
+    sync_mode = args.sync
 
     if args.tls:
         schema = "https"
@@ -323,7 +365,8 @@ if __name__ == "__main__":
     if args.source:
         source = "?source={}".format(quote(args.source))
 
-    api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
+    api_path = "/api/check" if sync_mode else "/api/checkAsync"
+    api_endpoint = "{}://{}:{}{}{}".format(schema, args.server, args.port, api_path, source)
 
     print("=" * 80)
     print("   Python Thunderstorm Collector (Python 2)")
@@ -339,8 +382,8 @@ if __name__ == "__main__":
 
     print("Thunderstorm Port: {}".format(args.port))
     print("Using API Endpoint: {}".format(api_endpoint))
-    print("Maximum Age of Files: {}".format(max_age))
-    print("Maximum File Size: {} MB".format(max_size))
+    print("Maximum Age of Files: {} days".format(max_age))
+    print("Maximum File Size: {} KB".format(max_size_kb))
     print("Excluded directories: {}".format(", ".join(hard_skips[:10]) + (" ..." if len(hard_skips) > 10 else "")))
     if args.source:
         print("Source Identifier: {}".format(args.source))

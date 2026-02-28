@@ -141,13 +141,20 @@ def skip_file(filepath):
             return True
 
     # Size (max_size is in KB)
-    if os.path.getsize(filepath) > max_size * 1024:
+    try:
+        file_size = os.path.getsize(filepath)
+        mtime = os.path.getmtime(filepath)
+    except (OSError, IOError):
+        if args.debug:
+            print("[DEBUG] Skipping unreadable file {}".format(filepath))
+        return True
+
+    if file_size > max_size * 1024:
         if args.debug:
             print("[DEBUG] Skipping file due to size {}".format(filepath))
         return True
 
     # Age
-    mtime = os.path.getmtime(filepath)
     if mtime < current_date - (max_age * 86400):
         if args.debug:
             print("[DEBUG] Skipping file due to age {}".format(filepath))
