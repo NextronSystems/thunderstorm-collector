@@ -38,7 +38,7 @@ my $dry_run = 0;
 my $retries_opt = 3;
 our $max_age = 14;      # in days (harmonized with bash/ash)
 our $max_size_kb = 2048; # in KB (harmonized with bash/ash)
-our $max_size = int($max_size_kb / 1024) || 1; # compat: MB for internal checks
+# Note: size checks use $max_size_kb directly (in KB)
 our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
 our @hardSkips = ('/proc', '/dev', '/sys', '/run', '/snap', '/.snapshots');
 
@@ -95,7 +95,6 @@ GetOptions(
     "max-size-kb=i"  => \$max_size_kb,  # --max-size-kb N
     "debug"          => \$debug         # --debug
 );
-$max_size = int($max_size_kb / 1024) || 1;
 $scheme = "https" if $ssl;
 
 # Use Hostname as Source if not set
@@ -111,7 +110,7 @@ sub urlencode {
 
 # Add Source to URL if available
 if ( $source ne "" ) {
-    print "[DEBUG] No source specified, using hostname: $source\n" if $debug;
+    print "[DEBUG] Using source identifier: $source\n" if $debug;
     $source = "?source=" . urlencode($source);
 }
 
