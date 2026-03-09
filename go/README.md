@@ -7,7 +7,7 @@ A Makefile has been added to allow for simplified creation of executables. The g
 
 ```help
 Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
-      --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.'
+      --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.
       --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
                                      Specify multiple CAs by using this flag multiple times.
       --debug                        Print debugging information. Shows detailed information about each file processed, including why files are skipped or would be sent.
