@@ -4,7 +4,7 @@
 # Author: Florian Roth 
 # Version: 0.2.0
 # Date Created: 07.10.2020  
-# Last Modified: 22.09.2025
+# Last Modified: 10.03.2026
 ################################################## 
 
 #Requires -Version 3
@@ -271,16 +271,23 @@ try {
         } catch {
             Write-Log "Read Error: $_" -Level "Error"
         }
-        $fileEnc = [System.Text.Encoding]::GetEncoding('UTF-8').GetString($fileBytes);
         $boundary = [System.Guid]::NewGuid().ToString();
         $LF = "`r`n";
-        $bodyLines = (
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"",
-            "Content-Type: application/octet-stream$LF",
-            $fileEnc,
-            "--$boundary--$LF"
-        ) -join $LF
+
+       # Build header and footer as byte arrays
+        $headerStr = "--$boundary$LF" +
+                     "Content-Disposition: form-data; name=`"file`"; filename=`"$($_.FullName)`"$LF" +
+                     "Content-Type: application/octet-stream$LF$LF"
+        $footerStr = "$LF--$boundary--$LF"
+
+        $headerBytes = [System.Text.Encoding]::UTF8.GetBytes($headerStr)
+        $footerBytes = [System.Text.Encoding]::UTF8.GetBytes($footerStr)
+
+        # Construct the request body without re-encoding the raw file data
+        $bodyBytes = New-Object byte[] ($headerBytes.Length + $fileBytes.Length + $footerBytes.Length)
+        [Buffer]::BlockCopy($headerBytes, 0, $bodyBytes, 0,                                          $headerBytes.Length)
+        [Buffer]::BlockCopy($fileBytes,   0, $bodyBytes, $headerBytes.Length,                        $fileBytes.Length)
+        [Buffer]::BlockCopy($footerBytes, 0, $bodyBytes, $headerBytes.Length + $fileBytes.Length,    $footerBytes.Length)
 
         # Submitting the request
         $StatusCode = 0
@@ -288,7 +295,7 @@ try {
         while ( $($StatusCode) -ne 200 ) {
             try {
                 Write-Log "Submitting to Thunderstorm server: $($_.FullName) ..." -Level "Info"
-                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body $bodyLines
+                $Response = Invoke-WebRequest -uri $($Url) -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body $bodyBytes
                 $StatusCode = [int]$Response.StatusCode
             }
             # Catch all non 200 status codes
