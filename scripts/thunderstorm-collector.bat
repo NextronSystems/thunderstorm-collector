@@ -139,36 +139,21 @@ IF "%_SRC%"=="" (
     ECHO [+] Source: !_SRC!
 )
 
-:: Create temp files atomically via PowerShell to avoid predictable names
-:: PowerShell is required for secure temp file creation and other core features
-where /q powershell.exe
-IF ERRORLEVEL 1 (
-    ECHO [ERROR] PowerShell is required but not found in PATH. 1>&2
-    EXIT /b 2
-)
-FOR /F "usebackq tokens=*" %%T IN (`powershell -NoProfile -Command "[System.IO.Path]::GetTempFileName()"`) DO SET "_FILELIST=%%T"
-IF NOT DEFINED _FILELIST (
-    ECHO [ERROR] Failed to create secure temp file via PowerShell. 1>&2
-    EXIT /b 2
-)
-FOR /F "usebackq tokens=*" %%T IN (`powershell -NoProfile -Command "[System.IO.Path]::GetTempFileName()"`) DO SET "_RESPTMP=%%T"
-IF NOT DEFINED _RESPTMP (
-    ECHO [ERROR] Failed to create secure temp file via PowerShell. 1>&2
-    IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
-    EXIT /b 2
-)
+:: Create temp files using %TEMP% and %RANDOM% (pure cmd.exe, no PowerShell)
+SET "_FILELIST=%TEMP%\ts-collector-%RANDOM%%RANDOM%.tmp"
+SET "_RESPTMP=%TEMP%\ts-collector-resp-%RANDOM%%RANDOM%.tmp"
+IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
+IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
 
-:: URL-encode the source for use in query strings via PowerShell
-SET "_SRCURL="
-SET "SRC_FOR_PS=!_SRC!"
-FOR /F "usebackq tokens=*" %%U IN (`powershell -NoProfile -Command "[Uri]::EscapeDataString($env:SRC_FOR_PS)"`) DO SET "_SRCURL=%%U"
-:: Fail if URL encoding failed — raw source in query strings can corrupt URLs
-IF NOT DEFINED _SRCURL (
-    ECHO [ERROR] Failed to URL-encode source identifier. PowerShell is required. 1>&2
-    IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
-    IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
-    EXIT /b 2
-)
+:: URL-encode the source for use in query strings (pure cmd.exe)
+:: Only encode characters that are problematic in URLs
+SET "_SRCURL=!_SRC!"
+SET "_SRCURL=!_SRCURL:%%=%%25!"
+SET "_SRCURL=!_SRCURL: =%%20!"
+SET "_SRCURL=!_SRCURL:&=%%26!"
+SET "_SRCURL=!_SRCURL:+=%%2B!"
+SET "_SRCURL=!_SRCURL:#=%%23!"
+SET "_SRCURL=!_SRCURL:==%%3D!"
 
 :: Restrict temp file permissions (best-effort, ignore errors)
 IF NOT "%USERNAME%"=="" (
@@ -238,21 +223,32 @@ IF !_BEGIN_RC! == 0 (
 )
 DEL "!_RESPTMP!.code" 2>nul
 IF "!_PARSE_RESP!"=="1" IF EXIST "!_RESPTMP!" (
-    :: Extract scan_id from JSON response file using PowerShell for robust parsing
-    :: Pass file path via environment variable to avoid injection; read full file content
-    SET "RESPTMP_FOR_PS=!_RESPTMP!"
-    FOR /F "usebackq tokens=*" %%A IN (`powershell -NoProfile -Command "$r=[System.IO.File]::ReadAllText($env:RESPTMP_FOR_PS); if($r -match '\"scan_id\"\s*:\s*\"([^\"]*?)\"'){$matches[1]}elseif($r -match '\"scan_id\"\s*:\s*([^,}\s]+)'){$matches[1].Trim('\"')}"`) DO (
-        IF NOT DEFINED _SCANID SET "_SCANID=%%A"
+    :: Extract scan_id from JSON response using FINDSTR (pure cmd.exe)
+    :: Response looks like: {"scan_id":"uuid-value", ...}
+    FOR /F "usebackq delims=" %%L IN ("!_RESPTMP!") DO (
+        IF NOT DEFINED _SCANID (
+            SET "_JSONLINE=%%L"
+            :: Use string substitution to extract value after "scan_id":"
+            SET "_AFTER=!_JSONLINE:*scan_id=!"
+            IF NOT "!_AFTER!"=="!_JSONLINE!" (
+                :: Remove everything up to the first colon and quote
+                FOR /F "tokens=2 delims=:	" %%V IN ("!_AFTER!") DO (
+                    SET "_TMP_ID=%%~V"
+                    :: Clean up: remove quotes, trailing comma/brace
+                    SET "_TMP_ID=!_TMP_ID:"=!"
+                    IF "!_TMP_ID:~-1!"=="," SET "_TMP_ID=!_TMP_ID:~0,-1!"
+                    IF "!_TMP_ID:~-1!"=="}" SET "_TMP_ID=!_TMP_ID:~0,-1!"
+                    IF NOT "!_TMP_ID!"=="" SET "_SCANID=!_TMP_ID!"
+                )
+            )
+        )
     )
 )
 DEL "!_RESPTMP!" 2>nul
 IF DEFINED _SCANID (
     ECHO [+] Collection started, scan_id: !_SCANID!
-    :: URL-encode scan_id for query string via PowerShell (use env var to avoid injection)
-    SET "SCANID_FOR_PS=!_SCANID!"
-    SET "_SCANIDURL="
-    FOR /F "usebackq tokens=*" %%U IN (`powershell -NoProfile -Command "[Uri]::EscapeDataString($env:SCANID_FOR_PS)"`) DO SET "_SCANIDURL=%%U"
-    IF NOT DEFINED _SCANIDURL SET "_SCANIDURL=!_SCANID!"
+    :: URL-encode scan_id (UUIDs contain only hex + hyphens, safe as-is)
+    SET "_SCANIDURL=!_SCANID!"
     :: NOTE: _IDPARAM must always be used within double-quoted URL strings
     :: to prevent cmd.exe from interpreting the & as a command separator.
     SET _IDPARAM=^&scan_id=!_SCANIDURL!
@@ -271,10 +267,8 @@ SET _DATEFILTER=
 :: Validate _MAXAGE is a positive integer (prevent injection)
 SET /A _MAXAGE_VALIDATED=%_MAXAGE% 2>nul
 IF !_MAXAGE_VALIDATED! GTR 0 (
-    :: Use PowerShell to compute the date (available on Vista+)
-    :: _MAXAGE_VALIDATED is guaranteed numeric by SET /A above
-    SET "MAXAGE_FOR_PS=!_MAXAGE_VALIDATED!"
-    FOR /F "usebackq tokens=*" %%D IN (`powershell -NoProfile -Command "(Get-Date).AddDays(-[int]$env:MAXAGE_FOR_PS).ToString([System.Globalization.CultureInfo]::CurrentCulture.DateTimeFormat.ShortDatePattern)"`) DO SET _DATEFILTER=/D +%%D
+    :: FORFILES natively supports -N for "modified within last N days"
+    SET _DATEFILTER=/D -!_MAXAGE_VALIDATED!
 )
 
 ECHO [+] Scanning !_DIRS! ...
@@ -285,14 +279,9 @@ ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_
 :: Write directory list to a temp file, then iterate with delayed expansion off
 :: to protect paths containing '!' characters.
 SET "_DIRLIST=!_FILELIST!.dirs"
-:: Use PowerShell to split the semicolon-separated list into lines (safe from ! issues)
-SET "DIRS_FOR_PS=!_DIRS!"
-powershell -NoProfile -Command "$env:DIRS_FOR_PS -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }" >"!_DIRLIST!" 2>nul
-IF NOT EXIST "!_DIRLIST!" (
-    :: Fallback: write _DIRS splitting on semicolons via cmd
-    FOR %%T IN ("!_DIRS:;=" "!") DO (
-        IF NOT "%%~T"=="" ECHO %%~T>>"!_DIRLIST!"
-    )
+:: Split semicolon-separated directory list into lines (pure cmd.exe)
+FOR %%T IN ("!_DIRS:;=" "!") DO (
+    IF NOT "%%~T"=="" ECHO %%~T>>"!_DIRLIST!"
 )
 FOR /F "usebackq delims=" %%T IN ("!_DIRLIST!") DO (
     CALL :SCANDIR "%%T"
