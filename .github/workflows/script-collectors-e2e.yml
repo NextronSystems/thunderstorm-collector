@@ -99,7 +99,7 @@ jobs:
 
       - name: Run Perl collector
         run: |
-          perl ./scripts/thunderstorm-collector.pl -- \
+          perl ./scripts/thunderstorm-collector.pl \
             --dir "$SAMPLE_DIR" \
             --server 127.0.0.1 \
             --port "$STUB_PORT" \
