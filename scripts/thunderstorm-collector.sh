@@ -33,6 +33,8 @@ RETRIES=3
 
 UPLOAD_TOOL=""
 declare -a TMP_FILES_ARR=()
+declare -a CURL_EXTRA_OPTS=()
+declare -a WGET_EXTRA_OPTS=()
 
 # Keep defaults simple and stable for Bash 3+.
 SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr')
@@ -42,6 +44,7 @@ FILES_SUBMITTED=0
 FILES_SKIPPED=0
 FILES_FAILED=0
 TOTAL_FILES=0
+SCAN_ID=""
 
 PROGRESS_MODE=""  # auto (empty), "on", or "off"
 SHOW_PROGRESS=0
@@ -135,6 +138,8 @@ send_interrupted_marker() {
 }
 
 on_signal() {
+    # Prevent recursive signal handling
+    trap '' INT TERM
     INTERRUPTED=1
     log_msg warn "Received signal, sending interrupted marker and exiting..."
     send_interrupted_marker
@@ -144,7 +149,7 @@ on_signal() {
 }
 
 on_exit() {
-    cleanup_tmp_files
+    [ "$INTERRUPTED" -eq 0 ] && cleanup_tmp_files
 }
 
 trap on_exit EXIT
@@ -183,6 +188,10 @@ log_msg() {
     fi
 
     if [ "$LOG_TO_CMDLINE" -eq 1 ]; then
+        # Clear progress line before printing log messages to avoid interleaving
+        if [ "$SHOW_PROGRESS" -eq 1 ]; then
+            printf '\r\033[K' >&2
+        fi
         case "$level" in
             error|warn)
                 printf "[%s] %s\n" "$level" "$clean" >&2
@@ -230,7 +239,7 @@ Options:
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
   --sync                     Use /api/check (default: /api/checkAsync)
   --retries <num>            Retry attempts per file (default: 3)
-  --dry-run                  Do not upload, only show what would be submitted
+            --dry-run                  Do not upload or contact the server; only show what would be submitted
   --progress                 Force progress reporting
   --no-progress              Disable progress reporting
   --debug                    Enable debug log messages
@@ -366,21 +375,32 @@ upload_with_curl() {
     safe_filename="$(sanitize_filename_for_multipart "$filename")"
 
     resp_file="$(mktemp_portable)" || return 91
+    TMP_FILES_ARR+=("$resp_file")
     header_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$resp_file" "$header_file")
+    TMP_FILES_ARR+=("$header_file")
 
     # Build form argument safely — curl handles @path internally
     local form_arg="file=@${filepath};filename=${safe_filename}"
 
-    # shellcheck disable=SC2086
-    curl -sS --show-error -X POST $CURL_EXTRA_OPTS \
+    local err_file
+    err_file="$(mktemp_portable)" || return 91
+    TMP_FILES_ARR+=("$err_file")
+
+    curl -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
+        --max-time 300 \
         -D "$header_file" \
         "$endpoint" \
         -F "$form_arg" \
         -F "hostname=${SOURCE_NAME}" \
         -F "source_path=${filepath}" \
-        > "$resp_file" 2>&1
+        > "$resp_file" 2>"$err_file"
     code=$?
+
+    if [ $code -ne 0 ]; then
+        local _curl_err
+        _curl_err="$(cat "$err_file" 2>/dev/null)"
+        [ -n "$_curl_err" ] && log_msg debug "curl error: $_curl_err"
+    fi
 
     # Extract HTTP status code from headers
     http_code="$(grep -oE 'HTTP/[0-9.]+ [0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
@@ -426,12 +446,32 @@ upload_with_wget() {
     local header_file
     local code
 
-    boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}"
     safe_filename="$(sanitize_filename_for_multipart "$filename")"
+
+    # Generate a boundary that does not appear in the file content or metadata.
+    # Retry with different random seeds to avoid multipart corruption.
+    local _boundary_attempts=0
+    boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}$(date +%s%N 2>/dev/null || echo 0)"
+    while [ "$_boundary_attempts" -lt 10 ]; do
+        if ! grep -qF "$boundary" "$filepath" 2>/dev/null; then
+            # Also check it doesn't appear in metadata fields
+            case "${SOURCE_NAME}${filepath}" in
+                *"$boundary"*) ;;
+                *) break ;;
+            esac
+        fi
+        _boundary_attempts=$((_boundary_attempts + 1))
+        boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}${_boundary_attempts}$(date +%s%N 2>/dev/null || echo 0)"
+    done
+    if [ "$_boundary_attempts" -ge 10 ]; then
+        log_msg warn "Could not find safe multipart boundary for '$filepath', upload may be malformed"
+    fi
     body_file="$(mktemp_portable)" || return 93
+    TMP_FILES_ARR+=("$body_file")
     resp_file="$(mktemp_portable)" || return 94
+    TMP_FILES_ARR+=("$resp_file")
     header_file="$(mktemp_portable)" || return 94
-    TMP_FILES_ARR+=("$body_file" "$resp_file" "$header_file")
+    TMP_FILES_ARR+=("$header_file")
 
     {
         printf -- "--%s\r\n" "$boundary"
@@ -447,8 +487,8 @@ upload_with_wget() {
         printf '\r\n--%s--\r\n' "$boundary"
     } > "$body_file" 2>/dev/null || return 95
 
-    # shellcheck disable=SC2086
-    wget -S -O "$resp_file" $WGET_EXTRA_OPTS \
+    wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
+        --timeout=300 \
         --header="Content-Type: multipart/form-data; boundary=${boundary}" \
         --post-file="$body_file" \
         "$endpoint" 2>"$header_file"
@@ -516,8 +556,9 @@ collection_marker() {
     local body scan_id_out resp_file header_file
 
     resp_file="$(mktemp_portable)" || return 1
+    TMP_FILES_ARR+=("$resp_file")
     header_file="$(mktemp_portable)" || return 1
-    TMP_FILES_ARR+=("$resp_file" "$header_file")
+    TMP_FILES_ARR+=("$header_file")
 
     # Build JSON body with proper escaping
     local safe_source safe_scan_id
@@ -538,6 +579,7 @@ collection_marker() {
     local _marker_attempts=1
     [ "$marker_type" = "begin" ] && _marker_attempts=2
 
+    local _http_code
     local _attempt=0
     while [ "$_attempt" -lt "$_marker_attempts" ]; do
         _attempt=$((_attempt + 1))
@@ -545,16 +587,14 @@ collection_marker() {
         : > "$header_file"
         # Attempt POST — capture HTTP status to detect server-side errors
         if command -v curl >/dev/null 2>&1; then
-            # shellcheck disable=SC2086
-            curl -sS -D "$header_file" -o "$resp_file" $CURL_EXTRA_OPTS \
+            curl -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
                 -H "Content-Type: application/json" \
                 -d "$body" \
                 --max-time 10 \
                 "$marker_url" 2>/dev/null
             _marker_rc=$?
         elif command -v wget >/dev/null 2>&1; then
-            # shellcheck disable=SC2086
-            wget -S -O "$resp_file" $WGET_EXTRA_OPTS \
+            wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
                 --header "Content-Type: application/json" \
                 --post-data "$body" \
                 --timeout=10 \
@@ -563,7 +603,6 @@ collection_marker() {
         fi
         # If transport succeeded, validate HTTP status code
         if [ "$_marker_rc" -eq 0 ]; then
-            local _http_code
             _http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
             if [ -n "$_http_code" ] && [ "$_http_code" -ge 400 ] 2>/dev/null; then
                 log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
@@ -845,7 +884,9 @@ validate_config() {
     [ "$RETRIES" -ge 1 ] || die "retries must be >= 1"
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Server must not be empty"
-    [ "${#SCAN_FOLDERS[@]}" -gt 0 ] || die "At least one directory is required"
+    if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
+        die "At least one directory is required"
+    fi
     if [ -n "$CA_CERT" ] && [ ! -f "$CA_CERT" ]; then
         die "CA certificate file not found: '$CA_CERT'"
     fi
@@ -860,7 +901,6 @@ main() {
     local query_source=""
     local api_endpoint=""
     local base_url=""
-    SCAN_ID=""
     local scandir
     local file_path
     local size_kb
@@ -880,15 +920,15 @@ main() {
     if [ "$USE_SSL" -eq 1 ]; then
         scheme="https"
     fi
-    CURL_EXTRA_OPTS=""
-    WGET_EXTRA_OPTS=""
+    CURL_EXTRA_OPTS=()
+    WGET_EXTRA_OPTS=()
     if [ "$INSECURE" -eq 1 ]; then
-        CURL_EXTRA_OPTS="-k"
-        WGET_EXTRA_OPTS="--no-check-certificate"
+        CURL_EXTRA_OPTS+=("-k")
+        WGET_EXTRA_OPTS+=("--no-check-certificate")
     fi
     if [ -n "$CA_CERT" ]; then
-        CURL_EXTRA_OPTS="${CURL_EXTRA_OPTS} --cacert \"${CA_CERT}\""
-        WGET_EXTRA_OPTS="${WGET_EXTRA_OPTS} --ca-certificate=\"${CA_CERT}\""
+        CURL_EXTRA_OPTS+=("--cacert" "$CA_CERT")
+        WGET_EXTRA_OPTS+=("--ca-certificate=$CA_CERT")
     fi
     if [ "$ASYNC_MODE" -eq 1 ]; then
         endpoint_name="checkAsync"
@@ -900,17 +940,8 @@ main() {
     base_url="${base_url%/}"
     api_endpoint="${base_url}/api/${endpoint_name}${query_source}"
 
-    if [ "$DRY_RUN" -eq 0 ]; then
-        if ! detect_upload_tool; then
-            log_msg error "Neither 'curl' nor 'wget' is installed; unable to upload samples"
-            exit 2
-        fi
-    else
-        if detect_upload_tool; then
-            log_msg info "Dry-run mode active (upload tool detected: $UPLOAD_TOOL)"
-        else
-            log_msg info "Dry-run mode active (no upload tool required)"
-        fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        detect_upload_tool || true
     fi
 
     log_msg info "Started Thunderstorm Collector - Version $VERSION"
@@ -925,11 +956,16 @@ main() {
 
     # Send collection begin marker; capture scan_id if server returns one
     if [ "$DRY_RUN" -eq 0 ]; then
+        if ! detect_upload_tool; then
+            log_msg error "Neither 'curl' nor 'wget' is installed; unable to upload samples"
+            exit 2
+        fi
         local _begin_resp_file
         _begin_resp_file="$(mktemp_portable)" || { log_msg error "Cannot create temp file"; exit 2; }
         TMP_FILES_ARR+=("$_begin_resp_file")
         collection_marker "$base_url" "begin" "" "" > "$_begin_resp_file"
-        local _begin_rc=$?
+        local _begin_rc
+        _begin_rc=$?
         SCAN_ID="$(cat "$_begin_resp_file" 2>/dev/null)"
         # If the begin marker failed after retry, the server is unreachable — fatal error
         if [ "$_begin_rc" -ne 0 ]; then
@@ -943,6 +979,8 @@ main() {
                 *)    api_endpoint="${api_endpoint}?scan_id=$(urlencode "$SCAN_ID")" ;;
             esac
         fi
+    else
+        log_msg info "Dry-run mode: skipping server connection"
     fi
 
     # Determine progress display mode
@@ -962,15 +1000,21 @@ main() {
     for _ep in "${EXCLUDE_PATHS[@]}"; do
         [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
     done
-    while IFS= read -r _ep; do
-        [ -n "$_ep" ] && [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
-    done <<< "$(get_excluded_mounts)"
+    local _mount_list
+    _mount_list="$(get_excluded_mounts)"
+    if [ -n "$_mount_list" ]; then
+        while IFS= read -r _ep; do
+            [ -n "$_ep" ] && [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
+        done <<< "$_mount_list"
+    fi
 
     # Prune known cloud storage directory names at the find level so they are
     # excluded from both the file count and processing (keeps progress accurate).
-    local _cloud_name _cloud_lower
+    # Note: CLOUD_DIR_NAMES is space-separated, so multi-word names like
+    # "Google Drive" are split into individual words. This is intentional —
+    # the is_cloud_path() fallback catches path-based patterns.
+    local _cloud_name
     for _cloud_name in $CLOUD_DIR_NAMES; do
-        _cloud_lower="$(printf '%s' "$_cloud_name" | tr '[:upper:]' '[:lower:]')"
         # -iname is supported by GNU find and most BSD finds
         find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
     done
@@ -994,16 +1038,19 @@ main() {
         if [ "$MAX_AGE" -gt 0 ]; then
             find "$scandir" "${find_excludes[@]}" -type f -mtime "-${MAX_AGE}" -print0 > "$find_results_file" 2>/dev/null || true
         else
+            # MAX_AGE=0 means no age filter — collect all files regardless of modification time
             find "$scandir" "${find_excludes[@]}" -type f -print0 > "$find_results_file" 2>/dev/null || true
         fi
         all_find_files+=("$find_results_file")
 
-        # Count files in this result set
+        # Count files in this result set (each entry is null-terminated by -print0)
         local _count=0
         if [ -s "$find_results_file" ]; then
+            # Count null bytes = number of file entries from -print0
             _count="$(tr -cd '\0' < "$find_results_file" 2>/dev/null | wc -c)"
-            # shellcheck disable=SC2086
-            set -- $_count; _count="${1:-0}"
+            # Normalize whitespace from wc output
+            _count="${_count//[[:space:]]/}"
+            _count="${_count:-0}"
         fi
         TOTAL_FILES=$((TOTAL_FILES + _count))
     done
