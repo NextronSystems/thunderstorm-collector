@@ -466,6 +466,7 @@ sub submitSample {
                     print STDERR "[ERROR] Upload failed for '$filepath': ", $req->status_line, "\n";
                 }
             }
+            1;  # Return truthy so the 'or do { }' block doesn't execute on success
         } or do {
             my $error = $@ || 'Unknown failure';
             print STDERR "[ERROR] Could not submit '$filepath' - $error\n";
