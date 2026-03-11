@@ -21,6 +21,21 @@ SETLOCAL EnableDelayedExpansion
 :: Curl 8.x requires the Universal C Runtime (KB2999226 or KB3118401).
 :: Install the Visual C++ 2015 Redistributable or the UCRT update,
 :: then place the curl.exe + libcurl DLL in the script folder.
+::
+:: Known Limitations (cmd.exe platform constraints):
+:: - No --ca-cert / --cacert support: Custom CA bundle validation is not
+::   supported due to limited argument parsing in batch. Use the system
+::   certificate store or set CURL_CA_BUNDLE environment variable instead.
+:: - No --insecure / -k support: TLS verification skip is not supported
+::   for the same reason. Set URL_SCHEME=http as a workaround for testing.
+:: - No signal handling: Ctrl+C will not send an "interrupted" collection
+::   marker. The end marker will be missing if the script is interrupted.
+:: - No TTY detection / progress reporting: cmd.exe cannot detect
+::   interactive terminals. Progress percentage is not displayed.
+:: - Limited JSON escaping: Only backslash and double-quote are escaped.
+::   Control characters (CR, LF, TAB) are stripped but not \uXXXX-escaped.
+:: - Locale-dependent FORFILES date: The /D date filter format depends on
+::   the system locale and may not work correctly on all configurations.
 :: ----------------------------------------------------------------
 
 :: CONFIGURATION -------------------------------------------------
@@ -32,14 +47,18 @@ SET _SCHEME=%URL_SCHEME%
 IF "%_TS%"=="" SET _TS=ygdrasil.nextron
 IF "%_TP%"=="" SET _TP=8080
 IF "%_SCHEME%"=="" SET _SCHEME=http
+IF /I NOT "%_SCHEME%"=="http" IF /I NOT "%_SCHEME%"=="https" (
+    ECHO [ERROR] Invalid URL_SCHEME: %_SCHEME%. Must be http or https. 1>&2
+    EXIT /b 2
+)
 
 :: SELECTION
 SET _DIRS=%COLLECT_DIRS%
 SET _EXTS=%RELEVANT_EXTENSIONS%
 SET _MAXSZ=%COLLECT_MAX_SIZE%
 SET _MAXAGE=%MAX_AGE%
-IF "%_DIRS%"=="" SET _DIRS=C:\Users C:\Temp C:\Windows
-IF "%_EXTS%"=="" SET _EXTS=.vbs .ps .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
+IF "%_DIRS%"=="" SET "_DIRS=C:\Users;C:\Temp;C:\Windows"
+IF "%_EXTS%"=="" SET _EXTS=.vbs .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
 IF "%_MAXSZ%"=="" SET _MAXSZ=3000000
 IF "%_MAXAGE%"=="" SET _MAXAGE=30
 
@@ -47,6 +66,28 @@ IF "%_MAXAGE%"=="" SET _MAXAGE=30
 SET _DBG=%DEBUG%
 SET _SRC=%SOURCE%
 IF "%_DBG%"=="" SET _DBG=0
+
+:: Basic server hostname validation: reject empty and values containing characters
+:: outside the allowed set (alphanumeric, hyphens, dots, colons, brackets for IPv6).
+:: Full URL validation is delegated to curl.
+IF "!_TS!"=="" (
+    ECHO [ERROR] Server hostname is empty. Set THUNDERSTORM_SERVER. 1>&2
+    EXIT /b 2
+)
+ECHO !_TS!| FINDSTR /R "[^a-zA-Z0-9.\-\[\]:]" >nul 2>&1
+IF NOT ERRORLEVEL 1 (
+    ECHO [ERROR] Server hostname contains invalid characters: !_TS! 1>&2
+    EXIT /b 2
+)
+
+:: Validate numeric parameters
+SET /A _TP=%_TP% 2>nul
+SET /A _MAXSZ=%_MAXSZ% 2>nul
+SET /A _MAXAGE=%_MAXAGE% 2>nul
+IF !_TP! LEQ 0 SET _TP=8080
+IF !_TP! GTR 65535 SET _TP=8080
+IF !_MAXSZ! LEQ 0 SET _MAXSZ=3000000
+IF !_MAXAGE! LSS 0 SET _MAXAGE=30
 
 :: Counters
 SET /A _SUBMITTED=0
@@ -86,9 +127,9 @@ IF NOT ERRORLEVEL 1 (
     )
     GOTO :CURLOK
 )
-ECHO [!] Cannot find curl in PATH or the script directory.
-ECHO     Download from https://curl.se/windows/ and place curl.exe next to this script.
-EXIT /b 1
+ECHO [ERROR] Cannot find curl in PATH or the script directory. 1>&2
+ECHO     Download from https://curl.se/windows/ and place curl.exe next to this script. 1>&2
+EXIT /b 2
 :CURLOK
 ECHO [+] Curl found: %_CURL%
 
@@ -98,24 +139,123 @@ IF "%_SRC%"=="" (
     ECHO [+] Source: !_SRC!
 )
 
+:: Create temp files atomically via PowerShell to avoid predictable names
+:: PowerShell is required for secure temp file creation and other core features
+where /q powershell.exe
+IF ERRORLEVEL 1 (
+    ECHO [ERROR] PowerShell is required but not found in PATH. 1>&2
+    EXIT /b 2
+)
+FOR /F "usebackq tokens=*" %%T IN (`powershell -NoProfile -Command "[System.IO.Path]::GetTempFileName()"`) DO SET "_FILELIST=%%T"
+IF NOT DEFINED _FILELIST (
+    ECHO [ERROR] Failed to create secure temp file via PowerShell. 1>&2
+    EXIT /b 2
+)
+FOR /F "usebackq tokens=*" %%T IN (`powershell -NoProfile -Command "[System.IO.Path]::GetTempFileName()"`) DO SET "_RESPTMP=%%T"
+IF NOT DEFINED _RESPTMP (
+    ECHO [ERROR] Failed to create secure temp file via PowerShell. 1>&2
+    IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
+    EXIT /b 2
+)
+
+:: URL-encode the source for use in query strings via PowerShell
+SET "_SRCURL="
+SET "SRC_FOR_PS=!_SRC!"
+FOR /F "usebackq tokens=*" %%U IN (`powershell -NoProfile -Command "[Uri]::EscapeDataString($env:SRC_FOR_PS)"`) DO SET "_SRCURL=%%U"
+:: Fail if URL encoding failed — raw source in query strings can corrupt URLs
+IF NOT DEFINED _SRCURL (
+    ECHO [ERROR] Failed to URL-encode source identifier. PowerShell is required. 1>&2
+    IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
+    IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
+    EXIT /b 2
+)
+
+:: Restrict temp file permissions (best-effort, ignore errors)
+IF NOT "%USERNAME%"=="" (
+    IF EXIST "!_FILELIST!" icacls "!_FILELIST!" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>&1
+    IF EXIST "!_RESPTMP!" icacls "!_RESPTMP!" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>&1
+)
+
 :: COLLECTION MARKERS --------------------------------------------
 :: POST begin marker to /api/collection (forward-compatible: 404 = continue)
+:: Retry once after 2s on connection failure
+
+:: Escape source and hostname for JSON payloads (backslashes and quotes)
+:: NOTE: Only basic JSON escaping (backslash, double-quote) is performed.
+:: Control characters (CR, LF, TAB) are stripped. Full JSON escaping is a
+:: known batch limitation — see script header.
+SET "_JSRC=!_SRC!"
+:: Strip TAB from source before escaping (CR/LF already handled by cmd.exe line processing)
+SET "_JSRC=!_JSRC:	=!"
+SET "_JSRC=!_JSRC:\=\\!"
+SET "_JSRC=!_JSRC:"=\"!"
+SET "_JHOST=%COMPUTERNAME%"
+SET "_JHOST=!_JHOST:	=!"
+SET "_JHOST=!_JHOST:\=\\!"
+SET "_JHOST=!_JHOST:"=\"!"
+
 SET _SCANID=
-FOR /F "usebackq tokens=*" %%R IN (`"%_CURL%" -s -X POST -H "Content-Type: application/json" -d "{\"type\":\"begin\",\"source\":\"%_SRC%\",\"collector\":\"batch/0.5\"}" %_SCHEME%://%_TS%:%_TP%/api/collection 2^>nul`) DO (
-    SET _RESP=%%R
+SET _RESP=
+SET _BEGIN_HTTP=
+SET _BEGIN_RC=0
+:: Use -o to capture body, -w for HTTP status code
+"%_CURL%" -s -o "!_RESPTMP!" -w "%%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"type\":\"begin\",\"source\":\"!_JSRC!\",\"hostname\":\"!_JHOST!\",\"collector\":\"batch/0.5\"}" "!_SCHEME!://!_TS!:!_TP!/api/collection" >"!_RESPTMP!.code" 2>nul
+SET _BEGIN_RC=!ERRORLEVEL!
+IF !_BEGIN_RC! NEQ 0 (
+    ECHO [!] Begin marker failed ^(curl exit: !_BEGIN_RC!^), retrying in 2s... 1>&2
+    :: PING -n 3 = 2 one-second intervals = ~2s delay
+    PING -n 3 127.0.0.1 >nul 2>&1
+    SET _RESP=
+    "%_CURL%" -s -o "!_RESPTMP!" -w "%%{http_code}" -X POST -H "Content-Type: application/json" -d "{\"type\":\"begin\",\"source\":\"!_JSRC!\",\"hostname\":\"!_JHOST!\",\"collector\":\"batch/0.5\"}" "!_SCHEME!://!_TS!:!_TP!/api/collection" >"!_RESPTMP!.code" 2>nul
+    SET _BEGIN_RC=!ERRORLEVEL!
 )
-IF DEFINED _RESP (
-    :: Extract scan_id from JSON response (simple pattern match)
-    FOR /F "tokens=2 delims=:}" %%A IN ('ECHO !_RESP! ^| FIND /I "scan_id"') DO (
-        SET _SCANID=%%~A
-        :: Remove surrounding quotes and spaces
-        SET _SCANID=!_SCANID:"=!
-        SET _SCANID=!_SCANID: =!
+SET _BEGIN_OK=0
+SET _BEGIN_SUPPORTED=0
+IF !_BEGIN_RC! == 0 (
+    SET /P _BEGIN_HTTP=<"!_RESPTMP!.code"
+    :: Accept 2xx or 404 (forward-compatible: 404 = server doesn't support markers yet)
+    IF DEFINED _BEGIN_HTTP (
+        IF "!_BEGIN_HTTP:~0,1!"=="2" (
+            :: Success - parse scan_id from response file below
+            SET _PARSE_RESP=1
+            SET _BEGIN_OK=1
+            SET _BEGIN_SUPPORTED=1
+        ) ELSE IF "!_BEGIN_HTTP!"=="404" (
+            :: Server doesn't support collection markers, continue without scan_id
+            SET _PARSE_RESP=0
+            SET _BEGIN_OK=1
+            SET _BEGIN_SUPPORTED=0
+        ) ELSE (
+            ECHO [!] Begin marker returned HTTP !_BEGIN_HTTP!, continuing without scan_id 1>&2
+            SET _PARSE_RESP=0
+        )
+    ) ELSE (
+        SET _PARSE_RESP=0
+    )
+) ELSE (
+    ECHO [!] Begin marker connection failed after retry ^(curl exit: !_BEGIN_RC!^), continuing without scan_id 1>&2
+    SET _PARSE_RESP=0
+)
+DEL "!_RESPTMP!.code" 2>nul
+IF "!_PARSE_RESP!"=="1" IF EXIST "!_RESPTMP!" (
+    :: Extract scan_id from JSON response file using PowerShell for robust parsing
+    :: Pass file path via environment variable to avoid injection; read full file content
+    SET "RESPTMP_FOR_PS=!_RESPTMP!"
+    FOR /F "usebackq tokens=*" %%A IN (`powershell -NoProfile -Command "$r=[System.IO.File]::ReadAllText($env:RESPTMP_FOR_PS); if($r -match '\"scan_id\"\s*:\s*\"([^\"]*?)\"'){$matches[1]}elseif($r -match '\"scan_id\"\s*:\s*([^,}\s]+)'){$matches[1].Trim('\"')}"`) DO (
+        IF NOT DEFINED _SCANID SET "_SCANID=%%A"
     )
 )
+DEL "!_RESPTMP!" 2>nul
 IF DEFINED _SCANID (
     ECHO [+] Collection started, scan_id: !_SCANID!
-    SET _IDPARAM=^&scan_id=!_SCANID!
+    :: URL-encode scan_id for query string via PowerShell (use env var to avoid injection)
+    SET "SCANID_FOR_PS=!_SCANID!"
+    SET "_SCANIDURL="
+    FOR /F "usebackq tokens=*" %%U IN (`powershell -NoProfile -Command "[Uri]::EscapeDataString($env:SCANID_FOR_PS)"`) DO SET "_SCANIDURL=%%U"
+    IF NOT DEFINED _SCANIDURL SET "_SCANIDURL=!_SCANID!"
+    :: NOTE: _IDPARAM must always be used within double-quoted URL strings
+    :: to prevent cmd.exe from interpreting the & as a command separator.
+    SET _IDPARAM=^&scan_id=!_SCANIDURL!
 ) ELSE (
     SET _IDPARAM=
 )
@@ -124,90 +264,256 @@ IF DEFINED _SCANID (
 :: Phase 1: Use FORFILES to generate a filtered file list.
 :: FORFILES does NOT follow junctions/reparse points, solving the infinite loop issue.
 
-SET _FILELIST=%TEMP%\thunderstorm_files_%RANDOM%.txt
-IF EXIST "%_FILELIST%" DEL "%_FILELIST%" 2>nul
-
 :: Calculate cutoff date for age filter (today minus _MAXAGE days)
 :: FORFILES /D +MM/DD/YYYY selects files modified on or after that date
 SET _DATEFILTER=
-IF %_MAXAGE% GTR 0 (
+
+:: Validate _MAXAGE is a positive integer (prevent injection)
+SET /A _MAXAGE_VALIDATED=%_MAXAGE% 2>nul
+IF !_MAXAGE_VALIDATED! GTR 0 (
     :: Use PowerShell to compute the date (available on Vista+)
-    FOR /F "usebackq tokens=*" %%D IN (`powershell -NoProfile -Command "(Get-Date).AddDays(-%_MAXAGE%).ToString('MM/dd/yyyy')"`) DO SET _DATEFILTER=/D +%%D
+    :: _MAXAGE_VALIDATED is guaranteed numeric by SET /A above
+    SET "MAXAGE_FOR_PS=!_MAXAGE_VALIDATED!"
+    FOR /F "usebackq tokens=*" %%D IN (`powershell -NoProfile -Command "(Get-Date).AddDays(-[int]$env:MAXAGE_FOR_PS).ToString([System.Globalization.CultureInfo]::CurrentCulture.DateTimeFormat.ShortDatePattern)"`) DO SET _DATEFILTER=/D +%%D
 )
 
-ECHO [+] Scanning %_DIRS% ...
+ECHO [+] Scanning !_DIRS! ...
 ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_EXTS%
 
-FOR %%T IN (%_DIRS%) DO (
-    IF NOT EXIST "%%T" (
-        ECHO [!] Warning: %%T does not exist, skipping.
-    ) ELSE (
-        IF %_DBG% == 1 ECHO [D] Scanning %%T ...
-        :: FORFILES /S = recurse (skips junctions), /C = command per file
-        :: @path outputs quoted full path, @isdir filters out directories
-        IF DEFINED _DATEFILTER (
-            FORFILES /P "%%T" /S !_DATEFILTER! /C "cmd /c if @isdir==FALSE echo @path" >>"%_FILELIST%" 2>nul
-        ) ELSE (
-            FORFILES /P "%%T" /S /C "cmd /c if @isdir==FALSE echo @path" >>"%_FILELIST%" 2>nul
-        )
+:: Iterate directories using semicolon delimiter (supports paths with spaces)
+:: COLLECT_DIRS can be semicolon-separated, e.g. "C:\Program Files;C:\Temp"
+:: Write directory list to a temp file, then iterate with delayed expansion off
+:: to protect paths containing '!' characters.
+SET "_DIRLIST=!_FILELIST!.dirs"
+:: Use PowerShell to split the semicolon-separated list into lines (safe from ! issues)
+SET "DIRS_FOR_PS=!_DIRS!"
+powershell -NoProfile -Command "$env:DIRS_FOR_PS -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }" >"!_DIRLIST!" 2>nul
+IF NOT EXIST "!_DIRLIST!" (
+    :: Fallback: write _DIRS splitting on semicolons via cmd
+    FOR %%T IN ("!_DIRS:;=" "!") DO (
+        IF NOT "%%~T"=="" ECHO %%~T>>"!_DIRLIST!"
     )
 )
+FOR /F "usebackq delims=" %%T IN ("!_DIRLIST!") DO (
+    CALL :SCANDIR "%%T"
+)
+DEL "!_DIRLIST!" 2>nul
+GOTO :SCANDONE
+
+:SCANDIR
+SETLOCAL DisableDelayedExpansion
+SET "_TDIR=%~1"
+SETLOCAL EnableDelayedExpansion
+IF "!_TDIR!"=="" (
+    ENDLOCAL & ENDLOCAL
+    GOTO :EOF
+)
+IF NOT EXIST "!_TDIR!" (
+    ECHO [ERROR] Warning: !_TDIR! does not exist, skipping. 1>&2
+    ENDLOCAL & ENDLOCAL
+    GOTO :EOF
+)
+IF !_DBG! == 1 ECHO [D] Scanning !_TDIR! ...
+:: FORFILES /S = recurse (skips junctions), /C = command per file
+:: @path outputs quoted full path, @isdir filters out directories
+IF DEFINED _DATEFILTER (
+    FORFILES /P "!_TDIR!" /S !_DATEFILTER! /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
+) ELSE (
+    FORFILES /P "!_TDIR!" /S /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
+)
+ENDLOCAL & ENDLOCAL
+GOTO :EOF
+
+:SCANDONE
 
 :: Count total files found
 SET /A _TOTAL=0
-IF EXIST "%_FILELIST%" (
-    FOR /F "usebackq" %%C IN (`type "%_FILELIST%" ^| find /c /v ""`) DO SET /A _TOTAL=%%C
+IF EXIST "!_FILELIST!" (
+    FOR /F "usebackq" %%C IN (`type "!_FILELIST!" ^| find /c /v ""`) DO SET /A _TOTAL=%%C
 )
-ECHO [+] Found %_TOTAL% files within age limit.
+ECHO [+] Found !_TOTAL! files within age limit.
 
 :: PHASE 2: FILTER AND UPLOAD ------------------------------------
-IF %_TOTAL% == 0 GOTO :DONE
+IF !_TOTAL! == 0 GOTO :DONE
 
-FOR /F "usebackq delims=" %%F IN ("%_FILELIST%") DO (
-    SET /A _SCANNED+=1
-    :: %%~F strips surrounding quotes from FORFILES output
-    SET "_FILE=%%~F"
+:: Disable delayed expansion for the file-processing loop so paths
+:: containing '!' characters are not corrupted during %%F expansion.
+SET "_FILELIST_SAVED=!_FILELIST!"
+SETLOCAL DisableDelayedExpansion
+FOR /F "usebackq delims=" %%F IN ("%_FILELIST_SAVED%") DO (
+    CALL :PROCESSFILE "%%~F"
+)
+ENDLOCAL
+GOTO :DONE
 
-    :: Extension check
-    SET _EXTMATCH=0
-    FOR %%E IN (%_EXTS%) DO (
-        IF /I "%%~xF"=="%%E" SET _EXTMATCH=1
+:: ---------------------------------------------------------------
+:: Subroutine: PROCESSFILE
+:: Processes a single file path passed as %1.
+:: Uses SETLOCAL/ENDLOCAL to toggle delayed expansion, protecting
+:: file paths that contain '!' characters from being corrupted.
+:: ---------------------------------------------------------------
+:PROCESSFILE
+:: First, capture the raw path with delayed expansion OFF so '!' is preserved
+SETLOCAL DisableDelayedExpansion
+SET "_FILE=%~1"
+:: Now re-enable delayed expansion for counter logic and comparisons
+SETLOCAL EnableDelayedExpansion
+
+:: Extension check — use a nested FOR to get file attributes from the filesystem
+SET _EXTMATCH=0
+SET _SZ=
+SET "_FEXT="
+FOR %%S IN ("!_FILE!") DO (
+    SET "_SZ=%%~zS"
+    SET "_FEXT=%%~xS"
+)
+FOR %%E IN (%_EXTS%) DO (
+    IF /I "!_FEXT!"=="%%E" SET _EXTMATCH=1
+)
+IF !_EXTMATCH! == 0 (
+    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(extension^)
+    SET /A _SKIPPED+=1
+    :: Propagate all counters back to parent scope
+    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+        ENDLOCAL & ENDLOCAL
+        SET /A _SCANNED=%%A
+        SET /A _SUBMITTED=%%B
+        SET /A _SKIPPED=%%C
+        SET /A _FAILED=%%D
     )
-    IF !_EXTMATCH! == 0 (
-        IF %_DBG% == 1 ECHO [D] Skip: !_FILE! ^(extension^)
-        SET /A _SKIPPED+=1
-    ) ELSE (
-        :: Size check
-        SET "_SZ=%%~zF"
-        IF !_SZ! GTR %_MAXSZ% (
-            IF %_DBG% == 1 ECHO [D] Skip: !_FILE! ^(size: !_SZ!^)
-            SET /A _SKIPPED+=1
-        ) ELSE (
-            :: Upload
-            ECHO [+] Uploading: !_FILE!
-            "%_CURL%" -s -o nul -F "file=@!_FILE!" %_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=%_SRC%%_IDPARAM%
-            IF !ERRORLEVEL! == 0 (
-                SET /A _SUBMITTED+=1
-            ) ELSE (
-                ECHO [-] Failed: !_FILE! ^(curl exit: !ERRORLEVEL!^)
-                SET /A _FAILED+=1
+    GOTO :EOF
+)
+:: Size check (file may have been deleted since listing)
+IF "!_SZ!"=="" (
+    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(file not found^)
+    SET /A _SKIPPED+=1
+    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+        ENDLOCAL & ENDLOCAL
+        SET /A _SCANNED=%%A
+        SET /A _SUBMITTED=%%B
+        SET /A _SKIPPED=%%C
+        SET /A _FAILED=%%D
+    )
+    GOTO :EOF
+)
+IF !_SZ! GTR !_MAXSZ! (
+    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(size: !_SZ!^)
+    SET /A _SKIPPED+=1
+    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+        ENDLOCAL & ENDLOCAL
+        SET /A _SCANNED=%%A
+        SET /A _SUBMITTED=%%B
+        SET /A _SKIPPED=%%C
+        SET /A _FAILED=%%D
+    )
+    GOTO :EOF
+)
+:: Upload — increment _SCANNED only for files that pass filters
+SET /A _SCANNED+=1
+ECHO [+] Uploading: !_FILE!
+SET _HTTPCODE=
+"%_CURL%" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!" --form-string "hostname=%COMPUTERNAME%" --form-string "source_path=!_FILE!" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
+SET _CURLRC=!ERRORLEVEL!
+IF !_CURLRC! == 0 (
+    SET /P _HTTPCODE=<"!_RESPTMP!"
+    DEL "!_RESPTMP!" 2>nul
+    IF "!_HTTPCODE!"=="" (
+        ECHO [ERROR] Failed: !_FILE! ^(empty response^) 1>&2
+        SET /A _FAILED+=1
+    ) ELSE IF "!_HTTPCODE!"=="503" (
+        :: Respect Retry-After header, capped at 60s, default 5s
+        SET _RETRYWAIT=5
+        IF EXIST "!_RESPTMP!.hdr" (
+            FOR /F "tokens=2 delims=: " %%H IN ('FINDSTR /I "^Retry-After:" "!_RESPTMP!.hdr"') DO (
+                SET /A _RETRYWAIT=%%H 2>nul
+                IF !_RETRYWAIT! LEQ 0 SET _RETRYWAIT=5
+                IF !_RETRYWAIT! GTR 60 SET _RETRYWAIT=60
             )
         )
+        DEL "!_RESPTMP!.hdr" 2>nul
+        ECHO [!] Server busy ^(503^), waiting !_RETRYWAIT!s before retry... 1>&2
+        SET /A _PINGCOUNT=!_RETRYWAIT!+1
+        PING -n !_PINGCOUNT! 127.0.0.1 >nul 2>&1
+        SET _HTTPCODE2=
+        "!_CURL!" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!" --form-string "hostname=%COMPUTERNAME%" --form-string "source_path=!_FILE!" "!_SCHEME!://!_TS!:!_TP!/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
+        SET _CURLRC2=!ERRORLEVEL!
+        IF !_CURLRC2! == 0 (
+            SET /P _HTTPCODE2=<"!_RESPTMP!"
+            DEL "!_RESPTMP!" 2>nul
+            DEL "!_RESPTMP!.hdr" 2>nul
+            IF "!_HTTPCODE2!"=="503" (
+                ECHO [ERROR] Failed: !_FILE! ^(server still busy^) 1>&2
+                SET /A _FAILED+=1
+            ) ELSE IF "!_HTTPCODE2:~0,1!"=="2" (
+                SET /A _SUBMITTED+=1
+            ) ELSE (
+                ECHO [ERROR] Failed: !_FILE! ^(HTTP !_HTTPCODE2! on retry^) 1>&2
+                SET /A _FAILED+=1
+            )
+        ) ELSE (
+            DEL "!_RESPTMP!" 2>nul
+            DEL "!_RESPTMP!.hdr" 2>nul
+            ECHO [ERROR] Failed: !_FILE! ^(curl exit: !_CURLRC2!^) 1>&2
+            SET /A _FAILED+=1
+        )
+    ) ELSE IF "!_HTTPCODE:~0,1!"=="2" (
+        DEL "!_RESPTMP!.hdr" 2>nul
+        SET /A _SUBMITTED+=1
+    ) ELSE (
+        DEL "!_RESPTMP!.hdr" 2>nul
+        ECHO [ERROR] Failed: !_FILE! ^(HTTP !_HTTPCODE!^) 1>&2
+        SET /A _FAILED+=1
     )
+) ELSE (
+    DEL "!_RESPTMP!" 2>nul
+    DEL "!_RESPTMP!.hdr" 2>nul
+    ECHO [ERROR] Failed: !_FILE! ^(curl exit: !_CURLRC!^) 1>&2
+    SET /A _FAILED+=1
 )
+:: Clean up any leftover temp files from this iteration
+IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
+IF EXIST "!_RESPTMP!.hdr" DEL "!_RESPTMP!.hdr" 2>nul
+:: Propagate all counters back to parent scope
+FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+    ENDLOCAL & ENDLOCAL
+    SET /A _SCANNED=%%A
+    SET /A _SUBMITTED=%%B
+    SET /A _SKIPPED=%%C
+    SET /A _FAILED=%%D
+)
+GOTO :EOF
 
 :DONE
 :: COLLECTION END MARKER -----------------------------------------
-IF DEFINED _SCANID (
-    "%_CURL%" -s -o nul -X POST -H "Content-Type: application/json" -d "{\"type\":\"end\",\"source\":\"%_SRC%\",\"collector\":\"batch/0.5\",\"scan_id\":\"%_SCANID%\",\"stats\":{\"scanned\":%_SCANNED%,\"submitted\":%_SUBMITTED%,\"skipped\":%_SKIPPED%,\"failed\":%_FAILED%}}" %_SCHEME%://%_TS%:%_TP%/api/collection 2>nul
+:: Only send end marker if the server supports collection markers (2xx on begin)
+IF !_BEGIN_SUPPORTED! == 1 (
+    :: JSON-escape scan_id (backslashes and quotes)
+    SET "_JSCANID=!_SCANID!"
+    IF DEFINED _JSCANID (
+        SET "_JSCANID=!_JSCANID:\=\\!"
+        SET "_JSCANID=!_JSCANID:"=\"!"
+    )
+    IF DEFINED _SCANID (
+        "%_CURL%" -s -o nul -X POST -H "Content-Type: application/json" -d "{\"type\":\"end\",\"source\":\"!_JSRC!\",\"hostname\":\"!_JHOST!\",\"collector\":\"batch/0.5\",\"scan_id\":\"!_JSCANID!\",\"stats\":{\"scanned\":!_SCANNED!,\"submitted\":!_SUBMITTED!,\"skipped\":!_SKIPPED!,\"failed\":!_FAILED!}}" "!_SCHEME!://!_TS!:!_TP!/api/collection" 2>nul
+    ) ELSE (
+        "%_CURL%" -s -o nul -X POST -H "Content-Type: application/json" -d "{\"type\":\"end\",\"source\":\"!_JSRC!\",\"hostname\":\"!_JHOST!\",\"collector\":\"batch/0.5\",\"stats\":{\"scanned\":!_SCANNED!,\"submitted\":!_SUBMITTED!,\"skipped\":!_SKIPPED!,\"failed\":!_FAILED!}}" "!_SCHEME!://!_TS!:!_TP!/api/collection" 2>nul
+    )
 )
 
 :: CLEANUP -------------------------------------------------------
-IF EXIST "%_FILELIST%" DEL "%_FILELIST%" 2>nul
+IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
+IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
+IF EXIST "!_RESPTMP!.hdr" DEL "!_RESPTMP!.hdr" 2>nul
+IF EXIST "!_RESPTMP!.code" DEL "!_RESPTMP!.code" 2>nul
 
 :: SUMMARY -------------------------------------------------------
 ECHO.
-ECHO [+] Done. scanned=%_SCANNED% submitted=%_SUBMITTED% skipped=%_SKIPPED% failed=%_FAILED%
+ECHO [+] Done. scanned=!_SCANNED! submitted=!_SUBMITTED! skipped=!_SKIPPED! failed=!_FAILED!
 
+:: EXIT CODE: 1 if any uploads failed, 0 otherwise
+IF !_FAILED! GTR 0 (
+    ENDLOCAL
+    EXIT /b 1
+)
 ENDLOCAL
 EXIT /b 0
