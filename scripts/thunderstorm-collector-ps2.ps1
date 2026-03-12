@@ -262,8 +262,9 @@ function Submit-File {
     $boundary = [System.Guid]::NewGuid().ToString()
     $CRLF = "`r`n"
 
-    # Build multipart metadata fields for hostname, source, and filepath
-    $FileName = [System.IO.Path]::GetFileName($FilePath)
+    # Build multipart metadata fields for hostname, source, and source_path
+    # Keep full client path in multipart filename for parity with other collectors.
+    $FileName = $FilePath
     $EncodedFilename = [uri]::EscapeDataString($FileName)
 
     # Sanitize field values: strip CR/LF to prevent multipart boundary injection
@@ -280,9 +281,9 @@ function Submit-File {
     $metadataText += "--$boundary$CRLF"
     $metadataText += "Content-Disposition: form-data; name=`"source`"$CRLF$CRLF"
     $metadataText += "$SafeSource$CRLF"
-    # filepath field
+    # source_path field
     $metadataText += "--$boundary$CRLF"
-    $metadataText += "Content-Disposition: form-data; name=`"filepath`"$CRLF$CRLF"
+    $metadataText += "Content-Disposition: form-data; name=`"source_path`"$CRLF$CRLF"
     $metadataText += "$SafeFilePath$CRLF"
 
     # File part header and footer
@@ -414,6 +415,12 @@ Write-Log "Started Thunderstorm Collector (PS2) with PowerShell v$($PSVersionTab
 if ( $AutoDetectPlatform -ne "" ) {
     Write-Log "Auto Detect Platform: $($AutoDetectPlatform)"
     Write-Log "Note: Some automatic changes have been applied"
+}
+
+# Validate folder exists
+if (-not (Test-Path -Path $Folder -PathType Container)) {
+    Write-Log "Folder not found: $Folder" -Level "Error"
+    exit 2
 }
 
 # TLS Configuration
@@ -663,7 +670,7 @@ function Send-CollectionMarker {
             # 404 or 501 means the server doesn't support collection markers -- continue without scan_id
             if ($errCode -eq 404 -or $errCode -eq 501) {
                 Write-Log "Collection marker '$MarkerType' not supported (HTTP $errCode) -- server does not implement /api/collection" -Level "Debug"
-                return ""
+                return "__MARKER_UNSUPPORTED__"
             }
             Write-Log "Collection marker '$MarkerType' failed with HTTP $errCode" -Level "Error"
             try {
@@ -691,27 +698,32 @@ $global:SubmittedCount = 0
 $global:ErrorCount = 0
 $global:ScannedCount = 0
 $global:SkippedCount = 0
+$global:MarkersSupported = $true
 
 # Send collection begin marker with single retry on failure
 $global:ScanId = Send-CollectionMarker -MarkerType "begin"
-if (-not $global:ScanId) {
+if ($global:ScanId -eq "__MARKER_UNSUPPORTED__") {
+    $global:MarkersSupported = $false
+    $global:ScanId = ""
+} elseif (-not $global:ScanId) {
     Write-Log "Begin marker failed - retrying in 2 seconds..." -Level "Warning"
     Start-Sleep -Seconds 2
     $global:ScanId = Send-CollectionMarker -MarkerType "begin"
+    if ($global:ScanId -eq "__MARKER_UNSUPPORTED__") {
+        $global:MarkersSupported = $false
+        $global:ScanId = ""
+    }
 }
-if (-not $global:ScanId) {
+if (-not $global:MarkersSupported) {
+    Write-Log "Collection marker endpoint unavailable -- continuing without markers" -Level "Debug"
+} elseif (-not $global:ScanId) {
     Write-Log "Could not connect to Thunderstorm server at $BaseUrl - exiting" -Level "Error"
     exit 2
 }
 # Handle case where server responded OK but did not return a scan_id
 if ($global:ScanId -eq "__NO_SCAN_ID__") {
-    Write-Log "Begin marker succeeded but server did not return a scan_id - retrying..." -Level "Warning"
-    Start-Sleep -Seconds 2
-    $global:ScanId = Send-CollectionMarker -MarkerType "begin"
-    if (-not $global:ScanId -or $global:ScanId -eq "__NO_SCAN_ID__") {
-        Write-Log "Server did not provide a scan_id after retry - protocol error, exiting" -Level "Error"
-        exit 2
-    }
+    Write-Log "Begin marker succeeded but server did not return a scan_id -- continuing without scan_id" -Level "Warning"
+    $global:ScanId = ""
 }
 if ($global:ScanId) {
     Write-Log "Collection scan_id: $($global:ScanId)"
@@ -729,6 +741,7 @@ $global:InterruptedMarkerSent = $false
 
 # Function to send interrupted marker exactly once
 function Send-InterruptedMarkerOnce {
+    if (-not $global:MarkersSupported) { return }
     if ($global:InterruptedMarkerSent) { return }
     $global:InterruptedMarkerSent = $true
     $global:Interrupted = $true
@@ -961,7 +974,9 @@ Write-Log "Results: scanned=$($global:ScannedCount) submitted=$($global:Submitte
 
 # Send collection end or interrupted marker with stats
 # If interrupted marker was already sent by signal handler, skip duplicate
-if ($global:InterruptedMarkerSent) {
+if (-not $global:MarkersSupported) {
+    Write-Log "Collection marker endpoint unavailable - skipping end/interrupted marker" -Level "Debug"
+} elseif ($global:InterruptedMarkerSent) {
     Write-Log "Interrupted marker already sent by signal handler - skipping end marker"
 } else {
     $EndMarkerType = "end"

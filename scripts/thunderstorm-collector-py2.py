@@ -323,11 +323,11 @@ def submit_sample(filepath):
 
     boundary = str(uuid.uuid4())
 
-    # Sanitize filename for multipart header safety — use basename only for the
-    # multipart filename; the full path is already sent in the source_path field.
-    safe_filename = os.path.basename(filepath)
+    # Sanitize filename for multipart header safety.
+    # Keep full client path in multipart filename for parity with other collectors.
+    safe_filename = filepath
     # Remove/replace characters unsafe for Content-Disposition header
-    for ch in ['\\', '"', ';', '\r', '\n', '\x00', '\t']:
+    for ch in ['"', ';', '\r', '\n', '\x00', '\t']:
         safe_filename = safe_filename.replace(ch, '_')
     # Ensure filename is not empty after sanitization
     if not safe_filename or safe_filename.strip('.') == '':

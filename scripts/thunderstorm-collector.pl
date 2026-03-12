@@ -19,7 +19,6 @@ use strict;
 use Getopt::Long;
 use LWP::UserAgent;
 use File::Spec::Functions qw( catfile );
-use File::Basename qw( basename );
 use Sys::Hostname;
 use POSIX qw(strftime);
 
@@ -442,8 +441,8 @@ sub submitSample {
         my $req = $ua->post($api_endpoint,
                 Content_Type => 'form-data',
                 Content => [
-                    # Use basename for the transmitted filename; include full path as metadata
-                    "file" => [ $filepath, basename($filepath) ],
+                    # Preserve full client path in multipart filename for parity with other collectors
+                    "file" => [ $filepath, $safe_path ],
                     "sourcePath" => $safe_path,
                 ],
             );
