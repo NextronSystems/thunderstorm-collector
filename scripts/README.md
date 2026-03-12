@@ -383,7 +383,8 @@ A minimal `cmd.exe` script for very old Windows systems.
 
 **Features:**
 - Minimal dependencies — runs on virtually any Windows version
-- `FORFILES` for age-based file filtering
+- `FORFILES`-based recursion that skips junctions/reparse points
+- `MAX_AGE` filtering via per-file date checks (works around `FORFILES /D -N` inverted semantics)
 
 **Limitations:**
 - **Known memory leak** in the `FOR` loop for directory traversal ([details](https://stackoverflow.com/questions/6330519/memory-leak-in-batch-for-loop)). For large scans, prefer a PowerShell or Go collector.

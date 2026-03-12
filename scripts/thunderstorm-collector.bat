@@ -31,8 +31,8 @@ SETLOCAL EnableDelayedExpansion
 :: - No progress reporting: cmd.exe cannot detect interactive terminals.
 :: - No signal handling: Ctrl+C terminates without cleanup.
 :: - MAX_AGE filtering: FORFILES /D -N has inverted semantics (files ≥N days
-::   OLD, not files from last N days). Age filtering is NOT implemented.
-::   Use the PowerShell collector for correct age filtering.
+::   OLD, not files from last N days). This script applies age filtering
+::   per-file in PROCESSFILE as a workaround.
 :: - FINDSTR regex: Windows 7 has limited regex support ($ anchors and
 ::   negated character classes [^...] are broken). Hostname validation
 ::   provides defense-in-depth; server-side validation is authoritative.
@@ -172,10 +172,8 @@ SET _IDPARAM=
 :: last modified date less than or equal to the current date minus dd days."
 
 ECHO [+] Scanning !_DIRS! ...
-ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, EXTENSIONS=%_EXTS%
-:: NOTE: MAX_AGE is NOT applied by the batch collector due to FORFILES /D semantics.
-:: FORFILES /D -N means "files ≥ N days OLD", not "files from last N days".
-:: Use PowerShell collector for age filtering.
+ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_EXTS%
+:: NOTE: MAX_AGE is applied per file in PROCESSFILE (not in FORFILES /D).
 
 :: Iterate directories using semicolon delimiter (supports paths with spaces)
 :: COLLECT_DIRS can be semicolon-separated, e.g. "C:\Program Files;C:\Temp"
@@ -298,6 +296,24 @@ IF !_SZ! GTR !_MAXSZ! (
     )
     GOTO :EOF
 )
+:: Age check — FORFILES /D -N matches old files (<= today-N), so we check per-file
+:: and skip those that are too old.
+IF !_MAXAGE! GTR 0 (
+    SET "_ISOLD=0"
+    CALL :ISFILEOLD "!_FILE!" !_MAXAGE!
+    IF "!_ISOLD!"=="1" (
+        IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(age: older than !_MAXAGE! days^)
+        SET /A _SKIPPED+=1
+        FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+            ENDLOCAL & ENDLOCAL
+            SET /A _SCANNED=%%A
+            SET /A _SUBMITTED=%%B
+            SET /A _SKIPPED=%%C
+            SET /A _FAILED=%%D
+        )
+        GOTO :EOF
+    )
+)
 :: Upload — increment _SCANNED only for files that pass filters
 SET /A _SCANNED+=1
 ECHO [+] Uploading: !_FILE!
@@ -371,6 +387,31 @@ FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
     SET /A _SKIPPED=%%C
     SET /A _FAILED=%%D
 )
+GOTO :EOF
+
+:: ---------------------------------------------------------------
+:: Subroutine: ISFILEOLD
+:: Sets _ISOLD=1 if file is older than/equal to MAX_AGE days, else 0.
+:: ---------------------------------------------------------------
+:ISFILEOLD
+SETLOCAL DisableDelayedExpansion
+SET "_CHECK_FILE=%~1"
+SET "_CHECK_AGE=%~2"
+SET "_ISOLD=0"
+SET "_AGEDIR="
+SET "_AGENAME="
+FOR %%S IN ("%_CHECK_FILE%") DO (
+    SET "_AGEDIR=%%~dpS"
+    SET "_AGENAME=%%~nxS"
+)
+IF "%_AGEDIR%"=="" GOTO :ISFILEOLDRETURN
+IF "%_AGENAME%"=="" GOTO :ISFILEOLDRETURN
+
+FORFILES /P "%_AGEDIR%" /M "%_AGENAME%" /D -%_CHECK_AGE% /C "cmd /c if @isdir==FALSE exit /b 0" >nul 2>nul
+IF NOT ERRORLEVEL 1 SET "_ISOLD=1"
+
+:ISFILEOLDRETURN
+ENDLOCAL & SET "_ISOLD=%_ISOLD%"
 GOTO :EOF
 
 :DONE
