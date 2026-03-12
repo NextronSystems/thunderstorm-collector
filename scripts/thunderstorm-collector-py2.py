@@ -519,6 +519,10 @@ def collection_marker(server, port, use_tls, insecure, ca_cert, source, collecto
             else:
                 return (None, True)
         else:
+            if resp.status in (404, 501):
+                print_stderr("[WARN] Collection marker '{}' not supported (HTTP {}) — continuing without scan_id".format(
+                    marker_type, resp.status))
+                return ("", True)
             print_stderr("[WARN] Collection marker '{}' returned HTTP {}".format(marker_type, resp.status))
             if attempt < max_attempts - 1:
                 time.sleep(2)

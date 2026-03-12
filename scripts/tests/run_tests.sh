@@ -105,9 +105,15 @@ trap cleanup EXIT INT TERM
 
 # Pick an available port
 pick_port() {
+    local port
     if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
-    elif command -v shuf >/dev/null 2>&1; then
+        port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || true)"
+        if [ -n "$port" ] && [ "$port" -ge 1 ] 2>/dev/null; then
+            echo "$port"
+            return 0
+        fi
+    fi
+    if command -v shuf >/dev/null 2>&1; then
         shuf -i 10000-60000 -n 1
     else
         echo $(( RANDOM % 50000 + 10000 ))
@@ -194,7 +200,7 @@ upload_count() {
 # Extract stat from collector output: "scanned=4 submitted=3 ..."
 parse_collector_stat() {
     local output="$1" key="$2"
-    echo "$output" | grep -oP "${key}=\K[0-9]+" | tail -1
+    echo "$output" | grep -oE "${key}=[0-9]+" | tail -1 | cut -d= -f2
 }
 
 # ── Test result helpers ──────────────────────────────────────────────────────

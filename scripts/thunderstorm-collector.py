@@ -499,9 +499,10 @@ def collection_marker(server, port, tls, insecure, source, collector_version, ma
                 time.sleep(wait_time)
                 continue
             elif 400 <= resp.status < 500:
-                # 404 = endpoint not supported, continue without scan_id but success
-                if resp.status == 404:
-                    print_error("[WARN] Collection marker '{}' not supported (HTTP 404) — server does not implement /api/collection".format(marker_type))
+                # 404/501 = endpoint not supported, continue without scan_id but success
+                if resp.status == 404 or resp.status == 501:
+                    print_error("[WARN] Collection marker '{}' not supported (HTTP {}) — server does not implement /api/collection".format(
+                        marker_type, resp.status))
                     return ""
                 # Other client errors (4xx) indicate configuration problems — no retry
                 print_error("[ERROR] Collection marker '{}' returned HTTP {}".format(marker_type, resp.status))

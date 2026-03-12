@@ -601,12 +601,18 @@ collection_marker() {
                 "$marker_url" 2>"$header_file"
             _marker_rc=$?
         fi
-        # If transport succeeded, validate HTTP status code
+        # If transport succeeded, validate HTTP status code.
+        # 404/501 means the server doesn't implement marker endpoint; continue without scan_id.
         if [ "$_marker_rc" -eq 0 ]; then
             _http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
             if [ -n "$_http_code" ] && [ "$_http_code" -ge 400 ] 2>/dev/null; then
-                log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
-                _marker_rc=1
+                if [ "$_http_code" = "404" ] || [ "$_http_code" = "501" ]; then
+                    log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
+                    _marker_rc=0
+                else
+                    log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
+                    _marker_rc=1
+                fi
             fi
         fi
         if [ "$_marker_rc" -eq 0 ]; then

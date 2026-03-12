@@ -222,9 +222,9 @@ sub collection_marker {
         );
     };
     return ("", 0) unless $resp;
-    # 404 = endpoint not supported, continue without scan_id but success
-    if ($resp->code == 404) {
-        print STDERR "[WARN] Collection marker '$marker_type' not supported (HTTP 404) — server does not implement /api/collection\n";
+    # 404/501 = endpoint not supported, continue without scan_id but success
+    if ($resp->code == 404 || $resp->code == 501) {
+        print STDERR "[WARN] Collection marker '$marker_type' not supported (HTTP " . $resp->code . ") — server does not implement /api/collection\n";
         return ("", 1);
     }
     return ("", 0) unless $resp->is_success;

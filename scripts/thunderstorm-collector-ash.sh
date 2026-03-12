@@ -690,7 +690,7 @@ collection_marker() {
         if [ "$_cm_curl_rc" -eq 0 ]; then
             case "$_cm_http_code" in
                 2[0-9][0-9]) _cm_ok=1 ;;
-                404) log_msg warn "Collection marker '$_cm_type' not supported (HTTP 404) — server does not implement /api/collection"; _cm_ok=1 ;;
+                404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code) — server does not implement /api/collection"; _cm_ok=1 ;;
                 *) log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code" ;;
             esac
         fi
@@ -705,7 +705,7 @@ collection_marker() {
         if [ "$_cm_wget_rc" -eq 0 ]; then
             case "$_cm_http_code" in
                 2[0-9][0-9]|"") _cm_ok=1 ;;
-                404) log_msg warn "Collection marker '$_cm_type' not supported (HTTP 404) — server does not implement /api/collection"; _cm_ok=1 ;;
+                404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code) — server does not implement /api/collection"; _cm_ok=1 ;;
                 *) log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code" ;;
             esac
         else
