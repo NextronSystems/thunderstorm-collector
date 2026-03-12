@@ -30,6 +30,12 @@ SETLOCAL EnableDelayedExpansion
 ::   URL_SCHEME=http as workarounds.
 :: - No progress reporting: cmd.exe cannot detect interactive terminals.
 :: - No signal handling: Ctrl+C terminates without cleanup.
+:: - MAX_AGE filtering: FORFILES /D -N has inverted semantics (files ≥N days
+::   OLD, not files from last N days). Age filtering is NOT implemented.
+::   Use the PowerShell collector for correct age filtering.
+:: - FINDSTR regex: Windows 7 has limited regex support ($ anchors and
+::   negated character classes [^...] are broken). Hostname validation
+::   provides defense-in-depth; server-side validation is authoritative.
 :: ----------------------------------------------------------------
 
 :: CONFIGURATION -------------------------------------------------
@@ -158,18 +164,18 @@ SET _IDPARAM=
 :: Phase 1: Use FORFILES to generate a filtered file list.
 :: FORFILES does NOT follow junctions/reparse points, solving the infinite loop issue.
 
-:: Calculate cutoff date for age filter
-SET _DATEFILTER=
-
-:: Validate _MAXAGE is a positive integer (prevent injection)
-SET /A _MAXAGE_VALIDATED=%_MAXAGE% 2>nul
-IF !_MAXAGE_VALIDATED! GTR 0 (
-    :: FORFILES natively supports -N for "modified within last N days"
-    SET _DATEFILTER=/D -!_MAXAGE_VALIDATED!
-)
+:: NOTE: Age filtering is NOT performed in the FORFILES phase because
+:: FORFILES /D -N has INVERTED semantics: it means "files modified ON OR BEFORE
+:: N days ago" (old files), not "files from the last N days". Age filtering
+:: is handled during file iteration in PROCESSFILE instead.
+:: See: https://ss64.com/nt/forfiles.html - "/D -dd selects files with a
+:: last modified date less than or equal to the current date minus dd days."
 
 ECHO [+] Scanning !_DIRS! ...
-ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_EXTS%
+ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, EXTENSIONS=%_EXTS%
+:: NOTE: MAX_AGE is NOT applied by the batch collector due to FORFILES /D semantics.
+:: FORFILES /D -N means "files ≥ N days OLD", not "files from last N days".
+:: Use PowerShell collector for age filtering.
 
 :: Iterate directories using semicolon delimiter (supports paths with spaces)
 :: COLLECT_DIRS can be semicolon-separated, e.g. "C:\Program Files;C:\Temp"
@@ -202,11 +208,9 @@ IF NOT EXIST "!_TDIR!" (
 IF !_DBG! == 1 ECHO [D] Scanning !_TDIR! ...
 :: FORFILES /S = recurse (skips junctions), /C = command per file
 :: @path outputs quoted full path, @isdir filters out directories
-IF DEFINED _DATEFILTER (
-    FORFILES /P "!_TDIR!" /S !_DATEFILTER! /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
-) ELSE (
-    FORFILES /P "!_TDIR!" /S /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
-)
+:: Note: Age filtering via /D has inverted semantics and is not used here.
+:: Age is checked during iteration in PROCESSFILE.
+FORFILES /P "!_TDIR!" /S /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
 ENDLOCAL & ENDLOCAL
 GOTO :EOF
 
@@ -217,7 +221,7 @@ SET /A _TOTAL=0
 IF EXIST "!_FILELIST!" (
     FOR /F "usebackq" %%C IN (`type "!_FILELIST!" ^| find /c /v ""`) DO SET /A _TOTAL=%%C
 )
-ECHO [+] Found !_TOTAL! files within age limit.
+ECHO [+] Found !_TOTAL! files.
 
 :: PHASE 2: FILTER AND UPLOAD ------------------------------------
 IF !_TOTAL! == 0 GOTO :DONE
