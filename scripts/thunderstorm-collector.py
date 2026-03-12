@@ -498,7 +498,7 @@ def collection_marker(server, port, tls, insecure, source, collector_version, ma
                 print_error("[WARN] Collection marker '{}' got 503, retrying in {}s...".format(marker_type, wait_time))
                 time.sleep(wait_time)
                 continue
-            elif 400 <= resp.status < 500:
+            elif (400 <= resp.status < 500) or resp.status == 501:
                 # 404/501 = endpoint not supported, continue without scan_id but success
                 if resp.status == 404 or resp.status == 501:
                     print_error("[WARN] Collection marker '{}' not supported (HTTP {}) — server does not implement /api/collection".format(
