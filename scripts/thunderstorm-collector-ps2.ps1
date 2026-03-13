@@ -568,7 +568,7 @@ function Get-JsonValue {
         $val = $val.Replace('\r', "`r")
         $val = $val.Replace('\t', "`t")
         $val = $val.Replace('\b', "`b")
-        $val = $val.Replace('\f', [char]0x0C)
+        $val = $val.Replace('\f', [string][char]0x0C)
         $val = $val.Replace("`0BACKSLASH`0", '\')
         # Unescape \uXXXX sequences (including surrogate pairs)
         $val = [regex]::Replace($val, '\\u([0-9a-fA-F]{4})(?:\\u([0-9a-fA-F]{4}))?', {
