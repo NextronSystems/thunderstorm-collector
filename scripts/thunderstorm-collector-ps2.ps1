@@ -24,9 +24,9 @@
     .PARAMETER Folder
         Folder to process (default: C:\)
     .PARAMETER MaxAge
-        Select files based on the number of days in which the file has been created or modified (default: 0 = no age selection)
+        Select files based on the number of days in which the file has been created or modified (default: 14 days)
     .PARAMETER MaxSize
-        Maximum file size in MegaBytes for submission (default: 20MB)
+        Maximum file size in MegaBytes for submission (default: 2MB / 2048KB)
     .PARAMETER Extensions
         Extensions to select for submission (default: preset list)
     .PARAMETER UseSSL
@@ -63,15 +63,15 @@ param(
         [Alias('F')]
         [string]$Folder = "C:\",
 
-    [Parameter(HelpMessage='Select files based on days since last modification (default: 0 = no age selection)')]
+    [Parameter(HelpMessage='Select files based on days since last modification (default: 14 days)')]
         [ValidateNotNullOrEmpty()]
         [Alias('MA')]
-        [int]$MaxAge,
+        [int]$MaxAge = 14,
 
-    [Parameter(HelpMessage='Maximum file size in MegaBytes (default: 20MB)')]
+    [Parameter(HelpMessage='Maximum file size in MegaBytes (default: 2MB / 2048KB)')]
         [ValidateNotNullOrEmpty()]
         [Alias('MS')]
-        [int]$MaxSize = 20,
+        [int]$MaxSize = 2,
 
     [Parameter(HelpMessage='Extensions to select for submission')]
         [ValidateNotNullOrEmpty()]
@@ -126,7 +126,7 @@ if ( $OutputPath -eq "" -or $OutputPath -like "*Advanced Threat Protection*" ) {
 
 # Maximum Size - apply default only when not explicitly passed
 if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
-    [int]$MaxSize = 20
+    [int]$MaxSize = 2
 }
 
 # Extensions
@@ -892,7 +892,7 @@ while ($fileEnumerator.MoveNext()) {
     $FileRetryStart = Get-Date
     $MaxRetrySeconds = 300  # Cap total retry time per file at 5 minutes
 
-    while ( $StatusCode -ne 200 ) {
+    while ( $StatusCode -lt 200 -or $StatusCode -ge 300 ) {
         if ($global:Interrupted) { break }
         # Check total elapsed retry time for this file
         if (((Get-Date) - $FileRetryStart).TotalSeconds -gt $MaxRetrySeconds) {
@@ -904,7 +904,7 @@ while ($fileEnumerator.MoveNext()) {
         Write-Log "Submitting to Thunderstorm server: $($file.FullName) ..." -Level "Info"
         $StatusCode = Submit-File -Url $Url -FilePath $file.FullName -FileSize $file.Length
 
-        if ( $StatusCode -eq 200 ) {
+        if ( $StatusCode -ge 200 -and $StatusCode -lt 300 ) {
             $global:SubmittedCount++
             $FileSubmitted = $true
             break

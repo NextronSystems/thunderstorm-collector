@@ -384,7 +384,10 @@ upload_with_curl() {
     set -- -sS -X POST -o "$_uc_resp" -D "$_uc_hdr" -w '%{http_code}'
     [ "$INSECURE" -eq 1 ] && set -- "$@" -k
     [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
-    set -- "$@" "$_uc_endpoint" -F "file=@${_uc_filepath};filename=${_uc_safe_name}"
+    set -- "$@" "$_uc_endpoint" \
+        -F "file=@${_uc_filepath};filename=${_uc_safe_name}" \
+        -F "hostname=${SOURCE_NAME}" \
+        -F "source_path=${_uc_filepath}"
 
     # Use -w to capture HTTP status code; do NOT use --fail so we can inspect 503
     _uc_http_code="$(curl "$@" 2>"${_uc_resp}.err")"
@@ -464,6 +467,12 @@ upload_with_wget() {
             "$_uw_safe_name"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
         cat "$_uw_filepath"
+        printf '\r\n--%s\r\n' "$_uw_boundary"
+        printf 'Content-Disposition: form-data; name="hostname"\r\n\r\n'
+        printf '%s' "$SOURCE_NAME"
+        printf '\r\n--%s\r\n' "$_uw_boundary"
+        printf 'Content-Disposition: form-data; name="source_path"\r\n\r\n'
+        printf '%s' "$_uw_filepath"
         printf '\r\n--%s--\r\n' "$_uw_boundary"
     } > "$_uw_body" 2>/dev/null || return 95
 
@@ -545,6 +554,12 @@ upload_with_nc() {
             "$_nc_safe_name"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
         cat "$_nc_filepath"
+        printf '\r\n--%s\r\n' "$_nc_boundary"
+        printf 'Content-Disposition: form-data; name="hostname"\r\n\r\n'
+        printf '%s' "$SOURCE_NAME"
+        printf '\r\n--%s\r\n' "$_nc_boundary"
+        printf 'Content-Disposition: form-data; name="source_path"\r\n\r\n'
+        printf '%s' "$_nc_filepath"
         printf '\r\n--%s--\r\n' "$_nc_boundary"
     } > "$_nc_body" 2>/dev/null || return 98
 

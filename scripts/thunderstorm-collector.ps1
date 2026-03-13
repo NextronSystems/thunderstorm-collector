@@ -24,9 +24,9 @@
     .PARAMETER Folder 
         Folder to process (default: C:\)
     .PARAMETER MaxAge 
-        Select files based on the number of days in which the file has been create or modified (default: 0 = no age selection)
+        Select files based on the number of days in which the file has been create or modified (default: 14 days)
     .PARAMETER MaxSize
-        Extensions to select for submission (default: all of them)    
+        Maximum file size in MegaBytes for submission (default: 2MB / 2048KB)
     .PARAMETER Extensions
         Extensions to select for submission (default: all of them)
     .PARAMETER Debugging 
@@ -71,16 +71,16 @@ param
         [string]$Folder = "C:\",
 
     [Parameter(
-        HelpMessage='Select files based on the number of days in which the file has been create or modified (default: 0 = no age selection)')]
+        HelpMessage='Select files based on the number of days in which the file has been create or modified (default: 14 days)')]
         [ValidateNotNullOrEmpty()]
         [Alias('MA')]
-        [int]$MaxAge,
+        [int]$MaxAge = 14,
 
     [Parameter(
-        HelpMessage='Select only files smaller than the given number in MegaBytes (default: 20MB) ')]
+        HelpMessage='Select only files smaller than the given number in MegaBytes (default: 2MB / 2048KB) ')]
         [ValidateNotNullOrEmpty()]
         [Alias('MS')]
-        [int]$MaxSize = 20,
+        [int]$MaxSize = 2,
 
     [Parameter(HelpMessage='Extensions to select for submission (default: recommended preset)')]
         [ValidateNotNullOrEmpty()]
@@ -148,7 +148,7 @@ if ( $OutputPath -eq "" -or $OutputPath.Contains("Advanced Threat Protection") )
 # Maximum Size
 # Apply default only when no -MaxSize parameter was explicitly passed
 if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
-    [int]$MaxSize = 20
+    [int]$MaxSize = 2
 }
 # Enforce hard upper bound on MaxSize to prevent out-of-memory conditions
 if ($MaxSize -gt 200) {
@@ -741,7 +741,7 @@ try {
         $Max503Retries = 10
         $Retries503 = 0
 
-        while ( $($StatusCode) -ne 200 ) {
+        while ( $StatusCode -lt 200 -or $StatusCode -ge 300 ) {
             $fileStream = $null
             $requestStream = $null
             try {
@@ -908,4 +908,3 @@ if ($FilesFailed -gt 0) {
 } else {
     exit 0
 }
-

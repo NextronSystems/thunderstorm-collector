@@ -70,9 +70,12 @@ NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fu
 SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs"
 
 # Cloud storage folder names — if any path segment matches (case-insensitive),
-# the directory is pruned. Covers OneDrive, Dropbox, Google Drive, iCloud,
-# Nextcloud, ownCloud, MEGA, Tresorit, Syncthing.
-CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive Google Drive iCloud Drive iCloudDrive Nextcloud ownCloud MEGA MEGAsync Tresorit SyncThing"
+# the directory is pruned. Keep names with embedded spaces separate so the
+# find-level pruning logic does not accidentally exclude generic names such as
+# "Drive" or "Google" on unrelated paths.
+CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive iCloudDrive Nextcloud ownCloud MEGA MEGAsync Tresorit SyncThing"
+CLOUD_DIR_NAMES_SPACED="Google Drive|iCloud Drive"
+CLOUD_DIR_PATTERNS="OneDrive -|OneDrive-|Nextcloud-"
 
 # get_excluded_mounts: parse /proc/mounts and return mount points for
 # network and special filesystem types (one per line).
@@ -97,6 +100,22 @@ is_cloud_path() {
             *"/$name_lower"/*|*"/$name_lower") return 0 ;;
         esac
     done
+    local old_ifs
+    old_ifs="$IFS"
+    IFS='|'
+    for name in $CLOUD_DIR_NAMES_SPACED; do
+        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+        case "$path_lower" in
+            *"/$name_lower"/*|*"/$name_lower") IFS="$old_ifs"; return 0 ;;
+        esac
+    done
+    for name in $CLOUD_DIR_PATTERNS; do
+        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+        case "$path_lower" in
+            *"/$name_lower"*) IFS="$old_ifs"; return 0 ;;
+        esac
+    done
+    IFS="$old_ifs"
     # macOS: ~/Library/CloudStorage
     case "$path_lower" in
         */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
@@ -1016,14 +1035,19 @@ main() {
 
     # Prune known cloud storage directory names at the find level so they are
     # excluded from both the file count and processing (keeps progress accurate).
-    # Note: CLOUD_DIR_NAMES is space-separated, so multi-word names like
-    # "Google Drive" are split into individual words. This is intentional —
-    # the is_cloud_path() fallback catches path-based patterns.
     local _cloud_name
     for _cloud_name in $CLOUD_DIR_NAMES; do
-        # -iname is supported by GNU find and most BSD finds
         find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
     done
+    local _old_ifs="$IFS"
+    IFS='|'
+    for _cloud_name in $CLOUD_DIR_NAMES_SPACED; do
+        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
+    done
+    for _cloud_name in $CLOUD_DIR_PATTERNS; do
+        find_excludes+=(\( -iname "${_cloud_name}*" -type d -prune \) -o)
+    done
+    IFS="$_old_ifs"
     # Also prune macOS CloudStorage
     find_excludes+=(\( -iname "CloudStorage" -path "*/Library/CloudStorage" -type d -prune \) -o)
 

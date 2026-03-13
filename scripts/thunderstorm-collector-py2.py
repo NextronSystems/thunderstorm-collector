@@ -450,7 +450,7 @@ def submit_sample(filepath):
             print_stderr("[WARN] Server busy (503), retrying after {}s ...".format(retry_time))
             time.sleep(retry_time)
             continue
-        elif resp.status == 200:
+        elif 200 <= resp.status < 300:
             num_submitted += 1
             return
         else:
@@ -507,7 +507,7 @@ def collection_marker(server, port, use_tls, insecure, ca_cert, source, collecto
                 except Exception:
                     pass
 
-        if resp.status == 200:
+        if 200 <= resp.status < 300:
             if resp_body and resp_body.strip():
                 try:
                     data = json.loads(resp_body)
