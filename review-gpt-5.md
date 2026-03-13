@@ -6,21 +6,21 @@
 1. `thunderstorm-collector-ash.sh` (`scripts/thunderstorm-collector-ash.sh:387-390`, `scripts/thunderstorm-collector-ash.sh:464-477`, `scripts/thunderstorm-collector-ash.sh:550-560`)
    Issue: all three ash upload paths (`curl`, `wget`, `nc`) were sending only the `file` part and omitted the `hostname` and `filename` multipart fields.
    Why it matters: this made the POSIX collector diverge from the other implementations and dropped metadata used for audit correlation and path attribution.
-   Suggested fix: add `hostname` and `source_path` to every multipart encoder. Implemented in this change.
+   Suggested fix: add `hostname` and `filename` to every multipart encoder. Implemented in this change.
 
 2. `thunderstorm-collector-py2.py` (`scripts/thunderstorm-collector-py2.py:453-455`, `scripts/thunderstorm-collector-py2.py:510-514`)
    Issue: the Python 2 collector treated only HTTP `200` as success for both sample uploads and collection markers.
-   Why it matters: `/api/checkAsync` is allowed to return other `2xx` codes such as `202 Accepted`; the old logic would retry successful async submissions and could duplicate uploads.
+   Why it matters: even though the local `thunderstormAPI` client and tests expect `200`, hard-coding a single success code is brittle and can cause duplicate submissions if a deployment returns a different successful `2xx` code.
    Suggested fix: accept the full `2xx` range consistently. Implemented in this change.
 
 3. `thunderstorm-collector.ps1` (`scripts/thunderstorm-collector.ps1:744-780`)
    Issue: the PowerShell 3+ upload loop terminated only on HTTP `200`.
-   Why it matters: a legitimate async `202` response would keep the loop running and resubmit the same file.
+   Why it matters: hard-coding a single success code makes the loop needlessly brittle and can resubmit files if a deployment returns a different successful `2xx` code.
    Suggested fix: treat any `2xx` response as success. Implemented in this change.
 
 4. `thunderstorm-collector-ps2.ps1` (`scripts/thunderstorm-collector-ps2.ps1:895-910`)
    Issue: the PowerShell 2 upload loop had the same `200`-only success check.
-   Why it matters: it could duplicate uploads against async endpoints that return `202`.
+   Why it matters: it was equally brittle and could resubmit files if a deployment returns a successful non-`200` `2xx` response.
    Suggested fix: treat any `2xx` response as success. Implemented in this change.
 
 5. `thunderstorm-collector.pl` (`scripts/thunderstorm-collector.pl:441-447`)

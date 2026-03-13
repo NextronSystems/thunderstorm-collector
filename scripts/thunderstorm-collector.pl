@@ -428,7 +428,7 @@ sub submitSample {
         $successful = 0;
         $next_sleep = 0;
         eval {
-            # Sanitize sourcePath: encode to UTF-8 with replacement, strip control chars
+            # Sanitize filename metadata: encode to UTF-8 with replacement, strip control chars
         my $safe_path = $filepath;
         if ($] >= 5.008) {
             require Encode;
