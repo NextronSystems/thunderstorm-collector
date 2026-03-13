@@ -322,8 +322,8 @@ def submit_sample(filepath, file_stat=None):
     # Sanitize hostname to prevent CRLF injection in multipart body
     safe_hostname = hostname.replace('\r', ' ').replace('\n', ' ')
 
-    # Sanitize source_path to prevent CRLF injection / boundary collision in multipart body
-    safe_source_path = filepath.replace('\r', ' ').replace('\n', ' ')
+    # Sanitize filename metadata to prevent CRLF injection / boundary collision in multipart body
+    safe_metadata_filename = filepath.replace('\r', ' ').replace('\n', ' ')
 
     # Build multipart preamble (metadata fields + file header) and epilogue
     preamble = b""
@@ -335,12 +335,12 @@ def submit_sample(filepath, file_stat=None):
         "{hostname}\r\n"
     ).format(boundary=boundary, hostname=safe_hostname).encode("utf-8")
 
-    # source_path field
+    # filename metadata field
     preamble += (
         "--{boundary}\r\n"
-        "Content-Disposition: form-data; name=\"source_path\"\r\n\r\n"
-        "{source_path}\r\n"
-    ).format(boundary=boundary, source_path=safe_source_path).encode("utf-8")
+        "Content-Disposition: form-data; name=\"filename\"\r\n\r\n"
+        "{metadata_filename}\r\n"
+    ).format(boundary=boundary, metadata_filename=safe_metadata_filename).encode("utf-8")
 
     # file field header
     preamble += (

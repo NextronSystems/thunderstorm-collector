@@ -443,7 +443,7 @@ sub submitSample {
                 Content => [
                     # Preserve full client path in multipart filename for parity with other collectors
                     "file" => [ $filepath, $safe_path ],
-                    "source_path" => $safe_path,
+                    "filename" => $safe_path,
                 ],
             );
             $successful = $req->is_success;

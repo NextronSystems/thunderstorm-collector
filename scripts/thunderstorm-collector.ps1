@@ -702,13 +702,13 @@ try {
         $SafeHostname = $Hostname -replace '[\r\n]','' -replace '"','\"'
         $SafeSource = $Source -replace '[\r\n]','' -replace '"','\"'
 
-        # Metadata parts: hostname and source_path
+        # Metadata parts: hostname and filename
         $metadataText = "--$boundary$CRLF" +
             "Content-Disposition: form-data; name=`"hostname`"$CRLF$CRLF$SafeHostname$CRLF" +
             "--$boundary$CRLF" +
             "Content-Disposition: form-data; name=`"source`"$CRLF$CRLF$SafeSource$CRLF" +
             "--$boundary$CRLF" +
-            "Content-Disposition: form-data; name=`"source_path`"$CRLF$CRLF$SafeSourcePath$CRLF"
+            "Content-Disposition: form-data; name=`"filename`"$CRLF$CRLF$SafeSourcePath$CRLF"
 
         # File part
         $headerText = "--$boundary$CRLF" +

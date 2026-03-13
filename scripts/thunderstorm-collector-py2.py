@@ -354,7 +354,7 @@ def submit_sample(filepath):
     preamble = b""
     preamble += _form_field("hostname", hostname)
     preamble += _form_field("source", source)
-    preamble += _form_field("source_path", filepath)
+    preamble += _form_field("filename", filepath)
 
     safe_filename_bytes = safe_filename.encode('utf-8', 'replace') if isinstance(safe_filename, unicode) else safe_filename
     file_header = b"--" + boundary_bytes + b"\r\n"

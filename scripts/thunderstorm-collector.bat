@@ -318,7 +318,7 @@ IF !_MAXAGE! GTR 0 (
 SET /A _SCANNED+=1
 ECHO [+] Uploading: !_FILE!
 SET _HTTPCODE=
-"%_CURL%" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!" --form-string "hostname=%COMPUTERNAME%" --form-string "source_path=!_FILE!" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
+"%_CURL%" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!" --form-string "hostname=%COMPUTERNAME%" --form-string "filename=!_FILE!" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
 SET _CURLRC=!ERRORLEVEL!
 IF !_CURLRC! == 0 (
     SET /P _HTTPCODE=<"!_RESPTMP!"
@@ -341,7 +341,7 @@ IF !_CURLRC! == 0 (
         SET /A _PINGCOUNT=!_RETRYWAIT!+1
         PING -n !_PINGCOUNT! 127.0.0.1 >nul 2>&1
         SET _HTTPCODE2=
-        "!_CURL!" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!" --form-string "hostname=%COMPUTERNAME%" --form-string "source_path=!_FILE!" "!_SCHEME!://!_TS!:!_TP!/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
+        "!_CURL!" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!" --form-string "hostname=%COMPUTERNAME%" --form-string "filename=!_FILE!" "!_SCHEME!://!_TS!:!_TP!/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
         SET _CURLRC2=!ERRORLEVEL!
         IF !_CURLRC2! == 0 (
             SET /P _HTTPCODE2=<"!_RESPTMP!"

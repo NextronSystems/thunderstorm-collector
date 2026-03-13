@@ -262,7 +262,7 @@ function Submit-File {
     $boundary = [System.Guid]::NewGuid().ToString()
     $CRLF = "`r`n"
 
-    # Build multipart metadata fields for hostname, source, and source_path
+    # Build multipart metadata fields for hostname, source, and filename
     # Keep full client path in multipart filename for parity with other collectors.
     $FileName = $FilePath
     $EncodedFilename = [uri]::EscapeDataString($FileName)
@@ -281,9 +281,9 @@ function Submit-File {
     $metadataText += "--$boundary$CRLF"
     $metadataText += "Content-Disposition: form-data; name=`"source`"$CRLF$CRLF"
     $metadataText += "$SafeSource$CRLF"
-    # source_path field
+    # filename field
     $metadataText += "--$boundary$CRLF"
-    $metadataText += "Content-Disposition: form-data; name=`"source_path`"$CRLF$CRLF"
+    $metadataText += "Content-Disposition: form-data; name=`"filename`"$CRLF$CRLF"
     $metadataText += "$SafeFilePath$CRLF"
 
     # File part header and footer

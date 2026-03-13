@@ -4,7 +4,7 @@
 ## Critical Findings
 
 1. `thunderstorm-collector-ash.sh` (`scripts/thunderstorm-collector-ash.sh:387-390`, `scripts/thunderstorm-collector-ash.sh:464-477`, `scripts/thunderstorm-collector-ash.sh:550-560`)
-   Issue: all three ash upload paths (`curl`, `wget`, `nc`) were sending only the `file` part and omitted the `hostname` and `source_path` multipart fields.
+   Issue: all three ash upload paths (`curl`, `wget`, `nc`) were sending only the `file` part and omitted the `hostname` and `filename` multipart fields.
    Why it matters: this made the POSIX collector diverge from the other implementations and dropped metadata used for audit correlation and path attribution.
    Suggested fix: add `hostname` and `source_path` to every multipart encoder. Implemented in this change.
 
@@ -24,9 +24,9 @@
    Suggested fix: treat any `2xx` response as success. Implemented in this change.
 
 5. `thunderstorm-collector.pl` (`scripts/thunderstorm-collector.pl:441-447`)
-   Issue: the Perl collector sent the metadata field as `sourcePath` instead of `source_path`.
-   Why it matters: this broke parity with the rest of the collectors and with the server-side field naming used elsewhere in the repo.
-   Suggested fix: rename the field to `source_path`. Implemented in this change.
+   Issue: the Perl collector sent the metadata field as `sourcePath` instead of `filename`.
+   Why it matters: this broke parity with the server-side field naming expected by the stub server and Thunderstorm itself.
+   Suggested fix: rename the field to `filename`. Implemented in this change.
 
 6. `thunderstorm-collector.sh` (`scripts/thunderstorm-collector.sh:72-78`, `scripts/thunderstorm-collector.sh:93-118`, `scripts/thunderstorm-collector.sh:1036-1050`)
    Issue: the Bash collector stored cloud-folder names in a space-delimited string that included multi-word names such as `Google Drive` and `iCloud Drive`.
@@ -66,7 +66,7 @@
 - No additional unambiguous issues remained after that change.
 
 ### thunderstorm-collector.pl
-- Fixed the multipart metadata field name from `sourcePath` to `source_path`.
+- Fixed the multipart metadata field name from `sourcePath` to `filename`.
 - The earlier path-walking and retry issues appear to be addressed in the current version.
 
 ### thunderstorm-collector.ps1
