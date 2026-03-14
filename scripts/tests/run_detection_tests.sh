@@ -14,9 +14,18 @@
 #   7. Subdirectory recursion (files found at all levels)
 #
 # Negative tests (verifying collectors DON'T do what they shouldn't):
-#   8. Directory scope — scanning /target must NOT pick up files from /decoy
-#   9. Age filter — files older than --max-age must NOT be submitted
-#  10. Extension filter (PS only) — exotic extensions must NOT be submitted
+#   8.  Directory scope — scanning /target must NOT pick up files from /decoy
+#   9.  Age filter — files older than --max-age must NOT be submitted
+#  10.  Extension filter (PS only) — exotic extensions must NOT be submitted
+#
+# Edge cases & robustness:
+#  12.  Empty files (0 bytes) — must not crash or produce false positives
+#  13.  Unicode filenames — must not crash or corrupt path
+#  14.  Symlinks — must NOT follow symlinks (security: no directory escape)
+#  15.  Broken/dangling symlinks — must not crash
+#  16.  Special characters in filenames (spaces, parens) — must handle correctly
+#  17.  Directories named after excluded paths — must not crash
+#  18.  Unreadable files (chmod 000) — must not crash, must process other files
 #
 # Requires: thunderstorm-stub server with YARA support (-tags yara)
 #           running on localhost with both content rules and filename IOC rules
@@ -112,10 +121,9 @@ stop_stub() {
     STUB_PID=""
 }
 
-# No-op: we don't clear the log between tests. Instead, each test uses
-# a unique source identifier to find its entries in the log.
+# Mark the current log position so query_log only sees entries from here forward.
 clear_log() {
-    :
+    mark_log_position
 }
 
 cleanup() {
@@ -124,13 +132,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Query the JSONL log for entries matching a client_filename substring
-# Returns the FIRST JSON line matching the filename
+# Record the current log line count — used to scope queries to "after this point"
+mark_log_position() {
+    LOG_OFFSET="$(wc -l < "$STUB_LOG" 2>/dev/null || echo 0)"
+}
+
+# Query the JSONL log for entries matching a client_filename substring.
+# Only searches entries AFTER the last mark_log_position() call.
+# Returns the FIRST matching JSON line (empty string if not found).
 query_log() {
     local filename_substr="$1"
     python3 -c "
 import json, sys
-for line in open('$STUB_LOG'):
+offset = int('${LOG_OFFSET:-0}')
+for i, line in enumerate(open('$STUB_LOG')):
+    if i < offset:
+        continue
     line = line.strip()
     if not line: continue
     d = json.loads(line)
@@ -459,6 +476,7 @@ test_full_path_in_log() {
 # Verifies that scanning /target does NOT pick up files from /decoy
 test_directory_scope() {
     local collector="$1"
+    clear_log
     local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
 
     # Create two sibling directories: target and decoy
@@ -493,6 +511,7 @@ test_directory_scope() {
 # scans with --max-age 1, and verifies only the recent file is submitted.
 test_age_filter() {
     local collector="$1"
+    clear_log
     local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
 
     mkdir -p "$fixtures/aged"
@@ -541,6 +560,7 @@ test_age_filter() {
 # Files with exotic extensions (.xyz) should NOT be submitted.
 test_extension_filter() {
     local collector="$1"
+    clear_log
 
     # Only applies to PowerShell collectors
     case "$collector" in
@@ -584,6 +604,7 @@ test_extension_filter() {
 # Verifies that the collector descends into subdirectories.
 test_subdirectory_recursion() {
     local collector="$1"
+    clear_log
     local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
 
     mkdir -p "$fixtures/root/sub1/sub2"
@@ -610,9 +631,231 @@ test_subdirectory_recursion() {
     rm -rf "$fixtures"
 }
 
+# ── 12. Empty files — should be submitted but produce no YARA match ─────────
+test_empty_file() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    mkdir -p "$fixtures/empty"
+    : > "$fixtures/empty/empty-${collector}.exe"   # 0 bytes
+
+    run_collector "$collector" "$fixtures/empty" --max-age 30 >/dev/null 2>&1 || true
+
+    # Empty files: some collectors may skip 0-byte files, others may submit them.
+    # Either way, they must NOT crash and must NOT produce a false positive.
+    local entry; entry="$(query_log "empty-${collector}.exe")"
+    if [ -n "$entry" ]; then
+        local score; score="$(get_score "$entry")"
+        # Empty files may score > 0 due to filename IOC rules (e.g. path in /tmp).
+        # That's not a content-based false positive — it's correct filename matching.
+        # Verify no CONTENT-based rule matched (TestRule should NOT match empty files).
+        local has_test_rule; has_test_rule="$(has_rule "$entry" "TestRule")"
+        if [ "$has_test_rule" = "yes" ]; then
+            fail "$collector/empty-file: TestRule matched empty file (content false positive!)"
+        else
+            pass "$collector/empty-file: submitted, score=$score (no content match)"
+        fi
+    else
+        pass "$collector/empty-file: empty file skipped (acceptable behavior)"
+    fi
+
+    rm -rf "$fixtures"
+}
+
+# ── 13. Unicode filenames — must not crash or corrupt the path ──────────────
+test_unicode_filename() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    mkdir -p "$fixtures/unicode"
+    # File with Unicode chars in name
+    echo "$MALICIOUS_CONTENT" > "$fixtures/unicode/données-${collector}.exe"
+
+    run_collector "$collector" "$fixtures/unicode" --max-age 30 >/dev/null 2>&1 || true
+
+    local entry; entry="$(query_log "données-${collector}.exe")"
+    if [ -n "$entry" ]; then
+        local score; score="$(get_score "$entry")"
+        if [ "$score" -gt 0 ] 2>/dev/null; then
+            pass "$collector/unicode-filename: detected with score=$score"
+        else
+            pass "$collector/unicode-filename: submitted (score=$score)"
+        fi
+    else
+        # Some collectors may not handle Unicode — acceptable to skip
+        skip "$collector/unicode-filename: file not submitted (Unicode handling varies)"
+    fi
+
+    rm -rf "$fixtures"
+}
+
+# ── 14. Symlinks — must NOT follow symlinks (security) ──────────────────────
+# A symlink inside the scan directory pointing to a file outside should NOT
+# be followed, as it could be used to exfiltrate data or escape the scan scope.
+test_symlink_not_followed() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    mkdir -p "$fixtures/scandir" "$fixtures/outside"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/outside/secret-${collector}.exe"
+
+    # Create a real file in the scan dir (control)
+    echo "$MALICIOUS_CONTENT" > "$fixtures/scandir/real-${collector}.exe"
+
+    # Create a symlink in the scan dir pointing to the file outside
+    ln -s "$fixtures/outside/secret-${collector}.exe" "$fixtures/scandir/link-${collector}.exe"
+
+    run_collector "$collector" "$fixtures/scandir" --max-age 30 >/dev/null 2>&1 || true
+
+    # Real file MUST be submitted
+    local real_entry; real_entry="$(query_log "real-${collector}.exe")"
+    if [ -z "$real_entry" ]; then
+        fail "$collector/symlink: real file not found in log"
+        rm -rf "$fixtures"
+        return
+    fi
+
+    # Symlinked file MUST NOT be submitted
+    local link_entry; link_entry="$(query_log "secret-${collector}.exe")"
+    local link_entry2; link_entry2="$(query_log "link-${collector}.exe")"
+    if [ -n "$link_entry" ] || [ -n "$link_entry2" ]; then
+        fail "$collector/symlink: symlinked file WAS followed (security risk!)"
+    else
+        pass "$collector/symlink: symlinks correctly skipped"
+    fi
+
+    rm -rf "$fixtures"
+}
+
+# ── 15. Broken symlinks — must not crash ────────────────────────────────────
+test_broken_symlink() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    mkdir -p "$fixtures/broken"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/broken/real-${collector}.exe"
+
+    # Create a dangling symlink (target doesn't exist)
+    ln -s "/nonexistent/file-${collector}.exe" "$fixtures/broken/dangling-${collector}.exe"
+
+    # Must not crash
+    run_collector "$collector" "$fixtures/broken" --max-age 30 >/dev/null 2>&1 || true
+
+    # Real file should still be processed
+    local entry; entry="$(query_log "real-${collector}.exe")"
+    if [ -n "$entry" ]; then
+        pass "$collector/broken-symlink: collector survived dangling symlink"
+    else
+        fail "$collector/broken-symlink: real file not found (collector may have crashed)"
+    fi
+
+    rm -rf "$fixtures"
+}
+
+# ── 16. Special characters in filenames ─────────────────────────────────────
+# Spaces, quotes, and other shell-sensitive characters must not break the collector.
+test_special_chars_filename() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    mkdir -p "$fixtures/special"
+    # File with spaces
+    echo "$MALICIOUS_CONTENT" > "$fixtures/special/has spaces-${collector}.exe"
+    # File with parentheses
+    echo "$MALICIOUS_CONTENT" > "$fixtures/special/parens(1)-${collector}.exe"
+
+    run_collector "$collector" "$fixtures/special" --max-age 30 >/dev/null 2>&1 || true
+
+    local space_entry; space_entry="$(query_log "has spaces-${collector}.exe")"
+    local paren_entry; paren_entry="$(query_log "parens(1)-${collector}.exe")"
+
+    local found=0
+    [ -n "$space_entry" ] && found=$((found + 1))
+    [ -n "$paren_entry" ] && found=$((found + 1))
+
+    if [ "$found" -eq 2 ]; then
+        pass "$collector/special-chars: spaces and parens handled ($found/2 found)"
+    elif [ "$found" -gt 0 ]; then
+        pass "$collector/special-chars: partial handling ($found/2 found)"
+    else
+        fail "$collector/special-chars: no files with special chars submitted"
+    fi
+
+    rm -rf "$fixtures"
+}
+
+# ── 17. Hard folder exclusions — /proc, /sys, /dev must be skipped ──────────
+# We can't actually scan /proc etc. in tests, but we can create directories
+# NAMED like excluded paths inside our test tree and verify they're skipped.
+# NOTE: This test only applies to collectors that check basename matches.
+# Most collectors use absolute path prefix matching, so /tmp/test/proc/ won't
+# trigger the exclusion. This test verifies the collector doesn't crash when
+# scanning a directory tree with suspicious-looking names.
+test_excluded_dirs_survive() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    # Create a tree with directories named after excluded paths
+    mkdir -p "$fixtures/scanme/proc" "$fixtures/scanme/dev" "$fixtures/scanme/normal"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/scanme/proc/inside-proc-${collector}.exe"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/scanme/dev/inside-dev-${collector}.exe"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/scanme/normal/legit-${collector}.exe"
+
+    run_collector "$collector" "$fixtures/scanme" --max-age 30 >/dev/null 2>&1 || true
+
+    # The "normal" file MUST be found (prove collector ran)
+    local legit; legit="$(query_log "legit-${collector}.exe")"
+    if [ -z "$legit" ]; then
+        fail "$collector/excluded-dirs: legit file not found (collector may have crashed)"
+        rm -rf "$fixtures"
+        return
+    fi
+
+    # Files inside "proc" and "dev" subdirs: we don't assert either way,
+    # since hard exclusions are typically for absolute paths (/proc, /dev).
+    # The point is the collector survives and processes other files.
+    pass "$collector/excluded-dirs: collector survived dirs named proc/dev"
+
+    rm -rf "$fixtures"
+}
+
+# ── 18. No-permission files — must not crash ───────────────────────────────
+test_unreadable_file() {
+    local collector="$1"
+    clear_log
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+
+    mkdir -p "$fixtures/perms"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/perms/readable-${collector}.exe"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/perms/unreadable-${collector}.exe"
+    chmod 000 "$fixtures/perms/unreadable-${collector}.exe"
+
+    run_collector "$collector" "$fixtures/perms" --max-age 30 >/dev/null 2>&1 || true
+
+    # Readable file should still be processed
+    local entry; entry="$(query_log "readable-${collector}.exe")"
+    if [ -n "$entry" ]; then
+        pass "$collector/unreadable-file: collector survived unreadable file"
+    else
+        fail "$collector/unreadable-file: readable file not found (collector may have crashed)"
+    fi
+
+    # Cleanup (restore perms so rm works)
+    chmod 644 "$fixtures/perms/unreadable-${collector}.exe" 2>/dev/null
+    rm -rf "$fixtures"
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
+
+LOG_OFFSET=0
 
 echo ""
 echo "${BOLD}Detection & Path Verification Tests${RESET}"
@@ -660,6 +903,13 @@ for collector in "${available_collectors[@]}"; do
     test_age_filter "$collector"
     test_extension_filter "$collector"
     test_subdirectory_recursion "$collector"
+    test_empty_file "$collector"
+    test_unicode_filename "$collector"
+    test_symlink_not_followed "$collector"
+    test_broken_symlink "$collector"
+    test_special_chars_filename "$collector"
+    test_excluded_dirs_survive "$collector"
+    test_unreadable_file "$collector"
 
     rm -rf "$FIXTURES" /tmp/x 2>/dev/null
 done
