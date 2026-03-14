@@ -58,25 +58,31 @@ assert_not_uploaded() {
 
 # Create patched copies of Python/Perl collectors with specific max_age/max_size
 patch_python() {
-    local max_age="$1" max_size="$2" out="$TMP_DIR/thunderstorm-collector-patched.py"
+    local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-patched.py"
+    # Patch both the global default and the argparse default
     sed -e "s/^max_age = .*/max_age = $max_age/" \
-        -e "s/^max_size = .*/max_size = $max_size/" \
+        -e "s/^max_size = .*/max_size = $max_size_kb/" \
+        -e "s/\"--max-size-kb\", type=int, default=[0-9]*/\"--max-size-kb\", type=int, default=$max_size_kb/" \
+        -e "s/\"--max-age\", type=int, default=[0-9]*/\"--max-age\", type=int, default=$max_age/" \
         "$SCRIPTS_DIR/thunderstorm-collector.py" > "$out"
     echo "$out"
 }
 
 patch_python2() {
-    local max_age="$1" max_size="$2" out="$TMP_DIR/thunderstorm-collector-py2-patched.py"
+    local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-py2-patched.py"
+    # Patch both the global default and the argparse default
     sed -e "s/^max_age = .*/max_age = $max_age/" \
-        -e "s/^max_size = .*/max_size = $max_size/" \
+        -e "s/^max_size = .*/max_size = $max_size_kb/" \
+        -e "s/\"--max-size-kb\", type=int, default=[0-9]*/\"--max-size-kb\", type=int, default=$max_size_kb/" \
+        -e "s/\"--max-age\", type=int, default=[0-9]*/\"--max-age\", type=int, default=$max_age/" \
         "$SCRIPTS_DIR/thunderstorm-collector-py2.py" > "$out"
     echo "$out"
 }
 
 patch_perl() {
-    local max_age="$1" max_size="$2" out="$TMP_DIR/thunderstorm-collector-patched.pl"
+    local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-patched.pl"
     sed -e "s/^our \\\$max_age = .*/our \$max_age = $max_age;/" \
-        -e "s/^our \\\$max_size = .*/our \$max_size = $max_size;/" \
+        -e "s/^our \\\$max_size_kb = .*/our \$max_size_kb = $max_size_kb;/" \
         "$SCRIPTS_DIR/thunderstorm-collector.pl" > "$out"
     echo "$out"
 }
@@ -187,8 +193,8 @@ fi
 # ══════════════════════════════════════════════
 echo "── Python 3 Collector ────────────────────────"
 
-# max-size test: patch to 1MB max_size, 365 days max_age
-py_script="$(patch_python 365 1)"
+# max-size test: 1024KB (~1MB), 365 days max_age
+py_script="$(patch_python 365 1024)"
 start=$(log_lines)
 python3 "$py_script" -s "$STUB_HOST" -p "$STUB_PORT" -d "$FIXTURES_DIR" 2>/dev/null || true
 sleep 1
@@ -198,7 +204,7 @@ assert_not_uploaded "$start" "large.bin"    "python3/max-size-1MB"
 assert_not_uploaded "$start" "huge.bin"     "python3/max-size-1MB"
 
 # max-age test: patch to 7 days max_age, 100MB max_size
-py_script="$(patch_python 7 100)"
+py_script="$(patch_python 7 50000)"
 start=$(log_lines)
 python3 "$py_script" -s "$STUB_HOST" -p "$STUB_PORT" -d "$FIXTURES_DIR" 2>/dev/null || true
 sleep 1
@@ -206,8 +212,8 @@ assert_uploaded     "$start" "fresh.txt"    "python3/max-age-7d"
 assert_not_uploaded "$start" "old.txt"      "python3/max-age-7d"
 assert_not_uploaded "$start" "ancient.txt"  "python3/max-age-7d"
 
-# combined: 7 days + 0.4MB (only tiny fresh files)
-py_script="$(patch_python 7 0.4)"
+# combined: 7 days + 200KB (only tiny fresh files; medium.bin is 500KB → filtered)
+py_script="$(patch_python 7 200)"
 start=$(log_lines)
 python3 "$py_script" -s "$STUB_HOST" -p "$STUB_PORT" -d "$FIXTURES_DIR" 2>/dev/null || true
 sleep 1
@@ -223,14 +229,14 @@ echo ""
 if command -v python2 >/dev/null 2>&1; then
     echo "── Python 2 Collector ────────────────────────"
 
-    py2_script="$(patch_python2 365 1)"
+    py2_script="$(patch_python2 365 1024)"
     start=$(log_lines)
     python2 "$py2_script" -s "$STUB_HOST" -p "$STUB_PORT" -d "$FIXTURES_DIR" 2>/dev/null || true
     sleep 1
     assert_uploaded     "$start" "small.txt"    "python2/max-size-1MB"
     assert_not_uploaded "$start" "large.bin"    "python2/max-size-1MB"
 
-    py2_script="$(patch_python2 7 100)"
+    py2_script="$(patch_python2 7 50000)"
     start=$(log_lines)
     python2 "$py2_script" -s "$STUB_HOST" -p "$STUB_PORT" -d "$FIXTURES_DIR" 2>/dev/null || true
     sleep 1
@@ -249,19 +255,19 @@ fi
 # ══════════════════════════════════════════════
 echo "── Perl Collector ────────────────────────────"
 
-# max-size test: 1MB, 365 days
-pl_script="$(patch_perl 365 1)"
+# max-size test: 1024KB (~1MB), 365 days
+pl_script="$(patch_perl 365 1024)"
 start=$(log_lines)
-perl "$pl_script" -- -s "$STUB_HOST" --port "$STUB_PORT" --dir "$FIXTURES_DIR" 2>/dev/null || true
+perl "$pl_script" -s "$STUB_HOST" --port "$STUB_PORT" --dir "$FIXTURES_DIR" 2>/dev/null || true
 sleep 1
 assert_uploaded     "$start" "small.txt"    "perl/max-size-1MB"
 assert_not_uploaded "$start" "large.bin"    "perl/max-size-1MB"
 assert_not_uploaded "$start" "huge.bin"     "perl/max-size-1MB"
 
-# max-age test: 7 days, 100MB
-pl_script="$(patch_perl 7 100)"
+# max-age test: 7 days, 50000KB (~50MB, effectively no size limit)
+pl_script="$(patch_perl 7 50000)"
 start=$(log_lines)
-perl "$pl_script" -- -s "$STUB_HOST" --port "$STUB_PORT" --dir "$FIXTURES_DIR" 2>/dev/null || true
+perl "$pl_script" -s "$STUB_HOST" --port "$STUB_PORT" --dir "$FIXTURES_DIR" 2>/dev/null || true
 sleep 1
 assert_uploaded     "$start" "fresh.txt"    "perl/max-age-7d"
 assert_not_uploaded "$start" "old.txt"      "perl/max-age-7d"
