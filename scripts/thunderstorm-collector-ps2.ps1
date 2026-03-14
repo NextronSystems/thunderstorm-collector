@@ -267,25 +267,6 @@ function Submit-File {
     $FileName = $FilePath
     $EncodedFilename = [uri]::EscapeDataString($FileName)
 
-    # Sanitize field values: strip CR/LF to prevent multipart boundary injection
-    $SafeHostname = ($env:COMPUTERNAME) -replace '[\r\n]', ''
-    $SafeSource = ($Source) -replace '[\r\n]', ''
-    $SafeFilePath = ($FilePath) -replace '[\r\n]', ''
-
-    $metadataText = ""
-    # hostname field
-    $metadataText += "--$boundary$CRLF"
-    $metadataText += "Content-Disposition: form-data; name=`"hostname`"$CRLF$CRLF"
-    $metadataText += "$SafeHostname$CRLF"
-    # source field
-    $metadataText += "--$boundary$CRLF"
-    $metadataText += "Content-Disposition: form-data; name=`"source`"$CRLF$CRLF"
-    $metadataText += "$SafeSource$CRLF"
-    # filename field
-    $metadataText += "--$boundary$CRLF"
-    $metadataText += "Content-Disposition: form-data; name=`"filename`"$CRLF$CRLF"
-    $metadataText += "$SafeFilePath$CRLF"
-
     # File part header and footer
     # Use RFC 5987 encoding for filename to safely handle special characters
     # Build ASCII-safe fallback filename: replace non-ASCII and control chars with underscores
@@ -304,7 +285,6 @@ function Submit-File {
         "Content-Type: application/octet-stream$CRLF$CRLF"
     $footerText = "$CRLF--$boundary--$CRLF"
 
-    $metadataBytes = [System.Text.Encoding]::UTF8.GetBytes($metadataText)
     $fileHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($fileHeaderText)
     $footerBytes = [System.Text.Encoding]::UTF8.GetBytes($footerText)
 
@@ -319,7 +299,7 @@ function Submit-File {
         }
 
         $actualFileSize = $fileStream.Length
-        $contentLength = $metadataBytes.Length + $fileHeaderBytes.Length + $actualFileSize + $footerBytes.Length
+        $contentLength = $fileHeaderBytes.Length + $actualFileSize + $footerBytes.Length
 
         $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Method = "POST"
@@ -334,7 +314,7 @@ function Submit-File {
         $stream = $null
         try {
             $stream = $request.GetRequestStream()
-            $stream.Write($metadataBytes, 0, $metadataBytes.Length)
+            
             $stream.Write($fileHeaderBytes, 0, $fileHeaderBytes.Length)
 
             try {
@@ -803,7 +783,7 @@ $TotalFiles = 0
 if ($ShowProgress) {
     Write-Log "Counting files for progress reporting ..."
     # Count pass: use Measure-Object to avoid storing all FileInfo objects
-    $countResult = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Measure-Object
+    $countResult = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } | Measure-Object
     $TotalFiles = $countResult.Count
     Write-Log "Found $TotalFiles files to evaluate in $Folder"
 }
@@ -845,6 +825,14 @@ while ($fileEnumerator.MoveNext()) {
     } elseif ($ShowProgress) {
         # No total count available; show scanned count only
         Write-Host -NoNewline ("`r[{0}] scanning...  " -f $global:ScannedCount)
+    }
+
+    # Symlink Check — skip symbolic links (security: prevent directory escape)
+    # PS 2.0 compatible: check Attributes for ReparsePoint flag
+    if ( $file.Attributes -band [System.IO.FileAttributes]::ReparsePoint ) {
+        Write-Log "$($file.Name) skipped (symbolic link)" -Level "Debug"
+        $global:SkippedCount++
+        continue
     }
 
     # Size Check

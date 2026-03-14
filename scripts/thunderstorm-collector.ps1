@@ -698,26 +698,14 @@ try {
 
         $CRLF = "`r`n"
         $SafeFileName = $CurrentFile.FullName -replace '[\r\n]','' -replace '"','\"'
-        $SafeSourcePath = $CurrentFile.FullName -replace '[\r\n]','' -replace '"','\"'
-        $SafeHostname = $Hostname -replace '[\r\n]','' -replace '"','\"'
-        $SafeSource = $Source -replace '[\r\n]','' -replace '"','\"'
 
-        # Metadata parts: hostname and filename
-        $metadataText = "--$boundary$CRLF" +
-            "Content-Disposition: form-data; name=`"hostname`"$CRLF$CRLF$SafeHostname$CRLF" +
-            "--$boundary$CRLF" +
-            "Content-Disposition: form-data; name=`"source`"$CRLF$CRLF$SafeSource$CRLF" +
-            "--$boundary$CRLF" +
-            "Content-Disposition: form-data; name=`"filename`"$CRLF$CRLF$SafeSourcePath$CRLF"
-
-        # File part
+        # File part — the full path goes in the Content-Disposition filename
         $headerText = "--$boundary$CRLF" +
             "Content-Disposition: form-data; name=`"file`"; filename=`"$SafeFileName`"$CRLF" +
             "Content-Type: application/octet-stream$CRLF$CRLF"
 
         $footerText = "$CRLF--$boundary--$CRLF"
 
-        $metadataBytes = [System.Text.Encoding]::UTF8.GetBytes($metadataText)
         $headerBytes = [System.Text.Encoding]::UTF8.GetBytes($headerText)
         $footerBytes = [System.Text.Encoding]::UTF8.GetBytes($footerText)
 
@@ -748,7 +736,7 @@ try {
                 Write-Log "Submitting to Thunderstorm server: $($CurrentFile.FullName) ..." -Level "Info"
 
                 # Stream the multipart body directly to the request to avoid double-buffering
-                $ContentLength = $metadataBytes.Length + $headerBytes.Length + $fileLength + $footerBytes.Length
+                $ContentLength = $headerBytes.Length + $fileLength + $footerBytes.Length
                 $WebRequest = [System.Net.HttpWebRequest]::Create($Url)
                 $WebRequest.Method = "POST"
                 $WebRequest.ContentType = "multipart/form-data; boundary=$boundary"
@@ -757,7 +745,7 @@ try {
                 $WebRequest.AllowWriteStreamBuffering = $False
 
                 $requestStream = $WebRequest.GetRequestStream()
-                $requestStream.Write($metadataBytes, 0, $metadataBytes.Length)
+                
                 $requestStream.Write($headerBytes, 0, $headerBytes.Length)
 
                 # Stream file content directly to request stream
