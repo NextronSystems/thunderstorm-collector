@@ -410,8 +410,6 @@ upload_with_curl() {
         -D "$header_file" \
         "$endpoint" \
         -F "$form_arg" \
-        -F "hostname=${SOURCE_NAME}" \
-        -F "filename=${filepath}" \
         > "$resp_file" 2>"$err_file"
     code=$?
 
@@ -497,12 +495,6 @@ upload_with_wget() {
         printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' "$safe_filename"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
         cat "$filepath"
-        printf '\r\n--%s\r\n' "$boundary"
-        printf 'Content-Disposition: form-data; name="hostname"\r\n\r\n'
-        printf '%s' "$SOURCE_NAME"
-        printf '\r\n--%s\r\n' "$boundary"
-        printf 'Content-Disposition: form-data; name="filename"\r\n\r\n'
-        printf '%s' "$filepath"
         printf '\r\n--%s--\r\n' "$boundary"
     } > "$body_file" 2>/dev/null || return 95
 

@@ -441,9 +441,8 @@ sub submitSample {
         my $req = $ua->post($api_endpoint,
                 Content_Type => 'form-data',
                 Content => [
-                    # Preserve full client path in multipart filename for parity with other collectors
+                    # Preserve full client path in multipart filename for filename IOC matching
                     "file" => [ $filepath, $safe_path ],
-                    "filename" => $safe_path,
                 ],
             );
             $successful = $req->is_success;
