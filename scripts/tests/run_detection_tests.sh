@@ -27,6 +27,10 @@
 #  17.  Directories named after excluded paths — must not crash
 #  18.  Unreadable files (chmod 000) — must not crash, must process other files
 #
+# Server failure & retry:
+#  19.  Server unreachable — collector must exit gracefully, not crash
+#  20.  Late server startup — retry must succeed when server comes up mid-run
+#
 # Requires: thunderstorm-stub server with YARA support (-tags yara)
 #           running on localhost with both content rules and filename IOC rules
 # ============================================================================
@@ -128,7 +132,12 @@ clear_log() {
 
 cleanup() {
     stop_stub
-    rm -rf /tmp/detection-test-* /tmp/filename-ioc-test-* 2>/dev/null
+    # Kill any leftover retry-test stubs
+    for p in 18101 18102 18103 18104 18105; do
+        local pid; pid="$(lsof -ti :$p 2>/dev/null)"
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    done
+    rm -rf /tmp/detection-test-* /tmp/filename-ioc-test-* /tmp/retry-stub-* /tmp/collector-out-* 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -851,6 +860,168 @@ test_unreadable_file() {
     rm -rf "$fixtures"
 }
 
+# ── 19. Server unavailable then recovery — retry must succeed ───────────────
+# Start the collector against a dead port, then start the stub mid-run.
+# The collector should retry and eventually succeed.
+test_retry_on_late_server() {
+    local collector="$1"
+    clear_log
+
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    mkdir -p "$fixtures/retry"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/retry/retry-${collector}.exe"
+
+    # Use a unique port per collector so concurrent cleanup doesn't conflict
+    local retry_port
+    case "$collector" in
+        bash)   retry_port=18101 ;;
+        python) retry_port=18102 ;;
+        perl)   retry_port=18103 ;;
+        ps3)    retry_port=18104 ;;
+        ps2)    retry_port=18105 ;;
+    esac
+    local retry_log; retry_log="$(mktemp /tmp/retry-stub-XXXXXX.jsonl)"
+
+    # Start the collector against the dead port (it will retry)
+    local collector_out; collector_out="$(mktemp /tmp/collector-out-XXXXXX.txt)"
+
+    # Start the stub server FIRST on the retry port, but with a delayed start.
+    # We use a wrapper that waits 2 seconds before launching the stub.
+    local stub_bin="${STUB_BIN:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/thunderstorm-stub}"
+    local stub_rules="${STUB_RULES_DIR:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/rules}"
+
+    # Launch delayed stub in background (waits 2s then starts listening)
+    ( sleep 2 && "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
+        > /dev/null 2>&1 &
+    local stub_pid=$!
+
+    # Run the collector synchronously — it will fail first, then succeed on retry.
+    # --retries 5 gives enough attempts for the stub to come up after 2s delay.
+    case "$collector" in
+        bash)
+            timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+                --server localhost --port "$retry_port" --dir "$fixtures/retry" \
+                --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
+            ;;
+        python)
+            timeout 30 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+                --server localhost --port "$retry_port" --dir "$fixtures/retry" \
+                --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
+            ;;
+        perl)
+            timeout 30 perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+                -s localhost -p "$retry_port" --dir "$fixtures/retry" \
+                --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
+            ;;
+        ps3)
+            timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+                -ThunderstormServer localhost -ThunderstormPort "$retry_port" -Folder "$fixtures/retry" \
+                -MaxAge 30 > "$collector_out" 2>&1 || true
+            ;;
+        ps2)
+            timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+                -ThunderstormServer localhost -ThunderstormPort "$retry_port" -Folder "$fixtures/retry" \
+                -MaxAge 30 > "$collector_out" 2>&1 || true
+            ;;
+    esac
+
+    # Check if the file was eventually submitted
+    local entry=""
+    if [ -f "$retry_log" ]; then
+        entry="$(python3 -c "
+import json, sys
+for line in open('$retry_log'):
+    line = line.strip()
+    if not line: continue
+    d = json.loads(line)
+    cf = d.get('subject', {}).get('client_filename', '')
+    if 'retry-${collector}' in cf:
+        print(line)
+        break
+" 2>/dev/null)"
+    fi
+
+    if [ -n "$entry" ]; then
+        local score; score="$(get_score "$entry")"
+        pass "$collector/retry-recovery: file submitted after server came up (score=$score)"
+    else
+        # Check if the collector even attempted retries
+        if grep -qi 'retry\|attempt\|retrying\|failed.*attempt' "$collector_out" 2>/dev/null; then
+            fail "$collector/retry-recovery: retried but file never submitted"
+        else
+            fail "$collector/retry-recovery: no retry attempt detected"
+        fi
+    fi
+
+    # Cleanup: kill the delayed stub
+    kill "$stub_pid" 2>/dev/null
+    wait "$stub_pid" 2>/dev/null || true
+    rm -rf "$fixtures" "$retry_log" "$collector_out"
+}
+
+# ── 20. Server returns errors — collector must not crash ────────────────────
+# Submit to a port where nothing listens (connection refused).
+# The collector must exit gracefully, not crash.
+test_server_unreachable() {
+    local collector="$1"
+    clear_log
+
+    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    mkdir -p "$fixtures/unreachable"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/unreachable/orphan-${collector}.exe"
+
+    # Port 18099 has nothing listening — all uploads will fail
+    local dead_port=18099
+    local collector_out; collector_out="$(mktemp /tmp/collector-out-XXXXXX.txt)"
+
+    # Run with minimal retries to avoid long wait.
+    # Use timeout to kill collectors that hang; || true to prevent set -e from aborting.
+    local exit_code=0
+    case "$collector" in
+        bash)
+            timeout 20 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+                --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
+                --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
+            ;;
+        python)
+            timeout 20 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+                --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
+                --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
+            ;;
+        perl)
+            timeout 20 perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+                -s localhost -p "$dead_port" --dir "$fixtures/unreachable" \
+                --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
+            ;;
+        ps3)
+            timeout 20 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+                -ThunderstormServer localhost -ThunderstormPort "$dead_port" -Folder "$fixtures/unreachable" \
+                -MaxAge 30 > "$collector_out" 2>&1 || exit_code=$?
+            ;;
+        ps2)
+            timeout 20 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+                -ThunderstormServer localhost -ThunderstormPort "$dead_port" -Folder "$fixtures/unreachable" \
+                -MaxAge 30 > "$collector_out" 2>&1 || exit_code=$?
+            ;;
+    esac
+
+    # The collector should exit (not hang forever) and not crash with a traceback
+    if [ "$exit_code" -eq 124 ]; then
+        fail "$collector/server-unreachable: collector hung (killed by timeout)"
+    elif grep -qi 'traceback\|panic\|segfault\|core dump' "$collector_out" 2>/dev/null; then
+        fail "$collector/server-unreachable: collector crashed"
+    else
+        # Verify it reported the failure somehow
+        if grep -qi 'fail\|error\|could not\|unable\|refused' "$collector_out" 2>/dev/null; then
+            pass "$collector/server-unreachable: exited gracefully with error message"
+        else
+            pass "$collector/server-unreachable: exited without crash (exit=$exit_code)"
+        fi
+    fi
+
+    rm -rf "$fixtures" "$collector_out"
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -910,6 +1081,8 @@ for collector in "${available_collectors[@]}"; do
     test_special_chars_filename "$collector"
     test_excluded_dirs_survive "$collector"
     test_unreadable_file "$collector"
+    test_server_unreachable "$collector"
+    test_retry_on_late_server "$collector"
 
     rm -rf "$FIXTURES" /tmp/x 2>/dev/null
 done
