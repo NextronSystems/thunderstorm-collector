@@ -783,7 +783,7 @@ $TotalFiles = 0
 if ($ShowProgress) {
     Write-Log "Counting files for progress reporting ..."
     # Count pass: use Measure-Object to avoid storing all FileInfo objects
-    $countResult = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Measure-Object
+    $countResult = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } | Measure-Object
     $TotalFiles = $countResult.Count
     Write-Log "Found $TotalFiles files to evaluate in $Folder"
 }
@@ -825,6 +825,14 @@ while ($fileEnumerator.MoveNext()) {
     } elseif ($ShowProgress) {
         # No total count available; show scanned count only
         Write-Host -NoNewline ("`r[{0}] scanning...  " -f $global:ScannedCount)
+    }
+
+    # Symlink Check — skip symbolic links (security: prevent directory escape)
+    # PS 2.0 compatible: check Attributes for ReparsePoint flag
+    if ( $file.Attributes -band [System.IO.FileAttributes]::ReparsePoint ) {
+        Write-Log "$($file.Name) skipped (symbolic link)" -Level "Debug"
+        $global:SkippedCount++
+        continue
     }
 
     # Size Check

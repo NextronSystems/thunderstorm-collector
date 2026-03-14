@@ -890,8 +890,11 @@ test_retry_on_late_server() {
     local stub_bin="${STUB_BIN:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/thunderstorm-stub}"
     local stub_rules="${STUB_RULES_DIR:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/rules}"
 
-    # Launch delayed stub in background (waits 2s then starts listening)
-    ( sleep 2 && "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
+    # Launch delayed stub in background.
+    # Python/Perl/PS send a begin marker with a single retry after 2s on failure.
+    # Connection refused is instant, so: attempt 1 at ~0s, sleep 2s, attempt 2 at ~2s.
+    # The stub must be ready BEFORE attempt 2.  Start after 1s to give it time to bind.
+    ( sleep 1 && "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
         > /dev/null 2>&1 &
     local stub_pid=$!
 
