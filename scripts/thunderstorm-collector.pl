@@ -26,7 +26,7 @@ use Cwd; # module for finding the current working directory
 
 # Configuration
 our $debug = 0;
-my $targetdir = "/";
+my @targetdirs;
 my $server = "";
 my $port = 8080;
 my $scheme = "http";
@@ -85,7 +85,7 @@ sub is_cloud_path {
 
 # Command Line Parameters
 GetOptions(
-    "dir|d=s"        => \$targetdir,    # --dir or -d
+    "dir|d=s"        => \@targetdirs,   # --dir or -d (repeatable)
     "server|s=s"     => \$server,       # --server or -s
     "port|p=i"       => \$port,         # --port or -p
     "source=s"       => \$source,       # --source (no short option to avoid conflict)
@@ -102,6 +102,9 @@ GetOptions(
     "debug"          => \$debug         # --debug
 );
 $scheme = "https" if $ssl;
+
+# Default to "/" if no --dir specified
+@targetdirs = ("/") unless @targetdirs;
 
 # Validate numeric options
 if ($retries_opt < 0) {
@@ -505,7 +508,7 @@ if ($server !~ /^(?:\[[0-9a-fA-F:]+\]|[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(
     print STDERR "[ERROR] Invalid server value '$server'. Must be a hostname, IPv4 address, or bracketed IPv6 address.\n";
     exit 2;
 }
-print STDERR "Target Directory: '$targetdir'\n";
+print STDERR "Target Directories: " . join(", ", map { "'$_'" } @targetdirs) . "\n";
 print STDERR "Thunderstorm Server: '$server'\n";
 print STDERR "Thunderstorm Port: '$port'\n";
 print STDERR "Using API Endpoint: $api_endpoint\n";
@@ -554,11 +557,14 @@ $SIG{INT} = $SIG{TERM} = sub {
 # Pre-scan to count eligible files for progress reporting
 if ($show_progress) {
     print STDERR "[INFO] Counting eligible files for progress reporting ...\n";
-    countDir($targetdir);
+    for my $dir (@targetdirs) {
+        countDir($dir);
+        last if $interrupted;
+    }
     print STDERR "[INFO] Found $total_eligible eligible files\n" if !$interrupted;
 }
 
-print STDERR "Starting the walk at: $targetdir ...\n";
+print STDERR "Starting the walk at: " . join(", ", @targetdirs) . " ...\n";
 
 # Send collection begin marker (with single retry after 2s on failure)
 my ($begin_id, $begin_ok) = collection_marker("begin", "", undef);
@@ -582,7 +588,10 @@ if ($SCAN_ID) {
 }
 
 # Start the walk
-&processDir($targetdir);
+for my $dir (@targetdirs) {
+    last if $interrupted;
+    processDir($dir);
+}
 
 # If interrupted, send interrupted marker and exit from normal execution context
 if ($interrupted) {
