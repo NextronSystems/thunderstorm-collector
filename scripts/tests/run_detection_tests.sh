@@ -891,10 +891,12 @@ test_retry_on_late_server() {
     local stub_rules="${STUB_RULES_DIR:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/rules}"
 
     # Launch delayed stub in background.
-    # Python/Perl/PS send a begin marker with a single retry after 2s on failure.
+    # All collectors send a begin marker with a single retry after 2s on failure.
     # Connection refused is instant, so: attempt 1 at ~0s, sleep 2s, attempt 2 at ~2s.
-    # The stub must be ready BEFORE attempt 2.  Start after 1s to give it time to bind.
-    ( sleep 1 && "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
+    # The stub takes ~0.5-1s to load YARA rules and bind, so we must start it
+    # early enough that it's listening before the 2nd begin marker attempt.
+    # Starting at 0.3s gives the stub ~1.7s to initialize before t=2s.
+    ( sleep 0.3 && "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
         > /dev/null 2>&1 &
     local stub_pid=$!
 
