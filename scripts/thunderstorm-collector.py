@@ -316,7 +316,7 @@ def submit_sample(filepath, file_stat=None):
     }
 
     # Sanitize filename for multipart header safety
-    safe_filename = filepath.replace('"', '_').replace(';', '_').replace('\r', '_').replace('\n', '_')
+    safe_filename = filepath.replace('\\', '/').replace('"', '_').replace(';', '_').replace('\r', '_').replace('\n', '_').replace('\x00', '_')
 
     # Build multipart preamble (file field header) and epilogue
     preamble = b""
@@ -341,6 +341,7 @@ def submit_sample(filepath, file_stat=None):
         resp_reason = None
         resp_retry_after = None
         file_fully_sent = False
+        conn = None
         try:
             conn = _make_connection(
                 args.server, args.port, args.tls, args.insecure,
@@ -377,10 +378,11 @@ def submit_sample(filepath, file_stat=None):
                 time.sleep(backoff)
             continue
         finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
         # pylint: disable=no-else-continue
         if resp_status == 503:  # Service unavailable
@@ -391,10 +393,8 @@ def submit_sample(filepath, file_stat=None):
                 upload_in_flight = None
                 return
             try:
-                retry_time = min(int(resp_retry_after), 300)  # Cap at 5 minutes
+                retry_time = max(0, min(int(resp_retry_after), 300))  # Clamp to 0-300s
             except (ValueError, TypeError):
-                retry_time = 30
-            if retry_time < 0:
                 retry_time = 30
             time.sleep(retry_time)
             continue
@@ -633,11 +633,13 @@ if __name__ == "__main__":
     sys.stderr.write("=" * 80 + "\n")
     # Normalize existing hard_skips
     hard_skips[:] = [os.path.normpath(p) for p in hard_skips]
+    hard_skips_set = set(hard_skips)
     # Extend hard_skips with mount points of network/special filesystems
     for mp in get_excluded_mounts():
         norm_mp = os.path.normpath(mp)
-        if norm_mp not in hard_skips:
+        if norm_mp not in hard_skips_set:
             hard_skips.append(norm_mp)
+            hard_skips_set.add(norm_mp)
 
     sys.stderr.write("Target Directory: {}\n".format(", ".join(args.dirs)))
     sys.stderr.write("Thunderstorm Server: {}\n".format(args.server))
