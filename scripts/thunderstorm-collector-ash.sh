@@ -365,7 +365,9 @@ detect_upload_tool() {
     # Fall back to BusyBox wget (works for text files, truncates binary at NUL)
     if command -v wget >/dev/null 2>&1; then
         UPLOAD_TOOL="wget"
-        log_msg warn "BusyBox wget detected; binary files with NUL bytes may fail to upload"
+        log_msg warn "WARNING: BusyBox wget detected — --post-file truncates at the first NUL byte."
+        log_msg warn "Binary files (EXE, DLL, ZIP, etc.) will be silently corrupted during upload."
+        log_msg warn "Install curl or full GNU wget for reliable binary uploads."
         return 0
     fi
     return 1
@@ -438,7 +440,7 @@ generate_safe_boundary() {
     while [ "$_gsb_attempt" -lt 10 ]; do
         _gsb_rand="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
         _gsb_boundary="----ThunderstormBoundary${$}${_gsb_rand:-$(date +%s 2>/dev/null || echo 0)${_gsb_attempt}}"
-        if ! grep -qF "$_gsb_boundary" "$_gsb_filepath" 2>/dev/null; then
+        if ! LC_ALL=C grep -qF "$_gsb_boundary" "$_gsb_filepath" 2>/dev/null; then
             printf '%s' "$_gsb_boundary"
             return 0
         fi
@@ -564,7 +566,7 @@ upload_with_nc() {
 
     # Send raw HTTP via nc (cat merges headers + binary body into one stream)
     {
-        printf "POST %s HTTP/1.1\r\n" "$_nc_path"
+        printf "POST %s HTTP/1.0\r\n" "$_nc_path"
         printf "Host: %s\r\n" "$_nc_hostport"
         printf "Content-Type: multipart/form-data; boundary=%s\r\n" "$_nc_boundary"
         printf "Content-Length: %s\r\n" "$_nc_content_length"

@@ -470,7 +470,7 @@ upload_with_wget() {
     local _boundary_attempts=0
     boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}$(date +%s%N 2>/dev/null || echo 0)"
     while [ "$_boundary_attempts" -lt 10 ]; do
-        if ! grep -qF "$boundary" "$filepath" 2>/dev/null; then
+        if ! LC_ALL=C grep -qF "$boundary" "$filepath" 2>/dev/null; then
             # Also check it doesn't appear in metadata fields
             case "${SOURCE_NAME}${filepath}" in
                 *"$boundary"*) ;;
