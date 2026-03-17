@@ -134,6 +134,9 @@ cleanup_tmp_files() {
     for f in "${TMP_FILES_ARR[@]}"; do
         [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
     done
+    # Remove fallback temp directory if it exists (created by mktemp_portable)
+    local _fallback_dir="${TMPDIR:-/tmp}/thunderstorm.$$"
+    [ -d "$_fallback_dir" ] && rm -rf "$_fallback_dir"
 }
 
 INTERRUPTED=0
@@ -363,9 +366,14 @@ mktemp_portable() {
         echo "$t"
         return 0
     fi
-    # Fallback: RANDOM may be empty in non-bash shells
-    t="${TMPDIR:-/tmp}/thunderstorm.$$.${RANDOM:-0}.$(date +%N 2>/dev/null || echo 0)"
-    ( umask 077 && : > "$t" ) 2>/dev/null || return 1
+    # Fallback: create a private directory first (mkdir is atomic), then a file inside it.
+    # This avoids the TOCTOU race of creating a predictable file in a shared /tmp.
+    local _dir="${TMPDIR:-/tmp}/thunderstorm.$$"
+    if [ ! -d "$_dir" ]; then
+        ( umask 077 && mkdir "$_dir" ) 2>/dev/null || return 1
+    fi
+    t="$_dir/${RANDOM:-0}.$(date +%N 2>/dev/null || echo 0)"
+    : > "$t" 2>/dev/null || return 1
     echo "$t"
 }
 
