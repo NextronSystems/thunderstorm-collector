@@ -60,6 +60,9 @@ sub get_excluded_mounts {
             my @parts = split(/\s+/, $line);
             if (scalar @parts >= 3) {
                 my ($mount_point, $fs_type) = ($parts[1], $parts[2]);
+                # Decode octal escapes (\040 = space, \011 = tab, etc.)
+                # /proc/mounts encodes spaces and special chars as \NNN
+                $mount_point =~ s/\\([0-7]{3})/chr(oct($1))/ge;
                 if ($networkFsTypes{$fs_type} || $specialFsTypes{$fs_type}) {
                     push @excluded, $mount_point;
                 }
@@ -436,7 +439,9 @@ sub submitSample {
         if ($] >= 5.008) {
             require Encode;
             # Decode byte string as UTF-8, replacing invalid sequences
-            $safe_path = Encode::decode('UTF-8', $safe_path, Encode::FB_DEFAULT());
+            # FB_DEFAULT (0x0001) was introduced in Encode 2.53 (Perl 5.14);
+            # use the numeric value directly for Perl 5.8-5.12 compatibility
+            $safe_path = Encode::decode('UTF-8', $safe_path, 0x0001);
             $safe_path = Encode::encode('UTF-8', $safe_path);
         }
         # Remove control characters except tab
