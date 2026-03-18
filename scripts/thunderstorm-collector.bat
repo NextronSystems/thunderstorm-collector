@@ -4,50 +4,96 @@ SETLOCAL EnableDelayedExpansion
 :: ----------------------------------------------------------------
 :: THOR Thunderstorm Collector
 :: Windows Batch
-:: Florian Roth
-:: v0.4
+:: Florian Roth, Nextron Systems GmbH
+:: v0.5
 ::
-:: A Windows Batch script that uses a compiled Curl for Windows
+:: A Windows Batch script that uses Curl for Windows
 :: to upload files to a THOR Thunderstorm server
 ::
 :: Requirements:
-:: Curl for Windows (place ./bin/curl.exe from the package into the script folder)
-:: https://curl.haxx.se/windows/
+:: Curl for Windows (place curl.exe into the script folder or PATH)
+:: https://curl.se/windows/
 ::
-:: Note on Windows 10
-:: Windows 10 already includes a curl since build 17063, so all versions newer than
-:: version 1709 (Redstone 3) from October 2017 already meet the requirements
+:: Note on Windows 10+
+:: Windows 10 already includes curl since build 17063 (version 1709+)
 ::
-:: Note on very old Windows versions:
-:: The last version of curl that works with Windows 7 / Windows 2008 R2
-:: and earlier is v7.46.0 and can be still be downloaded from here:
-:: https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
+:: Note on Windows 7 / Server 2008 R2:
+:: Curl 8.x requires the Universal C Runtime (KB2999226 or KB3118401).
+:: Install the Visual C++ 2015 Redistributable or the UCRT update,
+:: then place the curl.exe + libcurl DLL in the script folder.
+::
+:: Known Limitations (cmd.exe platform constraints):
+:: - No collection markers: begin/end markers and scan_id tracking require
+::   JSON parsing which is impractical in pure batch. Use the PowerShell
+::   collector (.ps1 or .ps2.ps1) for collection marker support.
+:: - No --ca-cert / --insecure support: Use CURL_CA_BUNDLE env var or
+::   URL_SCHEME=http as workarounds.
+:: - No progress reporting: cmd.exe cannot detect interactive terminals.
+:: - No signal handling: Ctrl+C terminates without cleanup.
+:: - MAX_AGE filtering: FORFILES /D -N has inverted semantics (files ≥N days
+::   OLD, not files from last N days). This script applies age filtering
+::   per-file in PROCESSFILE as a workaround.
+:: - FINDSTR regex: Windows 7 has limited regex support ($ anchors and
+::   negated character classes [^...] are broken). Hostname validation
+::   provides defense-in-depth; server-side validation is authoritative.
+:: ----------------------------------------------------------------
 
 :: CONFIGURATION -------------------------------------------------
 
-:: THUNDERSTORM SERVER -------------------------------------------
-:: The thunderstorm server host name (fqdn) or IP
-SET THUNDERSTORM_SERVER=ygdrasil.nextron
-SET THUNDERSTORM_PORT=8080
-:: Use http or https
-SET URL_SCHEME=http
+:: THUNDERSTORM SERVER
+SET _TS=%THUNDERSTORM_SERVER%
+SET _TP=%THUNDERSTORM_PORT%
+SET _SCHEME=%URL_SCHEME%
+IF "%_TS%"=="" SET _TS=ygdrasil.nextron
+IF "%_TP%"=="" SET _TP=8080
+IF "%_SCHEME%"=="" SET _SCHEME=http
+IF /I NOT "%_SCHEME%"=="http" IF /I NOT "%_SCHEME%"=="https" (
+    ECHO [ERROR] Invalid URL_SCHEME: %_SCHEME%. Must be http or https. 1>&2
+    EXIT /b 2
+)
 
-:: SELECTION -----------------------------------------------------
+:: SELECTION
+SET _DIRS=%COLLECT_DIRS%
+SET _EXTS=%RELEVANT_EXTENSIONS%
+SET _MAXSZ=%COLLECT_MAX_SIZE%
+SET _MAXAGE=%MAX_AGE%
+IF "%_DIRS%"=="" SET "_DIRS=C:\Users;C:\Temp;C:\Windows"
+IF "%_EXTS%"=="" SET _EXTS=.vbs .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
+IF "%_MAXSZ%"=="" SET _MAXSZ=3000000
+IF "%_MAXAGE%"=="" SET _MAXAGE=30
 
-:: The directory that should be walked
-SET COLLECT_DIRS=C:\Users C:\Temp C:\Windows
-:: The pattern of files to include
-SET RELEVANT_EXTENSIONS=.vbs .ps .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
-:: Maximum file size to collect (in bytes) (defualt: 3MB)
-SET /A COLLECT_MAX_SIZE=3000000
-:: Maximum file age in days (default: 7300 days = 20 years)
-SET /A MAX_AGE=30
+:: DEBUG & SOURCE
+SET _DBG=%DEBUG%
+SET _SRC=%SOURCE%
+IF "%_DBG%"=="" SET _DBG=0
 
-:: Debug
-SET DEBUG=0
+:: Basic server hostname validation: reject empty and values containing characters
+:: outside the allowed set (alphanumeric, hyphens, dots, colons, brackets for IPv6).
+:: Full URL validation is delegated to curl.
+IF "!_TS!"=="" (
+    ECHO [ERROR] Server hostname is empty. Set THUNDERSTORM_SERVER. 1>&2
+    EXIT /b 2
+)
+ECHO !_TS!| FINDSTR /R "[^a-zA-Z0-9.\-\[\]:]" >nul 2>&1
+IF NOT ERRORLEVEL 1 (
+    ECHO [ERROR] Server hostname contains invalid characters: !_TS! 1>&2
+    EXIT /b 2
+)
 
-:: Source
-SET SOURCE=
+:: Validate numeric parameters
+SET /A _TP=%_TP% 2>nul
+SET /A _MAXSZ=%_MAXSZ% 2>nul
+SET /A _MAXAGE=%_MAXAGE% 2>nul
+IF !_TP! LEQ 0 SET _TP=8080
+IF !_TP! GTR 65535 SET _TP=8080
+IF !_MAXSZ! LEQ 0 SET _MAXSZ=3000000
+IF !_MAXAGE! LSS 0 SET _MAXAGE=30
+
+:: Counters
+SET /A _SUBMITTED=0
+SET /A _SKIPPED=0
+SET /A _FAILED=0
+SET /A _SCANNED=0
 
 :: WELCOME -------------------------------------------------------
 
@@ -57,89 +103,333 @@ ECHO   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _
 ECHO    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \
 ECHO   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/
 ECHO.
-ECHO   Windows Batch Collector
-ECHO   Florian Roth, 2020
+ECHO   Windows Batch Collector v0.5
+ECHO   Florian Roth, Nextron Systems GmbH, 2020-2026
 ECHO.
 ECHO =============================================================
 ECHO.
 
-:: REQUIREMENTS -------------------------------------------------
-:: CURL in PATH
+:: REQUIREMENTS --------------------------------------------------
+:: Prefer curl next to the script (bundled with UCRT DLLs), then current dir, then PATH
+SET _CURL=
+IF EXIST "%~dp0curl.exe" (
+    SET "_CURL=%~dp0curl.exe"
+    GOTO :CURLOK
+)
+IF EXIST "%CD%\curl.exe" (
+    SET "_CURL=%CD%\curl.exe"
+    GOTO :CURLOK
+)
 where /q curl.exe
 IF NOT ERRORLEVEL 1 (
-    GOTO CHECKDONE
+    FOR /F "tokens=*" %%C IN ('where curl.exe') DO (
+        IF NOT DEFINED _CURL SET "_CURL=%%C"
+    )
+    GOTO :CURLOK
 )
-:: CURL in current directory
-IF EXIST %CD%\curl.exe (
-    GOTO CHECKDONE
-)
-ECHO Cannot find curl in PATH or the current directory. Download it from https://curl.haxx.se/windows/ and place curl.exe from the ./bin sub folder into the collector script folder.
-ECHO If you're collecting on Windows systems older than Windows Vista, use curl version 7.46.0 from https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z
-EXIT /b 1
-:CHECKDONE
-ECHO Curl has been found. We're ready to go.
+ECHO [ERROR] Cannot find curl in PATH or the script directory. 1>&2
+ECHO     Download from https://curl.se/windows/ and place curl.exe next to this script. 1>&2
+EXIT /b 2
+:CURLOK
+ECHO [+] Curl found: %_CURL%
 
-:: COLLECTION --------------------------------------------------
-
-:: SOURCE
-IF "%SOURCE%"=="" (
-    FOR /F "tokens=*" %%i IN ('hostname') DO SET SOURCE=%%i
-    ECHO No Source provided, using hostname=!SOURCE!
-)
-IF "%SOURCE%" NEQ "" (
-    SET SOURCE=?source=%SOURCE%
+:: SOURCE --------------------------------------------------------
+IF "%_SRC%"=="" (
+    FOR /F "tokens=*" %%i IN ('hostname') DO SET _SRC=%%i
+    ECHO [+] Source: !_SRC!
 )
 
-:: Directory walk and upload
-ECHO Processing %COLLECT_DIRS% with filters MAX_SIZE: %COLLECT_MAX_SIZE% MAX_AGE: %MAX_AGE% days EXTENSIONS: %RELEVANT_EXTENSIONS%
-ECHO This could take a while depending on the disk size and number of files. (set DEBUG=1 to see all skips)
-FOR %%T IN (%COLLECT_DIRS%) DO (
-    SET TARGETDIR=%%T
-    IF NOT EXIST !TARGETDIR! (
-        ECHO Warning: Target directory !TARGETDIR! does not exist. Skipping ...
-    ) ELSE (
-        ECHO Checking !TARGETDIR! ...
-        :: Nested FOR does not accept delayed-expansion variables, so we need to use a workaround via pushd/popd
-        pushd !TARGETDIR!
-        FOR /R . %%F IN (*.*) DO (
-            SETLOCAL
-            :: Marker if processed due to selected extensions
-            SET PROCESSED=false
-            :: Extension Check
-            FOR %%E IN (%RELEVANT_EXTENSIONS%) DO (
-                :: Check if one of the relevant extensions matches the file extension
-                IF /I "%%~xF"=="%%E" (
-                    SET PROCESSED=true
-                    :: When the folder is empty [root directory] add extra characters
-                    IF "%%~pF"=="\" (
-                        SET FOLDER=%%~dF%%~pF\\
-                    ) ELSE (
-                        SET FOLDER=%%~dF%%~pF
-                    )
-                    :: File Size Check
-                    IF %%~zF GTR %COLLECT_MAX_SIZE% (
-                        :: File is too big
-                        IF %DEBUG% == 1 ECHO Skipping %%F due to big file size ...
-                    ) ELSE (
-                        :: Age check
-                        FORFILES /P "!FOLDER:~0,-1!" /M "%%~nF%%~xF" /D -%MAX_AGE% >nul 2>nul && (
-                            :: File is too old
-                            IF %DEBUG% == 1 ECHO Skipping %%F due to age ...
-                        ) || (
-                            :: Upload
-                            ECHO Uploading %%F ..
-                            :: We'll start the upload process in background to speed up the submission process
-                            START /B curl -F file=@%%F -H "Content-Type: multipart/form-data" -o nul -s %URL_SCHEME%://%THUNDERSTORM_SERVER%:%THUNDERSTORM_PORT%/api/checkAsync%SOURCE%
-                        )
-                    )
-                )
-            )
-            :: Note that file was skipped due to wrong extension
-            IF %DEBUG% == 1 (
-                IF !PROCESSED! == false ECHO Skipping %%F due to extension ...
-            )
-            ENDLOCAL
+:: Create temp files for file listing and curl responses
+SET "_FILELIST=%TEMP%\ts-collector-%RANDOM%%RANDOM%.tmp"
+SET "_RESPTMP=%TEMP%\ts-collector-resp-%RANDOM%%RANDOM%.tmp"
+IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
+IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
+
+:: URL-encode the source for use in query strings
+:: Only encode characters problematic in URLs
+SET "_SRCURL=!_SRC!"
+SET "_SRCURL=!_SRCURL:%%=%%25!"
+SET "_SRCURL=!_SRCURL: =%%20!"
+SET "_SRCURL=!_SRCURL:&=%%26!"
+SET "_SRCURL=!_SRCURL:+=%%2B!"
+SET "_SRCURL=!_SRCURL:#=%%23!"
+SET "_SRCURL=!_SRCURL:==%%3D!"
+
+:: NOTE: Collection markers (begin/end) and scan_id tracking are not
+:: supported in the batch collector. Use the PowerShell collector
+:: (.ps1 or .ps2.ps1) for collection marker support.
+SET _IDPARAM=
+
+:: BUILD FILE LIST -----------------------------------------------
+:: Phase 1: Use FORFILES to generate a filtered file list.
+:: FORFILES does NOT follow junctions/reparse points, solving the infinite loop issue.
+
+:: NOTE: Age filtering is NOT performed in the FORFILES phase because
+:: FORFILES /D -N has INVERTED semantics: it means "files modified ON OR BEFORE
+:: N days ago" (old files), not "files from the last N days". Age filtering
+:: is handled during file iteration in PROCESSFILE instead.
+:: See: https://ss64.com/nt/forfiles.html - "/D -dd selects files with a
+:: last modified date less than or equal to the current date minus dd days."
+
+ECHO [+] Scanning !_DIRS! ...
+ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_EXTS%
+:: NOTE: MAX_AGE is applied per file in PROCESSFILE (not in FORFILES /D).
+
+:: Iterate directories using semicolon delimiter (supports paths with spaces)
+:: COLLECT_DIRS can be semicolon-separated, e.g. "C:\Program Files;C:\Temp"
+:: Write directory list to a temp file, then iterate with delayed expansion off
+:: to protect paths containing '!' characters.
+SET "_DIRLIST=!_FILELIST!.dirs"
+:: Split semicolon-separated directory list into lines
+FOR %%T IN ("!_DIRS:;=" "!") DO (
+    IF NOT "%%~T"=="" ECHO %%~T>>"!_DIRLIST!"
+)
+FOR /F "usebackq delims=" %%T IN ("!_DIRLIST!") DO (
+    CALL :SCANDIR "%%T"
+)
+DEL "!_DIRLIST!" 2>nul
+GOTO :SCANDONE
+
+:SCANDIR
+SETLOCAL DisableDelayedExpansion
+SET "_TDIR=%~1"
+SETLOCAL EnableDelayedExpansion
+IF "!_TDIR!"=="" (
+    ENDLOCAL & ENDLOCAL
+    GOTO :EOF
+)
+IF NOT EXIST "!_TDIR!" (
+    ECHO [ERROR] Warning: !_TDIR! does not exist, skipping. 1>&2
+    ENDLOCAL & ENDLOCAL
+    GOTO :EOF
+)
+IF !_DBG! == 1 ECHO [D] Scanning !_TDIR! ...
+:: FORFILES /S = recurse (skips junctions), /C = command per file
+:: @path outputs quoted full path, @isdir filters out directories
+:: Note: Age filtering via /D has inverted semantics and is not used here.
+:: Age is checked during iteration in PROCESSFILE.
+FORFILES /P "!_TDIR!" /S /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
+ENDLOCAL & ENDLOCAL
+GOTO :EOF
+
+:SCANDONE
+
+:: Count total files found
+SET /A _TOTAL=0
+IF EXIST "!_FILELIST!" (
+    FOR /F "usebackq" %%C IN (`type "!_FILELIST!" ^| find /c /v ""`) DO SET /A _TOTAL=%%C
+)
+ECHO [+] Found !_TOTAL! files.
+
+:: PHASE 2: FILTER AND UPLOAD ------------------------------------
+IF !_TOTAL! == 0 GOTO :DONE
+
+:: Disable delayed expansion for the file-processing loop so paths
+:: containing '!' characters are not corrupted during %%F expansion.
+SET "_FILELIST_SAVED=!_FILELIST!"
+SETLOCAL DisableDelayedExpansion
+FOR /F "usebackq delims=" %%F IN ("%_FILELIST_SAVED%") DO (
+    CALL :PROCESSFILE "%%~F"
+)
+ENDLOCAL
+GOTO :DONE
+
+:: ---------------------------------------------------------------
+:: Subroutine: PROCESSFILE
+:: Processes a single file path passed as %1.
+:: Uses SETLOCAL/ENDLOCAL to toggle delayed expansion, protecting
+:: file paths that contain '!' characters from being corrupted.
+:: ---------------------------------------------------------------
+:PROCESSFILE
+:: First, capture the raw path with delayed expansion OFF so '!' is preserved
+SETLOCAL DisableDelayedExpansion
+SET "_FILE=%~1"
+:: Now re-enable delayed expansion for counter logic and comparisons
+SETLOCAL EnableDelayedExpansion
+
+:: Extension check — use a nested FOR to get file attributes from the filesystem
+SET _EXTMATCH=0
+SET _SZ=
+SET "_FEXT="
+FOR %%S IN ("!_FILE!") DO (
+    SET "_SZ=%%~zS"
+    SET "_FEXT=%%~xS"
+)
+FOR %%E IN (%_EXTS%) DO (
+    IF /I "!_FEXT!"=="%%E" SET _EXTMATCH=1
+)
+IF !_EXTMATCH! == 0 (
+    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(extension^)
+    SET /A _SKIPPED+=1
+    :: Propagate all counters back to parent scope
+    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+        ENDLOCAL & ENDLOCAL
+        SET /A _SCANNED=%%A
+        SET /A _SUBMITTED=%%B
+        SET /A _SKIPPED=%%C
+        SET /A _FAILED=%%D
+    )
+    GOTO :EOF
+)
+:: Size check (file may have been deleted since listing)
+IF "!_SZ!"=="" (
+    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(file not found^)
+    SET /A _SKIPPED+=1
+    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+        ENDLOCAL & ENDLOCAL
+        SET /A _SCANNED=%%A
+        SET /A _SUBMITTED=%%B
+        SET /A _SKIPPED=%%C
+        SET /A _FAILED=%%D
+    )
+    GOTO :EOF
+)
+IF !_SZ! GTR !_MAXSZ! (
+    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(size: !_SZ!^)
+    SET /A _SKIPPED+=1
+    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+        ENDLOCAL & ENDLOCAL
+        SET /A _SCANNED=%%A
+        SET /A _SUBMITTED=%%B
+        SET /A _SKIPPED=%%C
+        SET /A _FAILED=%%D
+    )
+    GOTO :EOF
+)
+:: Age check — FORFILES /D -N matches old files (<= today-N), so we check per-file
+:: and skip those that are too old.
+IF !_MAXAGE! GTR 0 (
+    SET "_ISOLD=0"
+    CALL :ISFILEOLD "!_FILE!" !_MAXAGE!
+    IF "!_ISOLD!"=="1" (
+        IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(age: older than !_MAXAGE! days^)
+        SET /A _SKIPPED+=1
+        FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+            ENDLOCAL & ENDLOCAL
+            SET /A _SCANNED=%%A
+            SET /A _SUBMITTED=%%B
+            SET /A _SKIPPED=%%C
+            SET /A _FAILED=%%D
         )
-        popd
+        GOTO :EOF
     )
 )
+:: Upload — increment _SCANNED only for files that pass filters
+SET /A _SCANNED+=1
+ECHO [+] Uploading: !_FILE!
+SET _HTTPCODE=
+"%_CURL%" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!;filename=!_FILE!" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
+SET _CURLRC=!ERRORLEVEL!
+IF !_CURLRC! == 0 (
+    SET /P _HTTPCODE=<"!_RESPTMP!"
+    DEL "!_RESPTMP!" 2>nul
+    IF "!_HTTPCODE!"=="" (
+        ECHO [ERROR] Failed: !_FILE! ^(empty response^) 1>&2
+        SET /A _FAILED+=1
+    ) ELSE IF "!_HTTPCODE!"=="503" (
+        :: Respect Retry-After header, capped at 60s, default 5s
+        SET _RETRYWAIT=5
+        IF EXIST "!_RESPTMP!.hdr" (
+            FOR /F "tokens=2 delims=: " %%H IN ('FINDSTR /I "^Retry-After:" "!_RESPTMP!.hdr"') DO (
+                SET /A _RETRYWAIT=%%H 2>nul
+                IF !_RETRYWAIT! LEQ 0 SET _RETRYWAIT=5
+                IF !_RETRYWAIT! GTR 60 SET _RETRYWAIT=60
+            )
+        )
+        DEL "!_RESPTMP!.hdr" 2>nul
+        ECHO [!] Server busy ^(503^), waiting !_RETRYWAIT!s before retry... 1>&2
+        SET /A _PINGCOUNT=!_RETRYWAIT!+1
+        PING -n !_PINGCOUNT! 127.0.0.1 >nul 2>&1
+        SET _HTTPCODE2=
+        "!_CURL!" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!;filename=!_FILE!" "!_SCHEME!://!_TS!:!_TP!/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
+        SET _CURLRC2=!ERRORLEVEL!
+        IF !_CURLRC2! == 0 (
+            SET /P _HTTPCODE2=<"!_RESPTMP!"
+            DEL "!_RESPTMP!" 2>nul
+            DEL "!_RESPTMP!.hdr" 2>nul
+            IF "!_HTTPCODE2!"=="503" (
+                ECHO [ERROR] Failed: !_FILE! ^(server still busy^) 1>&2
+                SET /A _FAILED+=1
+            ) ELSE IF "!_HTTPCODE2:~0,1!"=="2" (
+                SET /A _SUBMITTED+=1
+            ) ELSE (
+                ECHO [ERROR] Failed: !_FILE! ^(HTTP !_HTTPCODE2! on retry^) 1>&2
+                SET /A _FAILED+=1
+            )
+        ) ELSE (
+            DEL "!_RESPTMP!" 2>nul
+            DEL "!_RESPTMP!.hdr" 2>nul
+            ECHO [ERROR] Failed: !_FILE! ^(curl exit: !_CURLRC2!^) 1>&2
+            SET /A _FAILED+=1
+        )
+    ) ELSE IF "!_HTTPCODE:~0,1!"=="2" (
+        DEL "!_RESPTMP!.hdr" 2>nul
+        SET /A _SUBMITTED+=1
+    ) ELSE (
+        DEL "!_RESPTMP!.hdr" 2>nul
+        ECHO [ERROR] Failed: !_FILE! ^(HTTP !_HTTPCODE!^) 1>&2
+        SET /A _FAILED+=1
+    )
+) ELSE (
+    DEL "!_RESPTMP!" 2>nul
+    DEL "!_RESPTMP!.hdr" 2>nul
+    ECHO [ERROR] Failed: !_FILE! ^(curl exit: !_CURLRC!^) 1>&2
+    SET /A _FAILED+=1
+)
+:: Clean up any leftover temp files from this iteration
+IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
+IF EXIST "!_RESPTMP!.hdr" DEL "!_RESPTMP!.hdr" 2>nul
+:: Propagate all counters back to parent scope
+FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
+    ENDLOCAL & ENDLOCAL
+    SET /A _SCANNED=%%A
+    SET /A _SUBMITTED=%%B
+    SET /A _SKIPPED=%%C
+    SET /A _FAILED=%%D
+)
+GOTO :EOF
+
+:: ---------------------------------------------------------------
+:: Subroutine: ISFILEOLD
+:: Sets _ISOLD=1 if file is older than/equal to MAX_AGE days, else 0.
+:: ---------------------------------------------------------------
+:ISFILEOLD
+SETLOCAL DisableDelayedExpansion
+SET "_CHECK_FILE=%~1"
+SET "_CHECK_AGE=%~2"
+SET "_ISOLD=0"
+SET "_AGEDIR="
+SET "_AGENAME="
+FOR %%S IN ("%_CHECK_FILE%") DO (
+    SET "_AGEDIR=%%~dpS"
+    SET "_AGENAME=%%~nxS"
+)
+IF "%_AGEDIR%"=="" GOTO :ISFILEOLDRETURN
+IF "%_AGENAME%"=="" GOTO :ISFILEOLDRETURN
+
+FORFILES /P "%_AGEDIR%" /M "%_AGENAME%" /D -%_CHECK_AGE% /C "cmd /c if @isdir==FALSE exit /b 0" >nul 2>nul
+IF NOT ERRORLEVEL 1 SET "_ISOLD=1"
+
+:ISFILEOLDRETURN
+ENDLOCAL & SET "_ISOLD=%_ISOLD%"
+GOTO :EOF
+
+:DONE
+
+:: CLEANUP -------------------------------------------------------
+IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
+IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
+IF EXIST "!_RESPTMP!.hdr" DEL "!_RESPTMP!.hdr" 2>nul
+IF EXIST "!_RESPTMP!.code" DEL "!_RESPTMP!.code" 2>nul
+
+:: SUMMARY -------------------------------------------------------
+ECHO.
+ECHO [+] Done. scanned=!_SCANNED! submitted=!_SUBMITTED! skipped=!_SKIPPED! failed=!_FAILED!
+
+:: EXIT CODE: 1 if any uploads failed, 0 otherwise
+IF !_FAILED! GTR 0 (
+    ENDLOCAL
+    EXIT /b 1
+)
+ENDLOCAL
+EXIT /b 0
