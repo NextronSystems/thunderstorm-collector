@@ -197,7 +197,7 @@ print "Maximum Age of Files: $max_age\n";
 print "Maximum File Size: $max_size\n";
 print "\n";
 
-# Instanciate an object
+# Instantiate an object
 $ua = LWP::UserAgent->new(timeout => 30);
 
 print "Starting the walk at: $targetdir ...\n";
