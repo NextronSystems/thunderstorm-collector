@@ -109,8 +109,9 @@ sub processDir {
         }
 
         # Characteristics
-        my $size = (stat($filepath))[7];
-        my $mdate = (stat($filepath))[9];
+        my @stat = stat($filepath);
+        my $size  = $stat[7];
+        my $mdate = $stat[9];
         #print("SIZE: $size MDATE: $mdate\n");
 
         # Count
