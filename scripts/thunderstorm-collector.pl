@@ -32,7 +32,7 @@ my $scheme = "http";
 my $source = "";
 our $max_age = 3;       # in days
 our $max_size = 10;     # in megabytes
-our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
+our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm', '\.lck$');
 our @hardSkips = ('/proc', '/dev', '/sys');
 
 # Command Line Parameters
@@ -99,6 +99,13 @@ sub processDir {
             next;
         } else {
             if ( $debug ) { print "[DEBUG] Checking $filepath ...\n"; }
+        }
+
+        # skip non-regular files
+        # has to be after the directory check, otherwise we would skip directories as well
+        unless (-f $filepath) {
+            if ( $debug ) { print "[DEBUG] Skipping non-regular file $filepath\n"; }
+            next;
         }
 
         # Characteristics
@@ -190,7 +197,7 @@ print "Maximum File Size: $max_size\n";
 print "\n";
 
 # Instanciate an object
-$ua = LWP::UserAgent->new;
+$ua = LWP::UserAgent->new(timeout => 30);
 
 print "Starting the walk at: $targetdir ...\n";
 # Start the walk
