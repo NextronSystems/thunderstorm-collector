@@ -166,8 +166,11 @@ sub submitSample {
                 ],
             );
             $successful = $req->is_success;
-            $num_submitted++;
-            print "\nError: ", $req->status_line unless $successful;
+            if ($successful) {
+                $num_submitted++;
+            } else {
+                print "\nError: ", $req->status_line;
+            }
         } or do {
             my $error = $@ || 'Unknown failure';
             warn "Could not submit '$filepath' - $error";
