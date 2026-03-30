@@ -129,13 +129,13 @@ sub processDir {
         }
         next if $skipRegex;
         # Size
-        if ( ( $size / 1024 / 1024 ) gt $max_size ) {
+        if ( ( $size / 1024 / 1024 ) > $max_size ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to file size $filepath\n"; }
             next;
         }
         # Age
         #print("MDATE: $mdate CURR_DATE: $current_date\n");
-        if ( $mdate lt ( $current_date - ($max_age * 86400) ) ) {
+        if ( $mdate < ( $current_date - ($max_age * 86400) ) ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to age $filepath\n"; }
             next;
         }
