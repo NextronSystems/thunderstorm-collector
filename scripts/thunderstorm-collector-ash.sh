@@ -41,8 +41,12 @@ RETRIES=3
 UPLOAD_TOOL=""
 TMP_FILES=""
 
-# Space-separated list of directories to scan (no bash arrays in ash)
-SCAN_DIRS="/root /tmp /home /var /usr"
+# Newline-separated list of directories to scan (no bash arrays in ash)
+SCAN_DIRS="/root
+/tmp
+/home
+/var
+/usr"
 SCAN_DIRS_SET=0   # 1 once the user has overridden via --dir
 
 FILES_SCANNED=0
@@ -353,12 +357,12 @@ detect_upload_tool() {
         UPLOAD_TOOL="curl"
         return 0
     fi
-    # Prefer nc over BusyBox wget for binary-safe uploads
+    # Prefer nc over BusyBox wget for binary-safe plain HTTP uploads
     if command -v wget >/dev/null 2>&1 && ! _wget_is_busybox; then
         UPLOAD_TOOL="wget"
         return 0
     fi
-    if command -v nc >/dev/null 2>&1; then
+    if [ "$USE_SSL" -eq 0 ] && command -v nc >/dev/null 2>&1; then
         UPLOAD_TOOL="nc"
         return 0
     fi
@@ -424,11 +428,6 @@ upload_with_curl() {
             ;;
     esac
 
-    if grep -qi "reason" "$_uc_resp" 2>/dev/null; then
-        _uc_body="$(cat "$_uc_resp" 2>/dev/null | tr '\r\n' '  ')"
-        log_msg error "Server reported rejection for '$_uc_filepath': $_uc_body"
-        return 92
-    fi
     return 0
 }
 
@@ -516,12 +515,6 @@ upload_with_wget() {
         esac
     fi
 
-    # wget returned success but check for rejection in body
-    if grep -qi "reason" "$_uw_resp" 2>/dev/null; then
-        _uw_body_content="$(cat "$_uw_resp" 2>/dev/null | tr '\r\n' '  ')"
-        log_msg error "Server reported rejection for '$_uw_filepath': $_uw_body_content"
-        return 96
-    fi
     return 0
 }
 
@@ -605,12 +598,6 @@ upload_with_nc() {
     # Accept 2xx as success
     case "$_nc_http_code" in
         2[0-9][0-9])
-            # Check for rejection in response body (consistent with curl/wget paths)
-            if grep -qi "reason" "$_nc_resp_file" 2>/dev/null; then
-                _nc_body_content="$(sed '1,/^\r*$/d' "$_nc_resp_file" 2>/dev/null | tr '\r\n' '  ')"
-                log_msg error "Server reported rejection for '$_nc_filepath': $_nc_body_content"
-                return 99
-            fi
             return 0
             ;;
     esac
@@ -705,17 +692,18 @@ collection_marker() {
         wget "$@" 2>"$_cm_hdr"
         _cm_wget_rc=$?
         _cm_http_code="$(sed -n 's/.*HTTP\/[0-9.]*[[:space:]]*\([0-9][0-9][0-9]\).*/\1/p' "$_cm_hdr" 2>/dev/null | tail -1)"
-        if [ "$_cm_wget_rc" -eq 0 ]; then
+        if [ -n "$_cm_http_code" ]; then
             case "$_cm_http_code" in
-                2[0-9][0-9]|"") _cm_ok=1 ;;
+                2[0-9][0-9]) _cm_ok=1 ;;
                 404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code) — server does not implement /api/collection"; _cm_ok=1 ;;
                 *) log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code" ;;
             esac
-        else
-            if [ -n "$_cm_http_code" ]; then
-                log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code (wget exit $_cm_wget_rc)"
-            fi
+        elif [ "$_cm_wget_rc" -eq 0 ]; then
+            _cm_ok=1
         fi
+    else
+        log_msg warn "Skipping collection marker '$_cm_type': curl or wget is required for /api/collection"
+        _cm_ok=1
     fi
     rm -f "$_cm_hdr"
 
@@ -941,7 +929,12 @@ main() {
     log_msg debug "API endpoint: $_api_endpoint"
 
     if [ "$DRY_RUN" -eq 0 ]; then
-        detect_upload_tool || die "Neither 'curl', 'wget', nor 'nc' is installed; unable to upload samples"
+        if ! detect_upload_tool; then
+            if [ "$USE_SSL" -eq 1 ] && command -v nc >/dev/null 2>&1; then
+                die "HTTPS uploads require 'curl' or 'wget'; 'nc' does not support TLS"
+            fi
+            die "Neither 'curl', 'wget', nor 'nc' is installed; unable to upload samples"
+        fi
     else
         if detect_upload_tool; then
             log_msg info "Dry-run mode active (upload tool detected: $UPLOAD_TOOL)"
