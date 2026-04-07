@@ -6,7 +6,7 @@
 #
 #  1.  Collection markers — begin/end markers sent, scan_id propagated
 #  2.  Interrupted marker — SIGINT sends interrupted marker before exit
-#  3.  Dry-run mode — no uploads, no server contact (bash/python/perl only)
+#  3.  Dry-run mode — no uploads, no server contact (bash/ash/python/perl)
 #  4.  Source identifier — --source sets source field in collection markers
 #  5.  Sync mode — --sync uses /api/check instead of /api/checkAsync
 #  6.  Multiple scan directories — scanning multiple dirs in one run
@@ -48,6 +48,20 @@ fail() { printf "  ${RED}FAIL${RESET} %s\n" "$*"; TESTS_FAILED=$((TESTS_FAILED +
 skip() { printf "  ${YELLOW}SKIP${RESET} %s\n" "$*"; TESTS_SKIPPED=$((TESTS_SKIPPED + 1)); }
 
 MALICIOUS_CONTENT='X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+
+detect_ash_shell() {
+    if command -v ash >/dev/null 2>&1; then
+        echo "ash"
+    elif command -v dash >/dev/null 2>&1; then
+        echo "dash"
+    elif command -v busybox >/dev/null 2>&1; then
+        echo "busybox sh"
+    else
+        echo ""
+    fi
+}
+
+ASH_SHELL="${ASH_SHELL:-$(detect_ash_shell)}"
 
 find_stub() {
     local candidates=(
@@ -143,6 +157,7 @@ run_collector() {
     local name="$1"; shift
     case "$name" in
         bash)   run_bash "$@" ;;
+        ash)    run_ash "$@" ;;
         python) run_python "$@" ;;
         perl)   run_perl "$@" ;;
         ps3)    run_ps3 "$@" ;;
@@ -153,6 +168,16 @@ run_collector() {
 run_bash() {
     local dir="$1"; shift
     bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        "$@" 2>&1
+}
+
+run_ash() {
+    local dir="$1"; shift
+    [ -n "$ASH_SHELL" ] || return 127
+    # Intentionally rely on shell word splitting so "busybox sh" works.
+    # shellcheck disable=SC2086
+    $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
         --server localhost --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
@@ -268,6 +293,13 @@ test_interrupted_marker() {
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
+        ash)
+            # shellcheck disable=SC2086
+            $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+                --server localhost --port "$STUB_PORT" --dir "$fixtures" \
+                --max-age 30 > /dev/null 2>&1 &
+            echo $! > "$pid_file"
+            ;;
         python)
             python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
                 -s localhost -p "$STUB_PORT" -d "$fixtures" \
@@ -351,6 +383,7 @@ test_dry_run() {
     local output
     case "$collector" in
         bash)   output="$(run_bash "$fixtures" --max-age 30 --dry-run 2>&1)" ;;
+        ash)    output="$(run_ash "$fixtures" --max-age 30 --dry-run 2>&1)" ;;
         python) output="$(run_python "$fixtures" --max-age 30 --dry-run 2>&1)" ;;
         perl)   output="$(run_perl "$fixtures" --max-age 30 --dry-run 2>&1)" ;;
     esac
@@ -384,6 +417,9 @@ test_source_identifier() {
     case "$collector" in
         bash)
             run_bash "$fixtures" --max-age 30 --source "$source_name" >/dev/null 2>&1 || true
+            ;;
+        ash)
+            run_ash "$fixtures" --max-age 30 --source "$source_name" >/dev/null 2>&1 || true
             ;;
         python)
             python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
@@ -463,6 +499,7 @@ test_sync_mode() {
 
     case "$collector" in
         bash)   run_bash "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
+        ash)    run_ash "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
         python) run_python "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
         perl)   run_perl "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
     esac
@@ -502,6 +539,13 @@ test_multiple_dirs() {
     case "$collector" in
         bash)
             bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+                --server localhost --port "$STUB_PORT" \
+                --dir "$dir1" --dir "$dir2" \
+                --max-age 30 >/dev/null 2>&1 || true
+            ;;
+        ash)
+            # shellcheck disable=SC2086
+            $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
                 --server localhost --port "$STUB_PORT" \
                 --dir "$dir1" --dir "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
@@ -564,6 +608,11 @@ test_503_backpressure() {
             output="$(timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
+        ash)
+            # shellcheck disable=SC2086
+            output="$(timeout 30 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+                --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
+            ;;
         python)
             output="$(timeout 30 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
                 -s localhost -p "$STUB_PORT" -d "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
@@ -615,6 +664,7 @@ test_progress_reporting() {
     local progress_flag
     case "$collector" in
         bash)   progress_flag="--progress" ;;
+        ash)    progress_flag="--progress" ;;
         python) progress_flag="--progress" ;;
         perl)   progress_flag="--progress" ;;
         ps3)    progress_flag="-Progress" ;;
@@ -632,6 +682,11 @@ test_progress_reporting() {
     case "$collector" in
         bash)
             output="$(timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+                --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
+            ;;
+        ash)
+            # shellcheck disable=SC2086
+            output="$(timeout 30 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         python)
@@ -777,7 +832,9 @@ echo ""
 
 start_stub
 
-COLLECTORS=("bash" "python" "perl" "ps3" "ps2")
+COLLECTORS=("bash")
+[ -n "$ASH_SHELL" ] && COLLECTORS+=("ash")
+COLLECTORS+=("python" "perl" "ps3" "ps2")
 
 for collector in "${COLLECTORS[@]}"; do
     printf "\n${CYAN}── $collector ──${RESET}\n"

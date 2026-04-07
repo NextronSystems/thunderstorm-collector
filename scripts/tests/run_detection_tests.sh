@@ -65,6 +65,20 @@ pass() { printf "  ${GREEN}PASS${RESET} %s\n" "$*"; TESTS_PASSED=$((TESTS_PASSED
 fail() { printf "  ${RED}FAIL${RESET} %s\n" "$*"; TESTS_FAILED=$((TESTS_FAILED + 1)); FAILED_NAMES="$FAILED_NAMES  - $1\n"; }
 skip() { printf "  ${YELLOW}SKIP${RESET} %s\n" "$*"; TESTS_SKIPPED=$((TESTS_SKIPPED + 1)); }
 
+detect_ash_shell() {
+    if command -v ash >/dev/null 2>&1; then
+        echo "ash"
+    elif command -v dash >/dev/null 2>&1; then
+        echo "dash"
+    elif command -v busybox >/dev/null 2>&1; then
+        echo "busybox sh"
+    else
+        echo ""
+    fi
+}
+
+ASH_SHELL="${ASH_SHELL:-$(detect_ash_shell)}"
+
 # Find the stub server binary
 find_stub() {
     local candidates=(
@@ -133,7 +147,7 @@ clear_log() {
 cleanup() {
     stop_stub
     # Kill any leftover retry-test stubs
-    for p in 18101 18102 18103 18104 18105; do
+    for p in 18101 18102 18103 18104 18105 18106; do
         local pid; pid="$(lsof -ti :$p 2>/dev/null)"
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
     done
@@ -233,6 +247,16 @@ run_bash() {
         "$@" 2>&1
 }
 
+run_ash() {
+    local dir="$1"; shift
+    [ -n "$ASH_SHELL" ] || return 127
+    # Intentionally rely on shell word splitting so "busybox sh" works.
+    # shellcheck disable=SC2086
+    $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        "$@" 2>&1
+}
+
 run_python() {
     local dir="$1"; shift
     python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
@@ -277,9 +301,6 @@ run_ps2() {
         "${args[@]}" 2>&1
 }
 
-# List of collectors to test
-COLLECTORS=("bash" "python" "perl" "ps3" "ps2")
-
 # Small delay after collector to ensure stub has written to log
 sync_stub() {
     sleep 1
@@ -289,6 +310,7 @@ run_collector() {
     local name="$1"; shift
     case "$name" in
         bash)   run_bash "$@" ;;
+        ash)    run_ash "$@" ;;
         python) run_python "$@" ;;
         perl)   run_perl "$@" ;;
         ps3)    run_ps3 "$@" ;;
@@ -875,10 +897,11 @@ test_retry_on_late_server() {
     local retry_port
     case "$collector" in
         bash)   retry_port=18101 ;;
-        python) retry_port=18102 ;;
-        perl)   retry_port=18103 ;;
-        ps3)    retry_port=18104 ;;
-        ps2)    retry_port=18105 ;;
+        ash)    retry_port=18102 ;;
+        python) retry_port=18103 ;;
+        perl)   retry_port=18104 ;;
+        ps3)    retry_port=18105 ;;
+        ps2)    retry_port=18106 ;;
     esac
     local retry_log; retry_log="$(mktemp /tmp/retry-stub-XXXXXX.jsonl)"
 
@@ -905,6 +928,12 @@ test_retry_on_late_server() {
     case "$collector" in
         bash)
             timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+                --server localhost --port "$retry_port" --dir "$fixtures/retry" \
+                --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
+            ;;
+        ash)
+            # shellcheck disable=SC2086
+            timeout 30 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
                 --server localhost --port "$retry_port" --dir "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
@@ -988,6 +1017,12 @@ test_server_unreachable() {
                 --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
+        ash)
+            # shellcheck disable=SC2086
+            timeout 20 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+                --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
+                --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
+            ;;
         python)
             timeout 20 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
                 --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
@@ -1056,6 +1091,7 @@ fi
 # Check which collectors are available
 available_collectors=()
 command -v bash >/dev/null 2>&1 && available_collectors+=("bash")
+[ -n "$ASH_SHELL" ] && available_collectors+=("ash")
 command -v python3 >/dev/null 2>&1 && available_collectors+=("python")
 command -v perl >/dev/null 2>&1 && available_collectors+=("perl")
 command -v pwsh >/dev/null 2>&1 && available_collectors+=("ps3" "ps2")
