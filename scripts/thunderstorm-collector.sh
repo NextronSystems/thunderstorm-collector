@@ -446,14 +446,19 @@ upload_with_curl() {
         return $code
     fi
 
-    # Check for non-2xx HTTP status
-    if [ -n "$http_code" ] && [ "$http_code" -ge 400 ] 2>/dev/null; then
-        local body
-        body="$(cat "$resp_file" 2>/dev/null)"
-        body="${body//$'\r'/ }"
-        body="${body//$'\n'/ }"
-        log_msg error "Server returned HTTP $http_code for '$filepath': $body"
-        return 92
+    # Only 2xx responses count as a successful submission.
+    if [ -n "$http_code" ]; then
+        case "$http_code" in
+            2[0-9][0-9]) ;;
+            *)
+                local body
+                body="$(cat "$resp_file" 2>/dev/null)"
+                body="${body//$'\r'/ }"
+                body="${body//$'\n'/ }"
+                log_msg error "Server returned HTTP $http_code for '$filepath': $body"
+                return 92
+                ;;
+        esac
     fi
 
     return 0
@@ -533,12 +538,17 @@ upload_with_wget() {
         return $code
     fi
 
-    # Check for non-2xx HTTP status
-    if [ -n "$http_code" ] && [ "$http_code" -ge 400 ] 2>/dev/null; then
-        local body
-        body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
-        log_msg error "Server returned HTTP $http_code for '$filepath': $body"
-        return 96
+    # Only 2xx responses count as a successful submission.
+    if [ -n "$http_code" ]; then
+        case "$http_code" in
+            2[0-9][0-9]) ;;
+            *)
+                local body
+                body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
+                log_msg error "Server returned HTTP $http_code for '$filepath': $body"
+                return 96
+                ;;
+        esac
     fi
 
     return 0
@@ -620,19 +630,26 @@ collection_marker() {
                 "$marker_url" 2>"$header_file"
             _marker_rc=$?
         fi
-        # If transport succeeded, validate HTTP status code.
+        # Validate the HTTP status code even when wget exits non-zero on 4xx/5xx.
         # 404/501 means the server doesn't implement marker endpoint; continue without scan_id.
-        if [ "$_marker_rc" -eq 0 ]; then
-            _http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
-            if [ -n "$_http_code" ] && [ "$_http_code" -ge 400 ] 2>/dev/null; then
-                if [ "$_http_code" = "404" ] || [ "$_http_code" = "501" ]; then
+        _http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+        if [ -n "$_http_code" ]; then
+            case "$_http_code" in
+                2[0-9][0-9])
+                    _marker_rc=0
+                    ;;
+                404|501)
                     log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
                     _marker_rc=0
-                else
+                    ;;
+                *)
                     log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
                     _marker_rc=1
-                fi
-            fi
+                    ;;
+            esac
+        elif [ "$_marker_rc" -eq 0 ]; then
+            # Some clients may succeed without exposing a parseable status line.
+            _marker_rc=0
         fi
         if [ "$_marker_rc" -eq 0 ]; then
             break
@@ -986,10 +1003,10 @@ main() {
             exit 2
         fi
         local _begin_resp_file
+        local _begin_rc=0
         _begin_resp_file="$(mktemp_portable)" || { log_msg error "Cannot create temp file"; exit 2; }
         TMP_FILES_ARR+=("$_begin_resp_file")
         collection_marker "$base_url" "begin" "" "" > "$_begin_resp_file"
-        local _begin_rc
         _begin_rc=$?
         SCAN_ID="$(cat "$_begin_resp_file" 2>/dev/null)"
         # If the begin marker failed after retry, the server is unreachable — fatal error

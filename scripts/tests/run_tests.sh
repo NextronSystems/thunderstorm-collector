@@ -284,6 +284,17 @@ create_file_bytes() {
     dd if=/dev/urandom of="$path" bs=1 count="$size" 2>/dev/null
 }
 
+create_fake_tool_path() {
+    local dir="$TEST_TMP/fake-tools-$1"
+    mkdir -p "$dir"
+    local cmd path
+    for cmd in bash awk cat date find grep head hostname id mktemp od rm sed sleep tail tr uname wc; do
+        path="$(command -v "$cmd" 2>/dev/null || true)"
+        [ -n "$path" ] && ln -sf "$path" "$dir/$cmd"
+    done
+    echo "$dir"
+}
+
 set_file_age_days() {
     local path="$1" days="$2"
     local ts
@@ -745,6 +756,114 @@ test_positional_directory_args() {
     assert_eq "submitted" "2" "$submitted" || return 1
 }
 
+# ── 29. Begin-marker failures stay fatal even with no candidate files ───────
+
+test_begin_marker_failure_is_fatal() {
+    stop_stub
+    local d; d="$(create_sample_dir begin_marker_failure)"
+    local fakebin; fakebin="$(create_fake_tool_path begin_marker_failure)"
+    cat > "$fakebin/curl" <<'EOF'
+#!/bin/sh
+exit 7
+EOF
+    chmod +x "$fakebin/curl"
+
+    local out rc
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" \
+        --server 127.0.0.1 --port 65534 --no-log-file --no-progress \
+        --dir "$d" 2>&1)"
+    rc=$?
+    set -e
+
+    assert_eq "exit code" "2" "$rc" || return 1
+    assert_contains "begin marker failure message" "begin marker failed after retry" "$out" || return 1
+}
+
+# ── 30. Wget 404 on /api/collection stays non-fatal ─────────────────────────
+
+test_wget_collection_marker_404_nonfatal() {
+    stop_stub
+    local d; d="$(create_sample_dir wget_marker_404)"
+    local fakebin; fakebin="$(create_fake_tool_path wget_marker_404)"
+    cat > "$fakebin/wget" <<'EOF'
+#!/bin/sh
+printf '  HTTP/1.1 404 Not Found\n' >&2
+exit 8
+EOF
+    chmod +x "$fakebin/wget"
+
+    local out rc
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" \
+        --server 127.0.0.1 --port 8080 --no-log-file --no-progress \
+        --dir "$d" 2>&1)"
+    rc=$?
+    set -e
+
+    assert_eq "exit code" "0" "$rc" || return 1
+    assert_contains "optional marker warning" "not supported (HTTP 404)" "$out" || return 1
+    assert_not_contains "marker not fatal" "begin marker failed after retry" "$out" || return 1
+}
+
+# ── 31. Redirect upload responses are rejected ───────────────────────────────
+
+test_redirect_upload_rejected() {
+    stop_stub
+    local d; d="$(create_sample_dir redirect_upload)"
+    create_file "$d/sample.bin" "redirect-test"
+    local fakebin; fakebin="$(create_fake_tool_path redirect_upload)"
+    cat > "$fakebin/curl" <<'EOF'
+#!/bin/sh
+hdr=""
+outfile=""
+endpoint=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -D) hdr="$2"; shift 2 ;;
+        -o) outfile="$2"; shift 2 ;;
+        -F|-H|-d|--max-time|--cacert) shift 2 ;;
+        -sS|--show-error|-X|-k) shift ;;
+        http://*|https://*) endpoint="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+
+case "$endpoint" in
+    */api/collection)
+        [ -n "$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "$hdr"
+        [ -n "$outfile" ] && : > "$outfile"
+        ;;
+    *)
+        [ -n "$hdr" ] && printf 'HTTP/1.1 302 Found\r\nLocation: https://example.invalid/other\r\n\r\n' > "$hdr"
+        if [ -n "$outfile" ]; then
+            printf 'redirect' > "$outfile"
+        else
+            printf 'redirect'
+        fi
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$fakebin/curl"
+
+    local out rc
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" \
+        --server 127.0.0.1 --port 8080 --no-log-file --no-progress \
+        --dir "$d" --retries 1 2>&1)"
+    rc=$?
+    set -e
+
+    local submitted; submitted="$(parse_collector_stat "$out" submitted)"
+    local failed; failed="$(parse_collector_stat "$out" failed)"
+
+    assert_eq "exit code" "1" "$rc" || return 1
+    assert_eq "submitted" "0" "$submitted" || return 1
+    assert_eq "failed" "1" "$failed" || return 1
+    assert_contains "redirect status logged" "HTTP 302" "$out" || return 1
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -791,6 +910,9 @@ run_test test_zero_byte_file
 run_test test_max_age_zero_includes_all
 run_test test_max_age_cli_override_applied
 run_test test_positional_directory_args
+run_test test_begin_marker_failure_is_fatal
+run_test test_wget_collection_marker_404_nonfatal
+run_test test_redirect_upload_rejected
 
 # Summary
 printf "\n${BOLD}Results:${RESET} %d/%d passed" "$TESTS_PASSED" "$TESTS_RUN"
