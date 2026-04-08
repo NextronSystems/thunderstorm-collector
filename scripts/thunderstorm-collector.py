@@ -53,6 +53,15 @@ CLOUD_DIR_NAMES = {"onedrive", "dropbox", ".dropbox", "googledrive", "google dri
                    "megasync", "tresorit", "tresorit drive", "syncthing"}
 
 
+def _decode_proc_mount_path(mount_point):
+    """Decode octal escapes used in /proc/mounts mount-point entries."""
+    return re.sub(
+        r"\\([0-7]{3})",
+        lambda match: chr(int(match.group(1), 8)),
+        mount_point,
+    )
+
+
 def get_excluded_mounts():
     """Parse /proc/mounts and return mount points for network/special filesystems."""
     excluded = []
@@ -61,7 +70,7 @@ def get_excluded_mounts():
             for line in f:
                 parts = line.split()
                 if len(parts) >= 3:
-                    mount_point, fs_type = parts[1], parts[2]
+                    mount_point, fs_type = _decode_proc_mount_path(parts[1]), parts[2]
                     if fs_type in NETWORK_FS_TYPES or fs_type in SPECIAL_FS_TYPES:
                         excluded.append(mount_point)
     except (IOError, OSError):
@@ -287,6 +296,24 @@ def _make_connection(server, port, tls, insecure, ca_cert=None, timeout=30):
         return http.client.HTTPConnection(server, port, timeout=timeout)
 
 
+def _build_multipart_preamble(boundary, filepath):
+    """Build a multipart file part preamble without crashing on surrogate paths."""
+    safe_filename = (
+        filepath.replace("\\", "/")
+        .replace('"', "_")
+        .replace(";", "_")
+        .replace("\r", "_")
+        .replace("\n", "_")
+        .replace("\x00", "_")
+    )
+    filename_bytes = safe_filename.encode("utf-8", "surrogateescape")
+    preamble = "--{}\r\n".format(boundary).encode("ascii")
+    preamble += b'Content-Disposition: form-data; name="file"; filename="'
+    preamble += filename_bytes
+    preamble += b'"\r\nContent-Type: application/octet-stream\r\n\r\n'
+    return preamble
+
+
 def submit_sample(filepath, file_stat=None):
     global num_submitted, num_failed, upload_in_flight
 
@@ -315,19 +342,8 @@ def submit_sample(filepath, file_stat=None):
         "Content-Type": "multipart/form-data; boundary={}".format(boundary),
     }
 
-    # Sanitize filename for multipart header safety
-    safe_filename = filepath.replace('\\', '/').replace('"', '_').replace(';', '_').replace('\r', '_').replace('\n', '_').replace('\x00', '_')
-
-    # Build multipart preamble (file field header) and epilogue
-    preamble = b""
-
-    # file field header
-    preamble += (
-        "--{boundary}\r\n"
-        "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
-        "Content-Type: application/octet-stream\r\n\r\n"
-    ).format(boundary=boundary, filename=safe_filename).encode("utf-8")
-
+    # Preserve undecodable POSIX path bytes so one odd filename does not abort the run.
+    preamble = _build_multipart_preamble(boundary, filepath)
     epilogue = "\r\n--{}--\r\n".format(boundary).encode("utf-8")
 
     content_length = len(preamble) + file_size + len(epilogue)
