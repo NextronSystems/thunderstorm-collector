@@ -306,7 +306,7 @@ function Submit-File {
         $request.ContentType = "multipart/form-data; boundary=$boundary"
         $request.ContentLength = $contentLength
         $request.Timeout = 120000  # 120 seconds
-        $request.AllowAutoRedirect = $true
+        $request.AllowAutoRedirect = $false
         $request.AllowWriteStreamBuffering = $false
         $request.Headers.Add("X-Hostname", $env:COMPUTERNAME)
 
@@ -617,6 +617,7 @@ function Send-CollectionMarker {
         $Req.ContentType = "application/json"
         $Req.ContentLength = $JsonBytes.Length
         $Req.Timeout = 10000
+        $Req.AllowAutoRedirect = $false
         $Stream = $Req.GetRequestStream()
         $Stream.Write($JsonBytes, 0, $JsonBytes.Length)
         $Stream.Close()

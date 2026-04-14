@@ -193,23 +193,22 @@ GOTO :SCANDONE
 :SCANDIR
 SETLOCAL DisableDelayedExpansion
 SET "_TDIR=%~1"
-SETLOCAL EnableDelayedExpansion
-IF "!_TDIR!"=="" (
-    ENDLOCAL & ENDLOCAL
+IF "%_TDIR%"=="" (
+    ENDLOCAL
     GOTO :EOF
 )
-IF NOT EXIST "!_TDIR!" (
-    ECHO [ERROR] Warning: !_TDIR! does not exist, skipping. 1>&2
-    ENDLOCAL & ENDLOCAL
+IF NOT EXIST "%_TDIR%" (
+    ECHO [ERROR] Warning: %_TDIR% does not exist, skipping. 1>&2
+    ENDLOCAL
     GOTO :EOF
 )
-IF !_DBG! == 1 ECHO [D] Scanning !_TDIR! ...
+IF %_DBG% == 1 ECHO [D] Scanning %_TDIR% ...
 :: FORFILES /S = recurse (skips junctions), /C = command per file
 :: @path outputs quoted full path, @isdir filters out directories
 :: Note: Age filtering via /D has inverted semantics and is not used here.
 :: Age is checked during iteration in PROCESSFILE.
-FORFILES /P "!_TDIR!" /S /C "cmd /c if @isdir==FALSE echo @path" >>"!_FILELIST!" 2>nul
-ENDLOCAL & ENDLOCAL
+FORFILES /P "%_TDIR%" /S /C "cmd /c if @isdir==FALSE echo @path" >>"%_FILELIST%" 2>nul
+ENDLOCAL
 GOTO :EOF
 
 :SCANDONE
@@ -244,22 +243,26 @@ GOTO :DONE
 :: First, capture the raw path with delayed expansion OFF so '!' is preserved
 SETLOCAL DisableDelayedExpansion
 SET "_FILE=%~1"
+SET _SZ=
+SET "_FEXT="
+SET "_AGEDIR="
+SET "_AGENAME="
+FOR %%S IN ("%_FILE%") DO (
+    SET "_SZ=%%~zS"
+    SET "_FEXT=%%~xS"
+    SET "_AGEDIR=%%~dpS"
+    SET "_AGENAME=%%~nxS"
+)
 :: Now re-enable delayed expansion for counter logic and comparisons
 SETLOCAL EnableDelayedExpansion
 
-:: Extension check — use a nested FOR to get file attributes from the filesystem
+:: Extension check
 SET _EXTMATCH=0
-SET _SZ=
-SET "_FEXT="
-FOR %%S IN ("!_FILE!") DO (
-    SET "_SZ=%%~zS"
-    SET "_FEXT=%%~xS"
-)
 FOR %%E IN (%_EXTS%) DO (
     IF /I "!_FEXT!"=="%%E" SET _EXTMATCH=1
 )
 IF !_EXTMATCH! == 0 (
-    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(extension^)
+    IF !_DBG! == 1 ECHO [D] Skip current file ^(extension^)
     SET /A _SKIPPED+=1
     :: Propagate all counters back to parent scope
     FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
@@ -273,7 +276,7 @@ IF !_EXTMATCH! == 0 (
 )
 :: Size check (file may have been deleted since listing)
 IF "!_SZ!"=="" (
-    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(file not found^)
+    IF !_DBG! == 1 ECHO [D] Skip current file ^(file not found^)
     SET /A _SKIPPED+=1
     FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
         ENDLOCAL & ENDLOCAL
@@ -285,7 +288,7 @@ IF "!_SZ!"=="" (
     GOTO :EOF
 )
 IF !_SZ! GTR !_MAXSZ! (
-    IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(size: !_SZ!^)
+    IF !_DBG! == 1 ECHO [D] Skip current file ^(size: !_SZ!^)
     SET /A _SKIPPED+=1
     FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
         ENDLOCAL & ENDLOCAL
@@ -300,9 +303,9 @@ IF !_SZ! GTR !_MAXSZ! (
 :: and skip those that are too old.
 IF !_MAXAGE! GTR 0 (
     SET "_ISOLD=0"
-    CALL :ISFILEOLD "!_FILE!" !_MAXAGE!
+    CALL :ISFILEOLD_RAW
     IF "!_ISOLD!"=="1" (
-        IF !_DBG! == 1 ECHO [D] Skip: !_FILE! ^(age: older than !_MAXAGE! days^)
+        IF !_DBG! == 1 ECHO [D] Skip current file ^(age: older than !_MAXAGE! days^)
         SET /A _SKIPPED+=1
         FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
             ENDLOCAL & ENDLOCAL
@@ -316,15 +319,14 @@ IF !_MAXAGE! GTR 0 (
 )
 :: Upload — increment _SCANNED only for files that pass filters
 SET /A _SCANNED+=1
-ECHO [+] Uploading: !_FILE!
+ECHO [+] Uploading: %_FILE%
 SET _HTTPCODE=
-"%_CURL%" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!;filename=!_FILE!" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
-SET _CURLRC=!ERRORLEVEL!
+CALL :RUNUPLOAD_RAW
 IF !_CURLRC! == 0 (
     SET /P _HTTPCODE=<"!_RESPTMP!"
     DEL "!_RESPTMP!" 2>nul
     IF "!_HTTPCODE!"=="" (
-        ECHO [ERROR] Failed: !_FILE! ^(empty response^) 1>&2
+        ECHO [ERROR] Failed current file ^(empty response^) 1>&2
         SET /A _FAILED+=1
     ) ELSE IF "!_HTTPCODE!"=="503" (
         :: Respect Retry-After header, capped at 60s, default 5s
@@ -341,25 +343,25 @@ IF !_CURLRC! == 0 (
         SET /A _PINGCOUNT=!_RETRYWAIT!+1
         PING -n !_PINGCOUNT! 127.0.0.1 >nul 2>&1
         SET _HTTPCODE2=
-        "!_CURL!" -s -o nul -D "!_RESPTMP!.hdr" -w "%%{http_code}" -F "file=@!_FILE!;filename=!_FILE!" "!_SCHEME!://!_TS!:!_TP!/api/checkAsync?source=!_SRCURL!!_IDPARAM!" >"!_RESPTMP!" 2>nul
-        SET _CURLRC2=!ERRORLEVEL!
+        CALL :RUNUPLOAD_RAW
+        SET "_CURLRC2=!_CURLRC!"
         IF !_CURLRC2! == 0 (
             SET /P _HTTPCODE2=<"!_RESPTMP!"
             DEL "!_RESPTMP!" 2>nul
             DEL "!_RESPTMP!.hdr" 2>nul
             IF "!_HTTPCODE2!"=="503" (
-                ECHO [ERROR] Failed: !_FILE! ^(server still busy^) 1>&2
+                ECHO [ERROR] Failed current file ^(server still busy^) 1>&2
                 SET /A _FAILED+=1
             ) ELSE IF "!_HTTPCODE2:~0,1!"=="2" (
                 SET /A _SUBMITTED+=1
             ) ELSE (
-                ECHO [ERROR] Failed: !_FILE! ^(HTTP !_HTTPCODE2! on retry^) 1>&2
+                ECHO [ERROR] Failed current file ^(HTTP !_HTTPCODE2! on retry^) 1>&2
                 SET /A _FAILED+=1
             )
         ) ELSE (
             DEL "!_RESPTMP!" 2>nul
             DEL "!_RESPTMP!.hdr" 2>nul
-            ECHO [ERROR] Failed: !_FILE! ^(curl exit: !_CURLRC2!^) 1>&2
+            ECHO [ERROR] Failed current file ^(curl exit: !_CURLRC2!^) 1>&2
             SET /A _FAILED+=1
         )
     ) ELSE IF "!_HTTPCODE:~0,1!"=="2" (
@@ -367,13 +369,13 @@ IF !_CURLRC! == 0 (
         SET /A _SUBMITTED+=1
     ) ELSE (
         DEL "!_RESPTMP!.hdr" 2>nul
-        ECHO [ERROR] Failed: !_FILE! ^(HTTP !_HTTPCODE!^) 1>&2
+        ECHO [ERROR] Failed current file ^(HTTP !_HTTPCODE!^) 1>&2
         SET /A _FAILED+=1
     )
 ) ELSE (
     DEL "!_RESPTMP!" 2>nul
     DEL "!_RESPTMP!.hdr" 2>nul
-    ECHO [ERROR] Failed: !_FILE! ^(curl exit: !_CURLRC!^) 1>&2
+    ECHO [ERROR] Failed current file ^(curl exit: !_CURLRC!^) 1>&2
     SET /A _FAILED+=1
 )
 :: Clean up any leftover temp files from this iteration
@@ -390,24 +392,29 @@ FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
 GOTO :EOF
 
 :: ---------------------------------------------------------------
-:: Subroutine: ISFILEOLD
-:: Sets _ISOLD=1 if file is older than/equal to MAX_AGE days, else 0.
+:: Subroutine: RUNUPLOAD_RAW
+:: Runs curl with delayed expansion disabled so paths containing '!'
+:: are preserved in both the file lookup and multipart filename metadata.
 :: ---------------------------------------------------------------
-:ISFILEOLD
+:RUNUPLOAD_RAW
 SETLOCAL DisableDelayedExpansion
-SET "_CHECK_FILE=%~1"
-SET "_CHECK_AGE=%~2"
+"%_CURL%" -s -o nul -D "%_RESPTMP%.hdr" -w "%%{http_code}" -F "file=@%_FILE%;filename=%_FILE%" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=%_SRCURL%%_IDPARAM%" >"%_RESPTMP%" 2>nul
+SET "_CURLRC=%ERRORLEVEL%"
+ENDLOCAL & SET "_CURLRC=%_CURLRC%"
+GOTO :EOF
+
+:: ---------------------------------------------------------------
+:: Subroutine: ISFILEOLD_RAW
+:: Sets _ISOLD=1 if the current file is older than/equal to MAX_AGE days,
+:: else 0, while delayed expansion is disabled.
+:: ---------------------------------------------------------------
+:ISFILEOLD_RAW
+SETLOCAL DisableDelayedExpansion
 SET "_ISOLD=0"
-SET "_AGEDIR="
-SET "_AGENAME="
-FOR %%S IN ("%_CHECK_FILE%") DO (
-    SET "_AGEDIR=%%~dpS"
-    SET "_AGENAME=%%~nxS"
-)
 IF "%_AGEDIR%"=="" GOTO :ISFILEOLDRETURN
 IF "%_AGENAME%"=="" GOTO :ISFILEOLDRETURN
 
-FORFILES /P "%_AGEDIR%" /M "%_AGENAME%" /D -%_CHECK_AGE% /C "cmd /c if @isdir==FALSE exit /b 0" >nul 2>nul
+FORFILES /P "%_AGEDIR%" /M "%_AGENAME%" /D -%_MAXAGE% /C "cmd /c if @isdir==FALSE exit /b 0" >nul 2>nul
 IF NOT ERRORLEVEL 1 SET "_ISOLD=1"
 
 :ISFILEOLDRETURN

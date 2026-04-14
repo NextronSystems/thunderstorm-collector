@@ -66,6 +66,11 @@ CLOUD_DIR_NAMES = set(["onedrive", "dropbox", ".dropbox", "googledrive", "google
                        "megasync", "tresorit", "syncthing"])
 
 
+def decode_proc_mount_path(mount_point):
+    """Decode octal escapes used by /proc/mounts."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), mount_point)
+
+
 def get_excluded_mounts():
     excluded = []
     try:
@@ -73,7 +78,7 @@ def get_excluded_mounts():
             for line in f:
                 parts = line.split()
                 if len(parts) >= 3:
-                    mount_point, fs_type = parts[1], parts[2]
+                    mount_point, fs_type = decode_proc_mount_path(parts[1]), parts[2]
                     if fs_type in NETWORK_FS_TYPES or fs_type in SPECIAL_FS_TYPES:
                         excluded.append(mount_point)
     except (IOError, OSError):
@@ -609,6 +614,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.source is None:
+        args.source = socket.gethostname()
+
     # Apply parsed args to module-level config
     max_age = args.max_age
     max_size_kb = args.max_size_kb
@@ -648,9 +656,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Build the API path+query (path only, not full URL — httplib needs just the path)
-    source_query = ""
-    if args.source:
-        source_query = "?source={}".format(quote(args.source, safe=''))
+    source_query = "?source={}".format(quote(args.source, safe=''))
 
     api_path = "/api/check" if sync_mode else "/api/checkAsync"
     api_endpoint = "{}{}".format(api_path, source_query)
@@ -686,7 +692,7 @@ if __name__ == "__main__":
     scan_id, begin_success = collection_marker(
         args.server, args.port, args.tls, args.insecure,
         args.ca_cert,
-        args.source or socket.gethostname(), "0.1",
+        args.source, "0.1",
         "begin"
     )
     if not begin_success:
@@ -717,7 +723,7 @@ if __name__ == "__main__":
     _end_scan_id, _end_ok = collection_marker(
         args.server, args.port, args.tls, args.insecure,
         args.ca_cert,
-        args.source or socket.gethostname(), "0.1",
+        args.source, "0.1",
         "end",
         scan_id=scan_id,
         stats={

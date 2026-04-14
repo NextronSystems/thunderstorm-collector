@@ -238,6 +238,59 @@ function Write-Log {
     }
 }
 
+function Get-CollectorFileList {
+    param(
+        [Parameter(Mandatory=$True)][string]$RootPath,
+        [switch]$CollectErrors = $False
+    )
+
+    $Files = New-Object System.Collections.ArrayList
+    $Errors = New-Object System.Collections.ArrayList
+    $PendingDirs = New-Object System.Collections.Stack
+    [void]$PendingDirs.Push($RootPath)
+
+    while ($PendingDirs.Count -gt 0) {
+        $CurrentDir = [string]$PendingDirs.Pop()
+        $Children = @()
+        try {
+            $Children = @(Get-ChildItem -LiteralPath $CurrentDir -Force -ErrorAction Stop)
+        } catch {
+            if ($CollectErrors) {
+                [void]$Errors.Add($_)
+            }
+            continue
+        }
+
+        foreach ($Child in $Children) {
+            $IsReparsePoint = $False
+            try {
+                $IsReparsePoint = (($Child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+            } catch {
+                $IsReparsePoint = $False
+            }
+
+            if ($Child.PSIsContainer) {
+                if ($IsReparsePoint) {
+                    continue
+                }
+                [void]$PendingDirs.Push($Child.FullName)
+                continue
+            }
+
+            if ($IsReparsePoint) {
+                continue
+            }
+
+            [void]$Files.Add($Child)
+        }
+    }
+
+    return @{
+        Files  = @($Files)
+        Errors = @($Errors)
+    }
+}
+
 # #####################################################################
 # Main Program --------------------------------------------------------
 # #####################################################################
@@ -532,8 +585,8 @@ if ($ShowProgress) {
     }
     if (-not $SkipPreCount) {
         try {
-            $PreCountErrors = @()
-            $TotalFiles = @(Get-ChildItem -Path $Folder -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable PreCountErrors | Where-Object { -not $_.PSIsContainer }).Count
+            $PreCountResult = Get-CollectorFileList -RootPath $Folder -CollectErrors
+            $TotalFiles = $PreCountResult.Files.Count
         } catch {
             $TotalFiles = 0
         }
@@ -629,7 +682,9 @@ if ($ScanId) {
 
 $EnumErrors = @()
 try {
-    $FileList = @(Get-ChildItem -Path $Folder -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable EnumErrors | Where-Object { -not $_.PSIsContainer })
+    $EnumResult = Get-CollectorFileList -RootPath $Folder -CollectErrors
+    $FileList = $EnumResult.Files
+    $EnumErrors = $EnumResult.Errors
     # Set total file count from actual enumeration for accurate progress reporting
     if ($ShowProgress) {
         $TotalFiles = $FileList.Count
@@ -742,6 +797,7 @@ try {
                 $WebRequest.ContentType = "multipart/form-data; boundary=$boundary"
                 $WebRequest.ContentLength = $ContentLength
                 $WebRequest.Timeout = 300000
+                $WebRequest.AllowAutoRedirect = $False
                 $WebRequest.AllowWriteStreamBuffering = $False
 
                 $requestStream = $WebRequest.GetRequestStream()
