@@ -121,7 +121,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		}
 		number, err := strconv.Atoi(config.MaxAgeInDays)
 		if err != nil {
-			return cc, fmt.Errorf("max-age: could not parse number from %s: %w", config.MaxAgeInDays, err)
+			return cc, fmt.Errorf("max-age: could not parse number from %s: %v", config.MaxAgeInDays, err)
 		}
 		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
 	}
@@ -155,7 +155,7 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		hexHeader = whitespaceRegex.ReplaceAllString(hexHeader, "")
 		magicHeader, err := hex.DecodeString(hexHeader)
 		if err != nil {
-			return cc, fmt.Errorf("could not parse magic header %s: %w", hexHeader, err)
+			return cc, fmt.Errorf("could not parse magic header %s: %v", hexHeader, err)
 		}
 		if len(magicHeader) > maxMagicHeaderLength {
 			return cc, fmt.Errorf("magic header too long (max %d bytes, got %d): %s", maxMagicHeaderLength, len(magicHeader), hexHeader)

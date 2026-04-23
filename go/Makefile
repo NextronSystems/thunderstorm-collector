@@ -1,4 +1,9 @@
 # Thunderstorm Collector - Go Build System
+# Compatible with go1.10+ (GOPATH mode with vendor directory)
+
+# GOPATH setup: project is symlinked into .gopath/src/
+IMPORT_PATH := github.com/NextronSystems/thunderstorm-collector/go
+export GOPATH := $(CURDIR)/.gopath
 
 # Get all supported platforms and filter out unsupported ones
 ALL_TARGETS := $(shell go tool dist list)
@@ -43,7 +48,7 @@ bin/%: $(wildcard *.go)
 	@mkdir -p bin
 	@echo "$(OUTINDENT)Building for $(GOOS)/$(GOARCH): $@"
 	@echo -n "$(OUTINDENT)  "
-	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS)"
+	$(BUILD_ENV) go build -o $(CURDIR)/$@ -ldflags "$(LDFLAGS)" $(IMPORT_PATH)
 
 dist/%:
 	@mkdir -p dist
@@ -116,4 +121,4 @@ clean: ## Remove all build artifacts
 
 .PHONY: test
 test: ## Run tests
-	go test -v -cover ./...
+	go test -v -cover $(IMPORT_PATH)
