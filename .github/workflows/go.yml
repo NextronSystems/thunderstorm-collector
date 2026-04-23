@@ -21,6 +21,7 @@ jobs:
       - name: Display Go version
         run: go version
       - name: Download dependencies
+        if: matrix.go-version != '1.10.x'
         run: go mod download
       - name: Test with Go
-        run: go test -v -cover ./...
+        run: make test
