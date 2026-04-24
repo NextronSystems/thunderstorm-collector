@@ -23,6 +23,9 @@ jobs:
           cache-dependency-path: ./go/go.sum
       - name: Display Go version
         run: go version
+      - name: Vendor dependencies
+        run: go mod vendor
+        working-directory: ./go
       - name: Build project
         env:
           VERSION: ${{ github.ref }}

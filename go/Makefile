@@ -40,11 +40,17 @@ $(foreach target,$(FILTERED_TARGETS), \
 	$(eval release: dist/$(TMP_PACK)) \
 )
 
+# GOPATH symlink for go1.10 compatibility
+GOPATH_LINK := .gopath/src/$(IMPORT_PATH)
+$(GOPATH_LINK):
+	@mkdir -p $(dir $(GOPATH_LINK))
+	@ln -snf ../../../../.. $(GOPATH_LINK)
+
 # Build rule for individual binaries
 # Binary names are in arch-os format (e.g., amd64-linux-thunderstorm-collector)
 BUILD_ENV = GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
 
-bin/%: $(wildcard *.go)
+bin/%: $(GOPATH_LINK) $(wildcard *.go)
 	@mkdir -p bin
 	@echo "$(OUTINDENT)Building for $(GOOS)/$(GOARCH): $@"
 	@echo -n "$(OUTINDENT)  "
@@ -120,5 +126,5 @@ clean: ## Remove all build artifacts
 	@echo "$(OUTINDENT)Clean complete."
 
 .PHONY: test
-test: ## Run tests
+test: $(GOPATH_LINK) ## Run tests
 	go test -v -cover $(IMPORT_PATH)
