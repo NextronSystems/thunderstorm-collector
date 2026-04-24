@@ -18,6 +18,10 @@ jobs:
           go-version: stable
           cache-dependency-path: ./go/go.sum
 
+      - name: Vendor Go dependencies
+        run: go mod vendor
+        working-directory: ./go
+
       - name: Install test dependencies
         run: |
           sudo apt-get update
