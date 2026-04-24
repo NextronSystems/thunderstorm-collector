@@ -1,4 +1,9 @@
 # Thunderstorm Collector - Go Build System
+# Compatible with go1.10+ (GOPATH mode with vendor directory)
+
+# GOPATH setup: project is symlinked into .gopath/src/
+IMPORT_PATH := github.com/NextronSystems/thunderstorm-collector/go
+export GOPATH := $(CURDIR)/.gopath
 
 # Get all supported platforms and filter out unsupported ones
 ALL_TARGETS := $(shell go tool dist list)
@@ -35,15 +40,21 @@ $(foreach target,$(FILTERED_TARGETS), \
 	$(eval release: dist/$(TMP_PACK)) \
 )
 
+# GOPATH symlink for go1.10 compatibility
+GOPATH_LINK := .gopath/src/$(IMPORT_PATH)
+$(GOPATH_LINK):
+	@mkdir -p $(dir $(GOPATH_LINK))
+	@ln -snf ../../../../.. $(GOPATH_LINK)
+
 # Build rule for individual binaries
 # Binary names are in arch-os format (e.g., amd64-linux-thunderstorm-collector)
 BUILD_ENV = GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0
 
-bin/%: $(wildcard *.go)
+bin/%: $(GOPATH_LINK) $(wildcard *.go)
 	@mkdir -p bin
 	@echo "$(OUTINDENT)Building for $(GOOS)/$(GOARCH): $@"
 	@echo -n "$(OUTINDENT)  "
-	$(BUILD_ENV) go build -o $@ -ldflags "$(LDFLAGS)"
+	$(BUILD_ENV) go build -o $(CURDIR)/$@ -ldflags "$(LDFLAGS)" $(IMPORT_PATH)
 
 dist/%:
 	@mkdir -p dist
@@ -115,5 +126,5 @@ clean: ## Remove all build artifacts
 	@echo "$(OUTINDENT)Clean complete."
 
 .PHONY: test
-test: ## Run tests
-	go test -v -cover ./...
+test: $(GOPATH_LINK) ## Run tests
+	go test -v -cover $(IMPORT_PATH)

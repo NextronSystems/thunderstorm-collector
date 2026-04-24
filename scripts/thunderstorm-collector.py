@@ -224,7 +224,7 @@ if __name__ == "__main__":
     if args.source:
         source = f"?source={args.source}"
 
-    api_endpoint = "{}://{}:{}/api/checkAsync{}".format(schema, args.server, args.port, source)
+    api_endpoint = "{}://{}:{}/api/v1/checkAsync{}".format(schema, args.server, args.port, source)
 
     print("=" * 80)
     print("   Python Thunderstorm Collector")

@@ -1,10 +1,11 @@
+name: Create Release
+
 on:
   push:
     # Sequence of patterns matched against refs/tags
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
-name: Create Release
 permissions:
   contents: write
 
@@ -22,6 +23,9 @@ jobs:
           cache-dependency-path: ./go/go.sum
       - name: Display Go version
         run: go version
+      - name: Vendor dependencies
+        run: go mod vendor
+        working-directory: ./go
       - name: Build project
         env:
           VERSION: ${{ github.ref }}

@@ -1,4 +1,5 @@
 name: Go
+
 on: [push]
 
 jobs:
@@ -6,20 +7,25 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [ '1.15.x', 'stable' ]
+        go-version: [ '1.10.x', 'stable' ]
     defaults:
       run:
         working-directory: ./go
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Go (stable, for vendoring)
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: ./go/go.sum
+      - name: Vendor dependencies
+        run: go mod vendor
       - name: Setup Go ${{ matrix.go-version }}
+        if: matrix.go-version != 'stable'
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
-          cache-dependency-path: ./go/go.sum
       - name: Display Go version
         run: go version
-      - name: Download dependencies
-        run: go mod download
       - name: Test with Go
-        run: go test -v -cover ./...
+        run: make test
