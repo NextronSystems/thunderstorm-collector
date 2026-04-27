@@ -48,5 +48,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # TODO: Remove this step once collectors are updated to /api/v1/ endpoints
+      # and purge all /api/ -> /api/v1/ proxy code.
+      - name: Build API proxy (old /api/ -> new /api/v1/)
+        run: |
+          go build -C tests/api-proxy -o "$PWD/tests/api-proxy/api-proxy"
+          chmod +x tests/api-proxy/thunderstorm-mock-wrapper.sh
+
       - name: Run collector tests
         run: bash tests/test-collectors.sh all
+        env:
+          THUNDERSTORM_MOCK_EXECUTABLE: ./tests/api-proxy/thunderstorm-mock-wrapper.sh
+          THUNDERSTORM_MOCK_REAL: ./thunderstorm-mock
+          API_PROXY_BINARY: ./tests/api-proxy/api-proxy
