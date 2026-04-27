@@ -6,7 +6,8 @@
 #   Tests Thunderstorm collector scripts against the thunderstorm-mock server.
 #   Validates that collectors properly submit files and handle various configurations.
 #
-#   The collectors use /api/v1/checkAsync which matches the mock server's API.
+#   The collectors use /api/checkAsync (old API scheme). An API proxy in front of
+#   the mock server translates /api/ to /api/v1/ (new OpenAPI scheme).
 #
 # REQUIREMENTS:
 #   Core utilities:
@@ -506,7 +507,7 @@ declare -a BAT_TESTS=(
 )
 
 # Go collector tests
-# Note: The Go collector issues a GET /api/v1/status health check before uploading,
+# Note: The Go collector issues a GET /api/status health check before uploading,
 # so jq queries must filter for checkAsync entries to skip the status request.
 declare -a GO_TESTS=(
     "basic_submission;-s localhost --port PORT -p TESTDIR;[.[] | select(.handler == \"CheckAsync\")] | .[0].response | fromjson | .id;^[0-9]+$"
