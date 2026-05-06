@@ -1,6 +1,10 @@
+# shellcheck shell=bash
+# Sourced by test-single.sh
+# shellcheck disable=SC2154
+
 collector_check_requirements() {
-    if ! command -v $BASH_CMD >/dev/null 2>&1; then
-        echo "ERROR: Bash interpreter not found ($BASH_CMD)"
+    if ! command -v "${BASH_CMD}" >/dev/null 2>&1; then
+        echo "ERROR: Bash interpreter not found (${BASH_CMD})"
         return 1
     fi
     if ! command -v curl >/dev/null 2>&1; then

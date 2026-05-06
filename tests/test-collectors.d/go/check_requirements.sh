@@ -1,3 +1,7 @@
+# shellcheck shell=bash
+# Sourced by test-single.sh
+# shellcheck disable=SC2154
+
 collector_check_requirements() {
     if ! command -v go >/dev/null 2>&1; then
         echo "ERROR: Go toolchain not found"

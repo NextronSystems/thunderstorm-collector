@@ -19,7 +19,6 @@ set -euo pipefail
 # Parse the --port flag from arguments (default 8080) so we can intercept it.
 # All other flags are passed through to the real mock unchanged.
 LISTEN_PORT="8080"
-BACKEND_PORT=""
 MOCK_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -38,25 +37,26 @@ done
 # Pick a backend port: listener port + 1000
 BACKEND_PORT=$((LISTEN_PORT + 1000))
 
+# shellcheck disable=SC2317
 cleanup() {
     # Kill child processes on exit
-    kill "$MOCK_PID" 2>/dev/null || true
-    kill "$PROXY_PID" 2>/dev/null || true
-    wait "$MOCK_PID" 2>/dev/null || true
-    wait "$PROXY_PID" 2>/dev/null || true
+    kill "${MOCK_PID}" 2>/dev/null || true
+    kill "${PROXY_PID}" 2>/dev/null || true
+    wait "${MOCK_PID}" 2>/dev/null || true
+    wait "${PROXY_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 # Start real mock on backend port
-"$THUNDERSTORM_MOCK_REAL" --port "$BACKEND_PORT" "${MOCK_ARGS[@]}" &
+"${THUNDERSTORM_MOCK_REAL}" --port "${BACKEND_PORT}" "${MOCK_ARGS[@]}" &
 MOCK_PID=$!
 
 # Brief pause to let mock bind
 sleep 0.5
 
 # Start API proxy on the original listen port
-"$API_PROXY_BINARY" --port "$LISTEN_PORT" --backend "$BACKEND_PORT" &
+"${API_PROXY_BINARY}" --port "${LISTEN_PORT}" --backend "${BACKEND_PORT}" &
 PROXY_PID=$!
 
 # Wait for either process to exit
-wait -n "$MOCK_PID" "$PROXY_PID" 2>/dev/null || true
+wait -n "${MOCK_PID}" "${PROXY_PID}" 2>/dev/null || true

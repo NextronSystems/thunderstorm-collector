@@ -17,30 +17,38 @@
 #   Human-readable test output, plus a machine-readable final line:
 #     RESULT:<passed>:<failed>:<skipped>
 
+# shellcheck disable=SC2154  # Variables sourced from utils.sh and test-collectors.d/
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/utils.sh"
+# shellcheck source=utils.sh disable=SC1091
+source "${SCRIPT_DIR}/utils.sh"
 
-COLLECTOR_TYPE=$1
-if [ -z "$COLLECTOR_TYPE" ]; then
+COLLECTOR_TYPE="$1"
+if [[ -z "${COLLECTOR_TYPE}" ]]; then
     echo "Usage: test-single.sh <collector-type>"
     exit 2
 fi
 
-COLLECTOR_DIR="$SCRIPT_DIR/test-collectors.d/$COLLECTOR_TYPE"
-if [ ! -d "$COLLECTOR_DIR" ]; then
-    echo "ERROR: Unknown collector type: $COLLECTOR_TYPE"
-    echo "Available: $(ls "$SCRIPT_DIR/test-collectors.d/")"
+COLLECTOR_DIR="${SCRIPT_DIR}/test-collectors.d/${COLLECTOR_TYPE}"
+if [[ ! -d "${COLLECTOR_DIR}" ]]; then
+    echo "ERROR: Unknown collector type: ${COLLECTOR_TYPE}"
+    available=$(ls "${SCRIPT_DIR}/test-collectors.d/")
+    echo "Available: ${available}"
     exit 2
 fi
 
 # Source collector-specific scripts
-source "$COLLECTOR_DIR/define_tests.sh"
-source "$COLLECTOR_DIR/check_requirements.sh"
-source "$COLLECTOR_DIR/setup_test.sh"
-source "$COLLECTOR_DIR/build_command.sh"
-source "$COLLECTOR_DIR/cleanup_test.sh"
+# shellcheck source=/dev/null
+source "${COLLECTOR_DIR}/define_tests.sh"
+# shellcheck source=/dev/null
+source "${COLLECTOR_DIR}/check_requirements.sh"
+# shellcheck source=/dev/null
+source "${COLLECTOR_DIR}/setup_test.sh"
+# shellcheck source=/dev/null
+source "${COLLECTOR_DIR}/build_command.sh"
+# shellcheck source=/dev/null
+source "${COLLECTOR_DIR}/cleanup_test.sh"
 
 # ==============================================================================
 # Header
@@ -48,7 +56,7 @@ source "$COLLECTOR_DIR/cleanup_test.sh"
 
 echo ""
 echo "========================================"
-echo "Testing $COLLECTOR_NAME Collector"
+echo "Testing ${COLLECTOR_NAME} Collector"
 echo "========================================"
 
 # ==============================================================================
@@ -56,7 +64,7 @@ echo "========================================"
 # ==============================================================================
 
 STANDALONE_TEST_DATA=false
-if [ ! -d "$TEST_DATA_DIR" ]; then
+if [[ ! -d "${TEST_DATA_DIR}" ]]; then
     STANDALONE_TEST_DATA=true
     setup_test_data
 fi
@@ -67,7 +75,7 @@ fi
 
 if ! collector_check_requirements; then
     echo ""
-    echo "Skipping $COLLECTOR_NAME collector tests due to missing requirements"
+    echo "Skipping ${COLLECTOR_NAME} collector tests due to missing requirements"
     echo "RESULT:0:0:1"
     exit 0
 fi
@@ -80,8 +88,8 @@ passed=0
 failed=0
 
 for test_spec in "${COLLECTOR_TESTS[@]}"; do
-    IFS=';' read -r test_name args jq_query pattern <<< "$test_spec"
-    echo "  Running test: $test_name"
+    IFS=';' read -r test_name args jq_query pattern <<< "${test_spec}"
+    echo "  Running test: ${test_name}"
 
     # Setup collector
     if ! collector_setup; then
@@ -92,11 +100,11 @@ for test_spec in "${COLLECTOR_TESTS[@]}"; do
     fi
 
     # Replace placeholders in args
-    args="${args//PORT/$MOCK_PORT}"
-    args="${args//TESTDIR/$TEST_DATA_DIR}"
+    args="${args//PORT/${MOCK_PORT}}"
+    args="${args//TESTDIR/${TEST_DATA_DIR}}"
 
     # Start mock server
-    if ! start_mock_server "$MOCK_PORT"; then
+    if ! start_mock_server "${MOCK_PORT}"; then
         collector_cleanup
         echo "  FAIL"
         ((failed++))
@@ -104,14 +112,14 @@ for test_spec in "${COLLECTOR_TESTS[@]}"; do
     fi
 
     # Build and execute collector command
-    collector_cmd=$(collector_build_command "$args")
-    run_with_timeout "$COLLECTOR_TIMEOUT" "$collector_cmd" >/dev/null 2>&1
+    collector_cmd=$(collector_build_command "${args}")
+    run_with_timeout "${COLLECTOR_TIMEOUT}" "${collector_cmd}" >/dev/null 2>&1
     collector_exit=$?
-    if [ $collector_exit -ne 0 ]; then
-        if [ $collector_exit -eq 124 ]; then
+    if [[ "${collector_exit}" -ne 0 ]]; then
+        if [[ "${collector_exit}" -eq 124 ]]; then
             echo "    ERROR: Collector timed out after ${COLLECTOR_TIMEOUT}s"
         else
-            echo "    ERROR: Collector exited with code $collector_exit"
+            echo "    ERROR: Collector exited with code ${collector_exit}"
         fi
     fi
 
@@ -120,20 +128,20 @@ for test_spec in "${COLLECTOR_TESTS[@]}"; do
     stop_mock_server
 
     # Handle collector failure
-    if [ $collector_exit -ne 0 ]; then
-        show_log_snippet "$MOCK_LOG_FILE"
+    if [[ "${collector_exit}" -ne 0 ]]; then
+        show_log_snippet "${MOCK_LOG_FILE}"
         collector_cleanup
-        $RM_CMD -f "$MOCK_LOG_FILE"
+        "${RM_CMD}" -f "${MOCK_LOG_FILE}"
         echo "  FAIL"
         ((failed++))
         continue
     fi
 
     # Verify results
-    if ! verify_result "$jq_query" "$pattern" "$MOCK_LOG_FILE"; then
-        show_log_snippet "$MOCK_LOG_FILE"
+    if ! verify_result "${jq_query}" "${pattern}" "${MOCK_LOG_FILE}"; then
+        show_log_snippet "${MOCK_LOG_FILE}"
         collector_cleanup
-        $RM_CMD -f "$MOCK_LOG_FILE"
+        "${RM_CMD}" -f "${MOCK_LOG_FILE}"
         echo "  FAIL"
         ((failed++))
         continue
@@ -141,18 +149,18 @@ for test_spec in "${COLLECTOR_TESTS[@]}"; do
 
     # Success
     collector_cleanup
-    $RM_CMD -f "$MOCK_LOG_FILE"
+    "${RM_CMD}" -f "${MOCK_LOG_FILE}"
     echo "  PASS"
     ((passed++))
 done
 
 # Cleanup test data if we created it
-if [ "$STANDALONE_TEST_DATA" = true ]; then
+if [[ "${STANDALONE_TEST_DATA}" = true ]]; then
     cleanup_test_data
 fi
 
 echo ""
-echo "Results: $passed passed, $failed failed"
-echo "RESULT:$passed:$failed:0"
+echo "Results: ${passed} passed, ${failed} failed"
+echo "RESULT:${passed}:${failed}:0"
 
-[ $failed -eq 0 ]
+[[ "${failed}" -eq 0 ]]

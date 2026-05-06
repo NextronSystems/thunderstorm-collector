@@ -1,3 +1,8 @@
+# shellcheck shell=bash
+# Sourced by test-single.sh
+# shellcheck disable=SC2154
+# shellcheck disable=SC2034
+
 COLLECTOR_NAME="Go"
 
 # Note: The Go collector issues a GET /api/status health check before uploading,

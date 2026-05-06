@@ -54,10 +54,12 @@
 #   ./tests/test-collectors.sh all
 #   ./tests/test-collectors.sh --port 9090 --timeout 60 perl
 
+# shellcheck disable=SC2154  # Variables sourced from utils.sh and test-collectors.d/
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/utils.sh"
+# shellcheck source=utils.sh disable=SC1091
+source "${SCRIPT_DIR}/utils.sh"
 
 COLLECTOR_KEYWORD=""
 
@@ -134,8 +136,8 @@ parse_arguments() {
 
 # Map keyword to collector directory name(s)
 resolve_collectors() {
-    local keyword=$1
-    case $keyword in
+    local keyword="$1"
+    case "${keyword}" in
         perl|pl)        echo "perl" ;;
         python|py)      echo "python" ;;
         sh|bash)        echo "sh" ;;
@@ -144,11 +146,11 @@ resolve_collectors() {
         go)             echo "go" ;;
         all)
             local collectors="perl python sh ps1 go"
-            [ "$PLATFORM" = "windows" ] && collectors="$collectors bat"
-            echo "$collectors"
+            [[ "${PLATFORM}" = "windows" ]] && collectors="${collectors} bat"
+            echo "${collectors}"
             ;;
         *)
-            echo "ERROR: Unknown collector: $keyword" >&2
+            echo "ERROR: Unknown collector: ${keyword}" >&2
             return 1
             ;;
     esac
@@ -164,20 +166,21 @@ validate_requirements() {
         echo "Install with: apt-get install jq (Linux) or choco install jq (Windows)"
         exit 1
     fi
-    if [ ! -x "$MOCK_EXECUTABLE" ]; then
-        echo "ERROR: Mock executable not found or not executable: $MOCK_EXECUTABLE"
+    if [[ ! -x "${MOCK_EXECUTABLE}" ]]; then
+        echo "ERROR: Mock executable not found or not executable: ${MOCK_EXECUTABLE}"
         echo "Set THUNDERSTORM_MOCK_EXECUTABLE environment variable to specify location"
         exit 1
     fi
 }
 
+# shellcheck disable=SC2317
 cleanup_all() {
     echo ""
     echo "Cleaning up..."
     stop_mock_server
     cleanup_test_data
-    $RM_CMD -f /tmp/mock-*.json 2>/dev/null || true
-    $RM_CMD -f /tmp/tmp.*.json 2>/dev/null || true
+    "${RM_CMD}" -f /tmp/mock-*.json 2>/dev/null || true
+    "${RM_CMD}" -f /tmp/tmp.*.json 2>/dev/null || true
     echo "Cleanup complete"
 }
 
@@ -188,7 +191,7 @@ cleanup_all() {
 main() {
     parse_arguments "$@"
 
-    if [ -z "$COLLECTOR_KEYWORD" ]; then
+    if [[ -z "${COLLECTOR_KEYWORD}" ]]; then
         echo "ERROR: No collector specified"
         echo ""
         usage
@@ -203,19 +206,19 @@ main() {
     echo "========================================"
     echo "Thunderstorm Collector Test Suite"
     echo "========================================"
-    echo "Platform:      $PLATFORM"
-    echo "Mock Server:   $MOCK_EXECUTABLE"
-    echo "Mock Port:     $MOCK_PORT"
+    echo "Platform:      ${PLATFORM}"
+    echo "Mock Server:   ${MOCK_EXECUTABLE}"
+    echo "Mock Port:     ${MOCK_PORT}"
     echo "Timeout:       ${COLLECTOR_TIMEOUT}s"
-    echo "Test Data:     $TEST_DATA_DIR"
+    echo "Test Data:     ${TEST_DATA_DIR}"
 
     setup_test_data
 
     local collectors
-    collectors=$(resolve_collectors "$COLLECTOR_KEYWORD") || exit 1
+    collectors=$(resolve_collectors "${COLLECTOR_KEYWORD}") || exit 1
 
     # Export variables for test-single.sh subprocesses
-    export THUNDERSTORM_MOCK_EXECUTABLE="$MOCK_EXECUTABLE"
+    export THUNDERSTORM_MOCK_EXECUTABLE="${MOCK_EXECUTABLE}"
     export MOCK_PORT COLLECTOR_TIMEOUT
 
     local overall_success=0
@@ -223,38 +226,38 @@ main() {
     local total_failed=0
     declare -A collector_results
 
-    for collector in $collectors; do
+    for collector in ${collectors}; do
         # Run test-single.sh and capture output
         local output result_line
-        output=$("$SCRIPT_DIR/test-single.sh" "$collector" 2>&1)
+        output=$("${SCRIPT_DIR}/test-single.sh" "${collector}" 2>&1)
         local exit_code=$?
 
         # Display output (minus the machine-readable RESULT line)
-        echo "$output" | grep -v "^RESULT:"
+        echo "${output}" | grep -v "^RESULT:"
 
         # Parse machine-readable result
-        result_line=$(echo "$output" | grep "^RESULT:" | tail -1)
+        result_line=$(echo "${output}" | grep "^RESULT:" | tail -1)
         local p f s
-        IFS=':' read -r _ p f s <<< "$result_line"
+        IFS=':' read -r _ p f s <<< "${result_line}"
         p=${p:-0}; f=${f:-0}; s=${s:-0}
 
         # Extract collector display name from output
         local name
-        name=$(echo "$output" | sed -n 's/^Testing \(.*\) Collector$/\1/p' | head -1)
-        name="${name:-$collector}"
+        name=$(echo "${output}" | sed -n 's/^Testing \(.*\) Collector$/\1/p' | head -1)
+        name="${name:-${collector}}"
 
-        if [ "$s" -gt 0 ]; then
-            collector_results["$name"]="SKIPPED"
+        if [[ "${s}" -gt 0 ]]; then
+            collector_results["${name}"]="SKIPPED"
         else
             total_passed=$((total_passed + p))
             total_failed=$((total_failed + f))
-            collector_results["$name"]="$p/$((p + f))"
-            [ $exit_code -ne 0 ] && overall_success=1
+            collector_results["${name}"]="${p}/$((p + f))"
+            [[ "${exit_code}" -ne 0 ]] && overall_success=1
         fi
     done
 
     # Handle non-Windows bat skip
-    if [ "$COLLECTOR_KEYWORD" = "all" ] && [ "$PLATFORM" != "windows" ]; then
+    if [[ "${COLLECTOR_KEYWORD}" = "all" ]] && [[ "${PLATFORM}" != "windows" ]]; then
         echo ""
         echo "Skipping Batch collector tests (Windows only)"
         collector_results["Batch"]="SKIPPED (Windows only)"
@@ -267,14 +270,14 @@ main() {
     echo "========================================"
 
     for name in "${!collector_results[@]}"; do
-        printf "%-20s %s\n" "$name Collector:" "${collector_results[$name]}"
+        printf "%-20s %s\n" "${name} Collector:" "${collector_results[${name}]}"
     done
 
     echo ""
-    echo "Total: $total_passed passed, $total_failed failed"
+    echo "Total: ${total_passed} passed, ${total_failed} failed"
 
-    [ $total_failed -gt 0 ] && overall_success=1
-    exit $overall_success
+    [[ "${total_failed}" -gt 0 ]] && overall_success=1
+    exit "${overall_success}"
 }
 
 main "$@"
