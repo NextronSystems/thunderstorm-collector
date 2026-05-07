@@ -7,11 +7,12 @@
 # test specifications defined there. Expects test data to already be set up.
 #
 # Each collector directory must provide:
-#   define_tests.sh       - sets COLLECTOR_NAME and COLLECTOR_TESTS array
+#   define_tests.sh       - sets COLLECTOR_NAME
 #   check_requirements.sh - defines collector_check_requirements()
 #   setup_test.sh         - defines collector_setup()
 #   build_command.sh      - defines collector_build_command()
 #   cleanup_test.sh       - defines collector_cleanup()
+#   tests.d/*.sh          - individual test files setting ARGS, JQ_QUERY, PATTERN
 #
 # Output:
 #   Human-readable test output, plus a machine-readable final line:
@@ -87,8 +88,12 @@ fi
 passed=0
 failed=0
 
-for test_spec in "${COLLECTOR_TESTS[@]}"; do
-    IFS=';' read -r test_name args jq_query pattern <<< "${test_spec}"
+for test_file in "${COLLECTOR_DIR}/tests.d/"*.sh; do
+    [[ -f "${test_file}" ]] || continue
+    test_name=$(basename "${test_file}" .sh)
+    ARGS="" JQ_QUERY="" PATTERN=""
+    # shellcheck source=/dev/null
+    source "${test_file}"
     echo "  Running test: ${test_name}"
 
     # Setup collector
@@ -100,7 +105,7 @@ for test_spec in "${COLLECTOR_TESTS[@]}"; do
     fi
 
     # Replace placeholders in args
-    args="${args//PORT/${MOCK_PORT}}"
+    args="${ARGS//PORT/${MOCK_PORT}}"
     args="${args//TESTDIR/${TEST_DATA_DIR}}"
 
     # Start mock server
@@ -138,7 +143,7 @@ for test_spec in "${COLLECTOR_TESTS[@]}"; do
     fi
 
     # Verify results
-    if ! verify_result "${jq_query}" "${pattern}" "${MOCK_LOG_FILE}"; then
+    if ! verify_result "${JQ_QUERY}" "${PATTERN}" "${MOCK_LOG_FILE}"; then
         show_log_snippet "${MOCK_LOG_FILE}"
         collector_cleanup
         "${RM_CMD}" -f "${MOCK_LOG_FILE}"

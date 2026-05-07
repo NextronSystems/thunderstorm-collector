@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Sourced by test-single.sh
 # shellcheck disable=SC2034
-
-COLLECTOR_NAME="Go"
+ARGS=""
+JQ_QUERY='length'
+PATTERN='^[1-9][0-9]*$'
