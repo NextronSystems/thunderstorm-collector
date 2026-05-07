@@ -43,6 +43,7 @@
 #     -h, --help           - Show help message
 #     -p, --port NUM       - Use custom port for mock server (default: 8080)
 #     -t, --timeout NUM    - Collector timeout in seconds (default: 120)
+#     -v, --verbose        - Show full mock server log for all tests (including passed)
 #
 #   Environment variables:
 #     THUNDERSTORM_MOCK_EXECUTABLE - Path to mock executable (default: ./thunderstorm-mock)
@@ -62,6 +63,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/utils.sh"
 
 COLLECTOR_KEYWORD=""
+VERBOSE="${VERBOSE:-false}"
 
 # ==============================================================================
 # Argument Parsing
@@ -86,6 +88,7 @@ OPTIONS:
   -h, --help           Show this help message
   -p, --port NUM       Mock server port (default: 8080)
   -t, --timeout NUM    Collector timeout in seconds (default: 120)
+  -v, --verbose        Show full mock server log for all tests (including passed)
 
 ENVIRONMENT VARIABLES:
   THUNDERSTORM_MOCK_EXECUTABLE  Path to thunderstorm-mock executable
@@ -97,6 +100,7 @@ EXAMPLES:
   ./tests/test-collectors.sh perl
   ./tests/test-collectors.sh --timeout 60 python
   ./tests/test-collectors.sh --port 9090 perl
+  ./tests/test-collectors.sh --verbose all
   THUNDERSTORM_MOCK_EXECUTABLE=/path/to/mock ./tests/test-collectors.sh all
 EOF
 }
@@ -115,6 +119,10 @@ parse_arguments() {
             -t|--timeout)
                 COLLECTOR_TIMEOUT="$2"
                 shift 2
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
                 ;;
             -*)
                 echo "ERROR: Unknown option: $1"
@@ -219,7 +227,7 @@ main() {
 
     # Export variables for test-single.sh subprocesses
     export THUNDERSTORM_MOCK_EXECUTABLE="${MOCK_EXECUTABLE}"
-    export MOCK_PORT COLLECTOR_TIMEOUT
+    export MOCK_PORT COLLECTOR_TIMEOUT VERBOSE
 
     local overall_success=0
     local total_passed=0

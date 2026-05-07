@@ -153,6 +153,12 @@ for test_file in "${COLLECTOR_DIR}/tests.d/"*.sh; do
     fi
 
     # Success
+    if [[ "${VERBOSE}" = "true" ]] && [[ -f "${MOCK_LOG_FILE}" ]]; then
+        echo "    Mock server log:"
+        while IFS= read -r log_line; do
+            echo "      ${log_line}"
+        done < "${MOCK_LOG_FILE}"
+    fi
     collector_cleanup
     "${RM_CMD}" -f "${MOCK_LOG_FILE}"
     echo "  PASS"
