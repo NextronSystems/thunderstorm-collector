@@ -452,7 +452,7 @@ start_stub "$STUB_BIN"
 create_fixtures
 
 # Bash
-if collector_runnable bash; then
+if collector_enabled bash && collector_runnable bash; then
     run_tests "bash" bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
         --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
     run_dry_run_test "bash" bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
@@ -460,7 +460,7 @@ if collector_runnable bash; then
 fi
 
 # Ash / POSIX sh
-if collector_runnable ash; then
+if collector_enabled ash && collector_runnable ash; then
     # Intentionally rely on shell word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
     run_tests "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
@@ -473,7 +473,7 @@ elif collector_enabled ash; then
 fi
 
 # Python 3
-if collector_runnable python3; then
+if collector_enabled python3 && collector_runnable python3; then
     run_tests "python3" python3 "$SCRIPTS_DIR/thunderstorm-collector.py" \
         -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
     run_dry_run_test "python3" python3 "$SCRIPTS_DIR/thunderstorm-collector.py" \
@@ -483,7 +483,7 @@ elif collector_enabled python3; then
 fi
 
 # Python 2
-if collector_runnable python2; then
+if collector_enabled python2 && collector_runnable python2; then
     run_tests "python2" python2 "$SCRIPTS_DIR/thunderstorm-collector-py2.py" \
         -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
     run_dry_run_test "python2" python2 "$SCRIPTS_DIR/thunderstorm-collector-py2.py" \
@@ -493,7 +493,7 @@ elif collector_enabled python2; then
 fi
 
 # Perl
-if collector_runnable perl; then
+if collector_enabled perl && collector_runnable perl; then
     run_tests "perl" perl "$SCRIPTS_DIR/thunderstorm-collector.pl" \
         -s 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365
     run_dry_run_test "perl" perl "$SCRIPTS_DIR/thunderstorm-collector.pl" \
@@ -503,14 +503,14 @@ elif collector_enabled perl; then
 fi
 
 # PowerShell 3+
-if collector_runnable ps3; then
+if collector_enabled ps3 && collector_runnable ps3; then
     run_tests_ps "powershell3+" "$SCRIPTS_DIR/thunderstorm-collector.ps1"
 elif collector_enabled ps3; then
     section "powershell3+"; skip "pwsh not available"
 fi
 
 # PowerShell 2+
-if collector_runnable ps2; then
+if collector_enabled ps2 && collector_runnable ps2; then
     run_tests_ps "powershell2+" "$SCRIPTS_DIR/thunderstorm-collector-ps2.ps1"
 elif collector_enabled ps2; then
     section "powershell2+"; skip "pwsh not available"
