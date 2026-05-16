@@ -653,17 +653,49 @@ test_source_url_encoding() {
 # ── 23. Retries on server down ───────────────────────────────────────────────
 
 test_retries_on_connection_failure() {
-    # Don't start stub — let it fail
     stop_stub
     local d; d="$(create_sample_dir retry_fail)"
     create_file "$d/a.txt"
+    local fakebin; fakebin="$(create_fake_tool_path retry_fail)"
+    cat > "$fakebin/curl" <<'EOF'
+#!/bin/sh
+hdr=""
+outfile=""
+endpoint=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -D) hdr="$2"; shift 2 ;;
+        -o) outfile="$2"; shift 2 ;;
+        -F|-H|-d|--max-time|--cacert) shift 2 ;;
+        -sS|--show-error|-X|-k) shift ;;
+        http://*|https://*) endpoint="$1"; shift ;;
+        *) shift ;;
+    esac
+done
 
-    local dead_port; dead_port="$(pick_port)"
-    local out; out="$(bash "$COLLECTOR" \
-        --server 127.0.0.1 --port "$dead_port" --no-log-file \
+case "$endpoint" in
+    */api/collection)
+        [ -n "$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "$hdr"
+        [ -n "$outfile" ] && : > "$outfile"
+        exit 0
+        ;;
+    *)
+        exit 7
+        ;;
+esac
+EOF
+    chmod +x "$fakebin/curl"
+
+    local out rc
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" \
+        --server 127.0.0.1 --port 8080 --no-log-file --no-progress \
         --dir "$d" --max-age 30 --retries 2 2>&1)"
+    rc=$?
+    set -e
 
     local failed; failed="$(parse_collector_stat "$out" failed)"
+    assert_eq "exit code" "1" "$rc" || return 1
     assert_eq "failed" "1" "$failed" || return 1
     assert_contains "retry message" "attempt" "$out" || return 1
 }
