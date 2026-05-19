@@ -122,6 +122,25 @@ run_with_timeout() {
 # ==============================================================================
 
 setup_test_data() {
+    # Creates the following test file structure in TEST_DATA_DIR:
+    #
+    #   testdata/
+    #   ├── small-file.txt          23 B    text, "small test file content\n"
+    #   ├── medium-file.log          1 MB   zero bytes
+    #   ├── large-file.dat          11 MB   zero bytes
+    #   ├── old-file.txt            21 B    text, mtime set to 30 days ago
+    #   ├── script.ps1              36 B    PowerShell script
+    #   ├── executable.sh           25 B    shell script, +x
+    #   ├── document.pdf           ~480 B   PDF header + zero padding
+    #   ├── subdir/
+    #   │   ├── nested-file.txt     27 B    text
+    #   │   └── image.jpg         ~1010 B   JFIF header + zero padding
+    #   └── excluded/
+    #       └── skip-me.tmp         23 B    text
+    #
+    # Collectors apply their own filters (extension, size, age, regex)
+    # to this fixed set. Transmission tests define which files each
+    # collector is expected to upload or skip.
     echo "Setting up test data in ${TEST_DATA_DIR} ..."
 
     "${RM_CMD}" -rf "${TEST_DATA_DIR}"
@@ -218,6 +237,129 @@ verify_result() {
         echo "    Verification failed: '${result}' does not match pattern '${expected_pattern}'"
         return 1
     fi
+}
+
+# ==============================================================================
+# Transmission Verification
+# ==============================================================================
+#
+# For async submissions, the mock server returns an ID immediately. The actual
+# file hash becomes available via /api/getAsyncResults?id=<id> after a delay
+# (the mock simulates processing: "Waiting" -> "Scanning" -> "Complete").
+# For sync submissions, the hash is returned directly in the response.
+
+# Collect SHA256 hashes from sync (Check) responses in the log.
+# Prints one hash per line to stdout.
+# Args: $1 = log file
+collect_sync_hashes() {
+    local log_file="$1"
+    jq -r -s '[.[] | select(.handler == "Check")] | .[].response | fromjson | .[0].hash' < "${log_file}" 2>/dev/null
+}
+
+# Collect SHA256 hashes of all async submissions by polling getAsyncResults.
+# Prints one hash per line to stdout.
+# Args: $1 = mock server port, $2 = log file
+# Returns: 0 on success, 1 if any ID failed to resolve within timeout
+collect_async_hashes() {
+    local port="$1"
+    local log_file="$2"
+    local poll_timeout="${3:-60}"
+
+    # Extract sample IDs from checkAsync responses in the log
+    local ids
+    ids=$(jq -r -s '[.[] | select(.handler == "CheckAsync")] | .[].response | fromjson | .id' < "${log_file}" 2>/dev/null)
+    if [[ -z "${ids}" ]]; then
+        echo "    No async submissions found in log" >&2
+        return 1
+    fi
+
+    local all_hashes=""
+    local base_url="http://localhost:${port}/api/getAsyncResults"
+
+    for sample_id in ${ids}; do
+        local elapsed=0
+        local hash=""
+        while [[ "${elapsed}" -lt "${poll_timeout}" ]]; do
+            local resp
+            resp=$(curl -s "${base_url}?id=${sample_id}" 2>/dev/null)
+            local status
+            status=$(echo "${resp}" | jq -r '.status // empty' 2>/dev/null)
+
+            if [[ "${status}" == "Sample analysis complete" ]]; then
+                hash=$(echo "${resp}" | jq -r '.result[0].hash // empty' 2>/dev/null)
+                break
+            fi
+            sleep 1
+            ((elapsed++))
+        done
+
+        if [[ -z "${hash}" ]]; then
+            echo "    Timeout waiting for async result of sample ${sample_id}" >&2
+            return 1
+        fi
+        all_hashes="${all_hashes}${hash}"$'\n'
+    done
+
+    # Print hashes (strip trailing newline)
+    printf '%s' "${all_hashes}" | head -c -1
+}
+
+# Verify that the expected files were transmitted and unexpected files were not.
+# Uses SHA256 hashes to identify files.
+# Args: $1 = port, $2 = log file, $3 = EXPECTED_FILES array (name ref),
+#        $4 = UNEXPECTED_FILES array (name ref)
+# Returns: 0 if all checks pass, 1 on any mismatch
+verify_transmission() {
+    local port="$1"
+    local log_file="$2"
+    local -n _expected_files=$3
+    local -n _unexpected_files=$4
+
+    # Collect hashes: use sync responses if present, otherwise poll async results
+    local received_hashes
+    local has_sync
+    has_sync=$(jq -s '[.[] | select(.handler == "Check")] | length' < "${log_file}" 2>/dev/null)
+    if [[ "${has_sync}" -gt 0 ]]; then
+        received_hashes=$(collect_sync_hashes "${log_file}")
+    else
+        if ! received_hashes=$(collect_async_hashes "${port}" "${log_file}"); then
+            return 1
+        fi
+    fi
+
+    local ok=true
+
+    # Check expected files: their hashes must appear in received set
+    for file in "${_expected_files[@]}"; do
+        local filepath="${TEST_DATA_DIR}/${file}"
+        if [[ ! -f "${filepath}" ]]; then
+            echo "    Expected file does not exist: ${file}" >&2
+            ok=false
+            continue
+        fi
+        local expected_hash
+        expected_hash=$(sha256sum "${filepath}" | cut -d' ' -f1) || true
+        if ! echo "${received_hashes}" | grep -qF "${expected_hash}"; then
+            echo "    MISSING: ${file} (hash ${expected_hash})" >&2
+            ok=false
+        fi
+    done
+
+    # Check unexpected files: their hashes must NOT appear in received set
+    for file in "${_unexpected_files[@]}"; do
+        local filepath="${TEST_DATA_DIR}/${file}"
+        if [[ ! -f "${filepath}" ]]; then
+            continue
+        fi
+        local unexpected_hash
+        unexpected_hash=$(sha256sum "${filepath}" | cut -d' ' -f1) || true
+        if echo "${received_hashes}" | grep -qF "${unexpected_hash}"; then
+            echo "    UNEXPECTED: ${file} was transmitted (hash ${unexpected_hash})" >&2
+            ok=false
+        fi
+    done
+
+    [[ "${ok}" = true ]]
 }
 
 show_log_snippet() {
