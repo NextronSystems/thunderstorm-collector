@@ -28,7 +28,7 @@ set -euo pipefail
 
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/../.." && pwd)"
-COLLECTOR="$REPO_ROOT/scripts/thunderstorm-collector.sh"
+COLLECTOR="$REPO_ROOT/scripts/bash/thunderstorm-collector.sh"
 
 # ── Locate stub server ────────────────────────────────────────────────────────
 
