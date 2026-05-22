@@ -13,7 +13,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-COLLECTOR="$REPO_ROOT/scripts/thunderstorm-collector-ash.sh"
+COLLECTOR="$REPO_ROOT/scripts/ash/thunderstorm-collector-ash.sh"
 
 PASS=0
 FAIL=0
