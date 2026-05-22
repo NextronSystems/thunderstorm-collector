@@ -6,7 +6,9 @@ STUB_LOG="${STUB_LOG:-/tmp/perl-quick.jsonl}"
 STUB_PORT="${STUB_PORT:-18097}"
 STUB_BIN="${STUB_BIN_PATH:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/thunderstorm-stub}"
 STUB_RULES="${STUB_RULES_DIR:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/rules}"
-COLLECTOR_DIR="/home/neo/.openclaw/workspace/projects/thunderstorm-collector-pr/scripts"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+COLLECTOR="$REPO_ROOT/scripts/perl/thunderstorm-collector.pl"
 
 # Start stub if not running
 if ! curl -s "http://localhost:$STUB_PORT/api/info" >/dev/null 2>&1; then
@@ -23,7 +25,7 @@ echo "THUNDERSTORM_TEST_MATCH_STRING" >> "$FIXTURES/large/big-perl.tmp"
 
 # Run Perl with large file
 echo "Running Perl collector..."
-perl "$COLLECTOR_DIR/thunderstorm-collector.pl" \
+perl "$COLLECTOR" \
     -s localhost -p "$STUB_PORT" --dir "$FIXTURES/large" --max-age 30 --max-size-kb 4096 2>&1 | tail -3
 
 # Give stub time to write
