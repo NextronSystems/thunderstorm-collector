@@ -81,13 +81,13 @@ ASH_SHELL="${ASH_SHELL:-$(detect_ash_shell 2>/dev/null || true)}"
 
 collector_script_path() {
     case "$(normalize_collector "$1")" in
-        bash) printf '%s/thunderstorm-collector.sh\n' "$SCRIPTS_DIR" ;;
-        ash) printf '%s/thunderstorm-collector-ash.sh\n' "$SCRIPTS_DIR" ;;
-        python3) printf '%s/thunderstorm-collector.py\n' "$SCRIPTS_DIR" ;;
-        python2) printf '%s/thunderstorm-collector-py2.py\n' "$SCRIPTS_DIR" ;;
-        perl) printf '%s/thunderstorm-collector.pl\n' "$SCRIPTS_DIR" ;;
-        ps3) printf '%s/thunderstorm-collector.ps1\n' "$SCRIPTS_DIR" ;;
-        ps2) printf '%s/thunderstorm-collector-ps2.ps1\n' "$SCRIPTS_DIR" ;;
+        bash) printf '%s/bash/thunderstorm-collector.sh\n' "$SCRIPTS_DIR" ;;
+        ash) printf '%s/ash/thunderstorm-collector-ash.sh\n' "$SCRIPTS_DIR" ;;
+        python3) printf '%s/python/thunderstorm-collector.py\n' "$SCRIPTS_DIR" ;;
+        python2) printf '%s/python/thunderstorm-collector-py2.py\n' "$SCRIPTS_DIR" ;;
+        perl) printf '%s/perl/thunderstorm-collector.pl\n' "$SCRIPTS_DIR" ;;
+        ps3) printf '%s/powershell/thunderstorm-collector.ps1\n' "$SCRIPTS_DIR" ;;
+        ps2) printf '%s/powershell/thunderstorm-collector-ps2.ps1\n' "$SCRIPTS_DIR" ;;
         *) return 1 ;;
     esac
 }
@@ -204,7 +204,8 @@ kb_to_mb_ceil() {
 # Create patched copies of Python/Perl collectors with specific max_age/max_size
 patch_python() {
     local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-patched.py"
-    local src="$SCRIPTS_DIR/thunderstorm-collector.py" max_size="$max_size_kb"
+    local src max_size="$max_size_kb"
+    src="$(collector_script_path python3)"
     if ! grep -q -- "--max-size-kb" "$src"; then
         max_size="$(kb_to_mb_ceil "$max_size_kb")"
     fi
@@ -218,7 +219,8 @@ patch_python() {
 
 patch_python2() {
     local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-py2-patched.py"
-    local src="$SCRIPTS_DIR/thunderstorm-collector-py2.py" max_size="$max_size_kb"
+    local src max_size="$max_size_kb"
+    src="$(collector_script_path python2)"
     if ! grep -q -- "--max-size-kb" "$src"; then
         max_size="$(kb_to_mb_ceil "$max_size_kb")"
     fi
@@ -232,7 +234,8 @@ patch_python2() {
 
 patch_perl() {
     local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-patched.pl"
-    local src="$SCRIPTS_DIR/thunderstorm-collector.pl" max_size="$max_size_kb"
+    local src max_size="$max_size_kb"
+    src="$(collector_script_path perl)"
     if ! grep -q 'our \$max_size_kb' "$src"; then
         max_size="$(kb_to_mb_ceil "$max_size_kb")"
     fi
@@ -299,7 +302,7 @@ if collector_available bash; then
     #   medium(500KB) pass; large(3MB), huge(25MB) filtered
     # Also passes: sample.exe(12B), sample.dll(12B), photo.jpg(12B), settings.conf(13B), noext(13B), nested.txt(7B)
     start=$(log_lines)
-    bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+    bash "$SCRIPTS_DIR/bash/thunderstorm-collector.sh" \
         --server "$STUB_HOST" --port "$STUB_PORT" \
         --dir "$FIXTURES_DIR" --max-size-kb 1000 --max-age 365 --quiet 2>/dev/null || true
     sleep 1
@@ -311,7 +314,7 @@ if collector_available bash; then
     # max-age: 7 days → only files created today pass (fresh, small, medium, large, huge, extensions, nested, noext)
     # old(30d) and ancient(90d) filtered
     start=$(log_lines)
-    bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+    bash "$SCRIPTS_DIR/bash/thunderstorm-collector.sh" \
         --server "$STUB_HOST" --port "$STUB_PORT" \
         --dir "$FIXTURES_DIR" --max-age 7 --max-size-kb 50000 --quiet 2>/dev/null || true
     sleep 1
@@ -322,7 +325,7 @@ if collector_available bash; then
 
     # combined: 7 days + 200KB → only small fresh files
     start=$(log_lines)
-    bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+    bash "$SCRIPTS_DIR/bash/thunderstorm-collector.sh" \
         --server "$STUB_HOST" --port "$STUB_PORT" \
         --dir "$FIXTURES_DIR" --max-age 7 --max-size-kb 200 --quiet 2>/dev/null || true
     sleep 1
@@ -343,7 +346,7 @@ if collector_available ash; then
     start=$(log_lines)
     # Intentionally rely on word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
-    $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
+    $ASH_SHELL "$SCRIPTS_DIR/ash/thunderstorm-collector-ash.sh" \
         --server "$STUB_HOST" --port "$STUB_PORT" \
         --dir "$FIXTURES_DIR" --max-size-kb 1000 --max-age 365 --quiet 2>/dev/null || true
     sleep 1
@@ -353,7 +356,7 @@ if collector_available ash; then
     assert_not_uploaded "$start" "huge.bin"     "ash/max-size-1000KB"
 
     start=$(log_lines)
-    $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
+    $ASH_SHELL "$SCRIPTS_DIR/ash/thunderstorm-collector-ash.sh" \
         --server "$STUB_HOST" --port "$STUB_PORT" \
         --dir "$FIXTURES_DIR" --max-age 7 --max-size-kb 50000 --quiet 2>/dev/null || true
     sleep 1
@@ -467,7 +470,7 @@ if collector_available ps3; then
 
     # max-size: 1MB — use wildcard extension '*' to match all files
     start=$(log_lines)
-    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/thunderstorm-collector.ps1' \
+    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/powershell/thunderstorm-collector.ps1' \
         -ThunderstormServer '$STUB_HOST' -ThunderstormPort $STUB_PORT \
         -Folder '$FIXTURES_DIR' -MaxSize 1 -MaxAge 365 \
         -Extensions @('.txt','.bin','.exe','.dll','.jpg','.conf')" 2>/dev/null || true
@@ -479,7 +482,7 @@ if collector_available ps3; then
 
     # max-age: 7 days
     start=$(log_lines)
-    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/thunderstorm-collector.ps1' \
+    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/powershell/thunderstorm-collector.ps1' \
         -ThunderstormServer '$STUB_HOST' -ThunderstormPort $STUB_PORT \
         -Folder '$FIXTURES_DIR' -MaxAge 7 -MaxSize 100 \
         -Extensions @('.txt','.bin','.exe','.dll','.jpg','.conf')" 2>/dev/null || true
@@ -490,7 +493,7 @@ if collector_available ps3; then
 
     # extension filtering: only .exe and .dll
     start=$(log_lines)
-    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/thunderstorm-collector.ps1' \
+    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/powershell/thunderstorm-collector.ps1' \
         -ThunderstormServer '$STUB_HOST' -ThunderstormPort $STUB_PORT \
         -Folder '$FIXTURES_DIR' -MaxAge 365 -MaxSize 100 \
         -Extensions @('.exe', '.dll')" 2>/dev/null || true
@@ -508,7 +511,7 @@ if collector_available ps2; then
     echo "── PowerShell 2+ Collector ─────────────────"
 
     start=$(log_lines)
-    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/thunderstorm-collector-ps2.ps1' \
+    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/powershell/thunderstorm-collector-ps2.ps1' \
         -ThunderstormServer '$STUB_HOST' -ThunderstormPort $STUB_PORT \
         -Folder '$FIXTURES_DIR' -MaxSize 1 -MaxAge 365 \
         -Extensions @('.txt','.bin','.exe','.dll','.jpg','.conf')" 2>/dev/null || true
@@ -517,7 +520,7 @@ if collector_available ps2; then
     assert_not_uploaded "$start" "large.bin"    "ps2/max-size-1MB"
 
     start=$(log_lines)
-    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/thunderstorm-collector-ps2.ps1' \
+    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/powershell/thunderstorm-collector-ps2.ps1' \
         -ThunderstormServer '$STUB_HOST' -ThunderstormPort $STUB_PORT \
         -Folder '$FIXTURES_DIR' -MaxAge 7 -MaxSize 100 \
         -Extensions @('.txt','.bin','.exe','.dll','.jpg','.conf')" 2>/dev/null || true
@@ -527,7 +530,7 @@ if collector_available ps2; then
 
     # PS2 extension filtering
     start=$(log_lines)
-    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/thunderstorm-collector-ps2.ps1' \
+    pwsh -NoProfile -ep bypass -c "& '$SCRIPTS_DIR/powershell/thunderstorm-collector-ps2.ps1' \
         -ThunderstormServer '$STUB_HOST' -ThunderstormPort $STUB_PORT \
         -Folder '$FIXTURES_DIR' -MaxAge 365 -MaxSize 100 \
         -Extensions @('.exe', '.dll')" 2>/dev/null || true

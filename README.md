@@ -41,11 +41,12 @@ cd thunderstorm-collector-amd64-linux
 ### Scripts Package
 
 If you prefer scripts over compiled binaries, download `thunderstorm-collector-scripts.zip` which includes:
-- `thunderstorm-collector.sh` (Bash)
-- `thunderstorm-collector.ps1` (PowerShell)
-- `thunderstorm-collector.py` (Python)
-- `thunderstorm-collector.pl` (Perl)
-- `thunderstorm-collector.bat` (Batch)
+- `scripts/bash/` (Bash)
+- `scripts/ash/` (POSIX sh / ash)
+- `scripts/python/` (Python 3 and Python 2)
+- `scripts/perl/` (Perl)
+- `scripts/powershell/` (PowerShell 3+ and PowerShell 2)
+- `scripts/batch/` (Windows Batch)
 
 See the [scripts README](scripts/README.md) for usage instructions.
 

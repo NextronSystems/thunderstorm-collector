@@ -1,134 +1,56 @@
-# THOR Thunderstorm Collector Scripts
+# THOR Thunderstorm Script Collectors
 
-The Thunderstorm collector script library is a library of script examples that you can use for sample collection purposes.
+This directory contains script-based THOR Thunderstorm collectors for systems where the Go collector cannot be deployed or where a native script is easier to review, modify, or execute during incident response.
 
-## thunderstorm-collector Shell Script
+Prefer the Go collector for normal deployments. Use these scripts when runtime constraints, legacy systems, embedded systems, or operational restrictions make the compiled collector impractical.
 
-A shell script for Linux.
+## Directory Layout
 
-### Requirements
+| Directory | Collector type | Intended use |
+|---|---|---|
+| `bash/` | Bash collector | Modern Linux, macOS, WSL, and Unix-like systems with Bash. |
+| `ash/` | POSIX sh / ash collector | BusyBox, Alpine, embedded Linux, network appliances, and stripped-down systems without Bash. |
+| `python/` | Python collectors | Python 3 for general cross-platform use; Python 2 for legacy systems without Python 3. |
+| `perl/` | Perl collector | Unix systems where Perl is available but Bash or Python are not suitable. |
+| `powershell/` | PowerShell collectors | Windows systems with PowerShell 3+ or legacy PowerShell 2. |
+| `batch/` | Windows Batch collector | Last-resort Windows collector for systems without usable PowerShell. |
+| `tests/` | Test harness | Shared stub-server-backed tests for automated validation. |
 
-- bash
-- wget
+## Choosing a Collector
 
-### Usage
+| Scenario | Recommended collector |
+|---|---|
+| Current Linux or macOS host with Bash | `bash/thunderstorm-collector.sh` |
+| BusyBox, Alpine, embedded Linux, router, IoT, minimal appliance | `ash/thunderstorm-collector-ash.sh` |
+| Cross-platform host with Python 3 | `python/thunderstorm-collector.py` |
+| Legacy Unix/Linux host with only Python 2 | `python/thunderstorm-collector-py2.py` |
+| Older Unix host with Perl and LWP available | `perl/thunderstorm-collector.pl` |
+| Windows with PowerShell 3 or newer | `powershell/thunderstorm-collector.ps1` |
+| Windows with only PowerShell 2 | `powershell/thunderstorm-collector-ps2.ps1` |
+| Windows without usable PowerShell | `batch/thunderstorm-collector.bat` |
 
-You can run it like:
+## Manual Acceptance Testing
 
-```bash
-bash ./thunderstorm-collector.sh
-```
+Each collector directory contains its own `README.md` with a manual acceptance test section. Use that section when reviewing the corresponding collector PR locally.
 
-The most common use case would be a collector script that looks e.g. for files that have been created or modified within the last X days and runs every X days.
+Recommended reviewer workflow:
 
-### Tested On
+1. Check out the collector PR branch.
+2. Read the collector-specific README.
+3. Run the manual acceptance test against a real Thunderstorm service.
+4. Run the automated stub-server test if the required runtime is available.
+5. Review uploaded samples and source identifiers in Thunderstorm.
 
-Successfully tested on:
+## Automated Tests
 
-- Debian 10
-
-## thunderstorm-collector Batch Script
-
-A Batch script for Windows.
-
-Warning: The FOR loop used in the Batch script tends to [leak memory](https://stackoverflow.com/questions/6330519/memory-leak-in-batch-for-loop). We couldn't figure out a clever hack to avoid this behaviour and therefore recommend using the Go based Thunderstorm Collector on Windows systems.
-
-### Requirements
-
-- curl (Download [here](https://curl.haxx.se/windows/))
-
-#### Note on Windows 10
-
-Windows 10 already includes a curl since build 17063, so all versions newer than version 1709 (Redstone 3) from October 2017 already meet the requirements
-
-#### Note on very old Windows versions
-
-The last version of curl that works with Windows 7 / Windows 2008 R2 and earlier is v7.46.0 and can be still be downloaded from [here](https://bintray.com/vszakats/generic/download_file?file_path=curl-7.46.0-win32-mingw.7z)
-
-### Usage
-
-You can run it like:
+The shared test harness can run only selected collectors:
 
 ```bash
-thunderstorm-collector.bat
+THUNDERSTORM_TEST_COLLECTORS=bash \
+  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
-### Tested On
+Supported selector values are `bash`, `ash`, `python3`, `python2`, `perl`, `ps3`, and `ps2`.
 
-Successfully tested on:
+Use `THUNDERSTORM_TEST_REQUIRE_MATCH=1` when CI or manual test runs must fail if the requested collector is missing or not runnable.
 
-- Windows 10
-- Windows 2003
-- Windows XP
-
-## thunderstorm-collector PowerShell Script
-
-A PowerShell script for Windows.
-
-### Requirements
-
-- PowerShell version 3
-
-### Usage
-
-You can run it like:
-
-```bash
-powershell.exe -ep bypass .\thunderstorm-collector.ps1
-```
-
-Collect files from a certain directory
-
-```bash
-powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer my-thunderstorm.local -Folder C:\ProgramData\Suspicious
-```
-
-Collect all files created within the last 24 hours from partition C:\
-
-```bash
-powershell.exe -ep bypass .\thunderstorm-collector.ps1 -ThunderstormServer my-thunderstorm.local -MaxAge 1
-```
-
-### Configuration
-
-Please review the configuration section in the PowerShell script for more settings.
-
-### Tested On
-
-Successfully tested on:
-
-- Windows 10
-- Windows 7
-
-## thunderstorm-collector Perl Script
-
-A Perl script collector.
-
-### Requirements
-
-- Perl version 5
-- LWP::UserAgent
-
-### Usage
-
-You can run it like:
-
-```bash
-perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
-```
-
-Collect files from a certain directory
-
-```bash
-perl thunderstorm-collector.pl -- --dir /home --server thunderstorm.internal.net
-```
-
-### Configuration
-
-Please review the configuration section in the Perl script for more settings like the maximum age, maximum file size or directory exclusions.
-
-### Tested On
-
-Successfully tested on:
-
-- Debian 10

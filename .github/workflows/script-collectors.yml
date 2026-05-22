@@ -238,10 +238,10 @@ jobs:
             $selected = ",$($env:SELECTED_COLLECTORS),"
 
             if ($selected.Contains(",ps3,")) {
-              if (-not (Test-Path "scripts\thunderstorm-collector.ps1")) {
-                throw "Requested ps3 collector, but scripts\thunderstorm-collector.ps1 is missing"
+              if (-not (Test-Path "scripts\powershell\thunderstorm-collector.ps1")) {
+                throw "Requested ps3 collector, but scripts\powershell\thunderstorm-collector.ps1 is missing"
               }
-              powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector.ps1 `
+              powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\thunderstorm-collector.ps1 `
                 -ThunderstormServer 127.0.0.1 `
                 -ThunderstormPort $port `
                 -Folder $sampleDir `
@@ -253,10 +253,10 @@ jobs:
             }
 
             if ($selected.Contains(",ps2,")) {
-              if (-not (Test-Path "scripts\thunderstorm-collector-ps2.ps1")) {
-                throw "Requested ps2 collector, but scripts\thunderstorm-collector-ps2.ps1 is missing"
+              if (-not (Test-Path "scripts\powershell\thunderstorm-collector-ps2.ps1")) {
+                throw "Requested ps2 collector, but scripts\powershell\thunderstorm-collector-ps2.ps1 is missing"
               }
-              powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector-ps2.ps1 `
+              powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\powershell\thunderstorm-collector-ps2.ps1 `
                 -ThunderstormServer 127.0.0.1 `
                 -ThunderstormPort $port `
                 -Folder $sampleDir `
@@ -268,8 +268,8 @@ jobs:
             }
 
             if ($selected.Contains(",batch,")) {
-              if (-not (Test-Path "scripts\thunderstorm-collector.bat")) {
-                throw "Requested batch collector, but scripts\thunderstorm-collector.bat is missing"
+              if (-not (Test-Path "scripts\batch\thunderstorm-collector.bat")) {
+                throw "Requested batch collector, but scripts\batch\thunderstorm-collector.bat is missing"
               }
               $env:THUNDERSTORM_SERVER = "127.0.0.1"
               $env:THUNDERSTORM_PORT = $port
@@ -279,7 +279,7 @@ jobs:
               $env:COLLECT_MAX_SIZE = "50000000"
               $env:MAX_AGE = "30"
               $env:SOURCE = "windows-bat-e2e"
-              cmd /c scripts\thunderstorm-collector.bat
+              cmd /c scripts\batch\thunderstorm-collector.bat
               if ($LASTEXITCODE -ne 0) { throw "Batch collector failed with exit code $LASTEXITCODE" }
               $expectedCount++
             }
