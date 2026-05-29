@@ -33,6 +33,8 @@ Prefer the Go collector for normal deployments. Use these scripts when runtime c
 
 Each collector directory contains its own `README.md` with a manual acceptance test section. Use that section when reviewing the corresponding collector PR locally.
 
+For the full PR checkout order and manual reviewer checklist, see [`MANUAL_TESTING_GUIDE.md`](MANUAL_TESTING_GUIDE.md).
+
 Recommended reviewer workflow:
 
 1. Check out the collector PR branch.
@@ -53,4 +55,3 @@ THUNDERSTORM_TEST_COLLECTORS=bash \
 Supported selector values are `bash`, `ash`, `python3`, `python2`, `perl`, `ps3`, and `ps2`.
 
 Use `THUNDERSTORM_TEST_REQUIRE_MATCH=1` when CI or manual test runs must fail if the requested collector is missing or not runnable.
-
