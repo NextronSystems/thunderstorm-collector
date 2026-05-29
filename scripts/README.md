@@ -39,7 +39,7 @@ Recommended reviewer workflow:
 
 1. Check out the collector PR branch.
 2. Read the collector-specific README.
-3. Run the manual acceptance test against a real Thunderstorm service.
+3. Run the manual acceptance test against a real THOR Thunderstorm service.
 4. Run the automated stub-server test if the required runtime is available.
 5. Review uploaded samples and source identifiers in Thunderstorm.
 

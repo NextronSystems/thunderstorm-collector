@@ -29,6 +29,43 @@ cd /path/to/thunderstorm-collector
 git fetch origin
 ```
 
+Confirm the real THOR Thunderstorm endpoint that will be used for manual acceptance:
+
+```text
+Thunderstorm server: <hostname-or-ip>
+Thunderstorm port:   <port>
+URL scheme:          http or https
+```
+
+For collector README commands that use `thunderstorm.local`, substitute the real service values. For example:
+
+```text
+server: thunderstorm.example.internal
+port: 8080
+```
+
+Before running destructive or high-volume tests, use a dedicated test source identifier such as:
+
+```text
+manual-bash-acceptance-<tester-name>
+manual-python3-error-paths-<tester-name>
+```
+
+After each acceptance run, inspect the real Thunderstorm service and verify:
+
+- The expected files were received.
+- The source identifier matches the manual test command.
+- Text and binary samples appear as separate uploads where applicable.
+- Nested files appear when recursive traversal is expected.
+- Filtered files are absent when a size, age, or extension filter is being tested.
+- Failed or skipped files are visible in collector output and are not reported as successful uploads.
+
+The local `thunderstorm-stub-server` remains useful for repeatable automated checks and CI-style contract validation, but it is not the primary manual acceptance target when a real THOR Thunderstorm service is available.
+
+## Optional Stub Server Setup
+
+Use this only for automated stub tests or when the real service is temporarily unavailable.
+
 Update and build the local stub server:
 
 ```bash
@@ -37,7 +74,7 @@ git pull --ff-only
 go build -o thunderstorm-stub-server .
 ```
 
-Start the stub server in a separate terminal when a test needs a local Thunderstorm-compatible endpoint:
+Start the stub server in a separate terminal:
 
 ```bash
 cd /path/to/thunderstorm-stub-server
@@ -49,21 +86,21 @@ mkdir -p /tmp/thunderstorm-stub-uploads
   --log-file /tmp/thunderstorm-stub-audit.jsonl
 ```
 
-For collector README commands that use `thunderstorm.local`, substitute:
+For stub-server runs, use:
 
 ```text
 server: 127.0.0.1
 port: 8080
 ```
 
-After each acceptance run, inspect:
+Inspect uploads and audit logs with:
 
 ```bash
 ls -la /tmp/thunderstorm-stub-uploads
 tail -n 20 /tmp/thunderstorm-stub-audit.jsonl
 ```
 
-The stub server validates the HTTP upload contract and records uploaded samples. It does not replace a final test against a real Thunderstorm service if that is part of the release acceptance process.
+The stub server validates the HTTP upload contract and records uploaded samples. It does not validate production Thunderstorm scanning behavior, authentication, deployment networking, or real-service operational behavior.
 
 ## General Acceptance Criteria
 
@@ -327,9 +364,11 @@ For each collector PR, record:
 
 - Branch and commit SHA tested.
 - Operating system and runtime version, for example Bash version, BusyBox version, Python version, Perl version, PowerShell version, or Windows version.
-- Whether the stub server or a real Thunderstorm service was used.
+- Whether the real Thunderstorm service and/or the stub server was used.
+- Thunderstorm endpoint details, excluding credentials or secrets.
 - The source identifier used in the test.
-- Number of files expected and number of files observed in Thunderstorm or the stub upload directory.
+- Number of files expected and number of files observed in Thunderstorm.
+- For stub runs, number of files observed in `/tmp/thunderstorm-stub-uploads`.
 - Which robustness checks passed.
 - Any limitation, warning, timeout, or unexpected exit code.
 
@@ -357,7 +396,7 @@ A collector PR is ready to merge when:
 
 - The automated CI checks are green.
 - The automated stub-server test for that collector passes or an intentional environment skip is documented.
-- The manual acceptance test from the collector README passes.
+- The manual acceptance test from the collector README passes against the real THOR Thunderstorm service.
 - The robustness checks do not reveal silent data loss, hangs, or misleading success reports.
 - The README accurately describes any limitation found during testing.
 
