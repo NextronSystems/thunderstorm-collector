@@ -19,7 +19,6 @@ help:
 VERSION ?= $(shell git describe --tags --always --dirty)
 VERSION := ${VERSION:refs/tags/%=%}
 RELEASE_VERSION := ${VERSION:v%=%}
-SCRIPT_RELEASE_DIR := release/thunderstorm-collector-scripts-${RELEASE_VERSION}
 
 .PHONY: release
 release: release-binary release-scripts
@@ -36,20 +35,23 @@ release-binary:
 
 .PHONY: release-scripts
 release-scripts:
-	@mkdir -p "${SCRIPT_RELEASE_DIR}"
+	@mkdir -p release
 	@echo "Building script release ${RELEASE_VERSION}"
 	@find scripts \
 		-path 'scripts/tests' -prune -o \
 		-path '*/__pycache__' -prune -o \
-		-type f \( -name 'README.md' -o -name 'thunderstorm-collector*' \) -print | \
+		-type f -name 'thunderstorm-collector*' -print | \
 	while IFS= read -r f; do \
-		target="${SCRIPT_RELEASE_DIR}/$$f"; \
-		mkdir -p "$$(dirname "$$target")"; \
+		base=$$(basename "$$f"); \
+		ext=$${base##*.}; \
+		if [ "$$ext" = "$$base" ]; then \
+			target="release/$${base}-${RELEASE_VERSION}"; \
+		else \
+			stem=$${base%.$$ext}; \
+			target="release/$${stem}-${RELEASE_VERSION}.$$ext"; \
+		fi; \
 		cp "$$f" "$$target"; \
 	done
-	@if command -v zip >/dev/null 2>&1; then \
-		(cd release && zip -qr "thunderstorm-collector-scripts-${RELEASE_VERSION}.zip" "thunderstorm-collector-scripts-${RELEASE_VERSION}"); \
-	fi
 
 .PHONY: clean
 clean: ## Remove all release artifacts
