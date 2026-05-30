@@ -117,6 +117,271 @@ For each collector PR, record whether these points pass:
 - The automated stub-server harness passes for the collector selector.
 - Limitations documented in the collector README match observed behavior.
 
+## Manual Test Preparation
+
+Use one acceptance record per collector PR. Do not mix results from different collectors under the same source identifier.
+
+Before testing a collector, write down:
+
+```text
+PR:
+Branch:
+Commit:
+Tester:
+Test date:
+Target OS:
+Runtime version:
+Thunderstorm server:
+Thunderstorm port:
+URL scheme:
+Source identifier:
+```
+
+Use a source identifier that makes the run easy to find in Thunderstorm:
+
+```text
+manual-<collector>-<test-type>-<tester>-<date>
+```
+
+Examples:
+
+```text
+manual-bash-acceptance-alice-2026-05-30
+manual-python3-size-filter-alice-2026-05-30
+manual-powershell-locked-file-alice-2026-05-30
+```
+
+For every command that is expected to upload files, keep the terminal output. If the command fails, keep the exit code and the last visible error lines.
+
+On Unix-like systems, capture the exit code with:
+
+```bash
+echo "exit_code=$?"
+```
+
+On Windows PowerShell, capture the exit code with:
+
+```powershell
+$LASTEXITCODE
+```
+
+On Windows `cmd.exe`, capture the exit code with:
+
+```cmd
+echo %ERRORLEVEL%
+```
+
+## Manual Test Data
+
+Create small, harmless files. Do not point collectors at broad production directories during acceptance testing. The goal is to validate collector behavior, not to upload a large live system sample set.
+
+### Unix Test Data
+
+Use this structure for Bash, ash, Python, and Perl tests:
+
+```bash
+COLLECTOR="bash"
+TEST_ROOT="/tmp/ts-${COLLECTOR}-manual"
+rm -rf "$TEST_ROOT"
+mkdir -p "$TEST_ROOT/input/nested" "$TEST_ROOT/errors/readable" "$TEST_ROOT/errors/unreadable" "$TEST_ROOT/filter"
+
+printf 'manual acceptance text\n' > "$TEST_ROOT/input/sample.txt"
+printf '\000\001\002THUNDERSTORM\000\377\n' > "$TEST_ROOT/input/sample.bin"
+printf 'nested file\n' > "$TEST_ROOT/input/nested/nested.txt"
+printf 'old file\n' > "$TEST_ROOT/filter/old.txt"
+printf 'small file\n' > "$TEST_ROOT/filter/small.txt"
+dd if=/dev/zero of="$TEST_ROOT/filter/large.bin" bs=1024 count=32 2>/dev/null
+printf 'readable\n' > "$TEST_ROOT/errors/readable/ok.txt"
+printf 'blocked\n' > "$TEST_ROOT/errors/unreadable/blocked.txt"
+touch -t 200001010000 "$TEST_ROOT/filter/old.txt"
+chmod 000 "$TEST_ROOT/errors/unreadable"
+```
+
+After unreadable-file testing, always restore permissions:
+
+```bash
+chmod 755 "$TEST_ROOT/errors/unreadable"
+```
+
+If the test is run as `root`, unreadable-file checks may not behave as expected because `root` can still read most files. Record that limitation instead of treating it as a collector failure.
+
+### Windows Test Data
+
+Use this structure for PowerShell and Batch tests:
+
+```powershell
+$Collector = "powershell"
+$TestRoot = Join-Path $env:TEMP "ts-$Collector-manual"
+Remove-Item -Recurse -Force $TestRoot -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path "$TestRoot\input\nested" | Out-Null
+New-Item -ItemType Directory -Path "$TestRoot\filter" | Out-Null
+New-Item -ItemType Directory -Path "$TestRoot\errors" | Out-Null
+
+Set-Content -Path "$TestRoot\input\sample.txt" -Value "manual acceptance text"
+[IO.File]::WriteAllBytes("$TestRoot\input\sample.bin", [byte[]](0,1,2,84,72,85,78,68,69,82))
+Set-Content -Path "$TestRoot\input\nested\nested.txt" -Value "nested file"
+Set-Content -Path "$TestRoot\filter\include.exe" -Value "include"
+Set-Content -Path "$TestRoot\filter\skip.tmp" -Value "skip"
+Set-Content -Path "$TestRoot\filter\small.txt" -Value "small"
+fsutil file createnew "$TestRoot\filter\large.txt" 32768
+Set-Content -Path "$TestRoot\errors\ok.txt" -Value "readable"
+Set-Content -Path "$TestRoot\errors\locked.txt" -Value "locked"
+```
+
+If `fsutil` requires elevation or is unavailable, create a large file with PowerShell instead:
+
+```powershell
+[IO.File]::WriteAllBytes("$TestRoot\filter\large.txt", (New-Object byte[] 32768))
+```
+
+## Manual Test Sequence
+
+Run these tests for each collector PR unless the collector README explicitly documents that the feature is unsupported.
+
+### Test 1: Help and Runtime Smoke Test
+
+Purpose:
+
+- Confirm that the intended interpreter can start the collector.
+- Confirm that missing dependencies are reported clearly.
+- Confirm that the collector does not require a broad system scan just to display usage or fail validation.
+
+Expected result:
+
+- Help output or validation output is readable.
+- Missing runtime dependencies are explicit, for example missing `curl`, missing Perl `LWP::UserAgent`, or blocked PowerShell execution policy.
+- The command does not upload files.
+
+### Test 2: Basic Upload
+
+Purpose:
+
+- Confirm the collector can upload normal text files.
+- Confirm the collector can upload binary files where supported.
+- Confirm recursive traversal finds nested files.
+- Confirm the configured source identifier appears in Thunderstorm.
+
+Use the collector-specific README command for the manual acceptance test. Set the scan directory to the test data `input` directory and use a unique source identifier.
+
+Expected result in Thunderstorm:
+
+- `sample.txt` is present.
+- `sample.bin` is present where binary upload is supported.
+- `nested.txt` is present for recursive collectors.
+- The source identifier exactly matches the command.
+
+Failure conditions:
+
+- The collector exits successfully but no upload appears in Thunderstorm.
+- The source identifier is missing or wrong.
+- Binary upload is truncated or corrupted on a collector that claims binary-safe upload support.
+- Nested files are missing on a collector that claims recursive traversal support.
+
+### Test 3: Dry Run
+
+Purpose:
+
+- Confirm dry-run mode does not contact Thunderstorm.
+- Confirm dry-run output still shows what would be processed.
+
+Use `127.0.0.1` with port `1` for this test. That endpoint should be unreachable, so any server contact would normally fail.
+
+Expected result:
+
+- The command exits successfully.
+- No new upload appears in Thunderstorm.
+- Output lists files that would be submitted, or clearly reports dry-run processing.
+
+Failure conditions:
+
+- A new upload appears in Thunderstorm.
+- The command fails only because `127.0.0.1:1` is unreachable.
+- Dry-run output is misleading or empty despite matching test files.
+
+### Test 4: Unreachable Thunderstorm Service
+
+Purpose:
+
+- Confirm network failures are visible.
+- Confirm the collector does not hang indefinitely.
+- Confirm failed uploads are not reported as successful.
+
+Use `127.0.0.1` with port `1` and the normal test input directory.
+
+Expected result:
+
+- The command exits non-zero or clearly reports upload failures.
+- The error mentions connection, upload, begin marker, or server failure.
+- The command returns within a reasonable time for that collector.
+- No new upload appears in Thunderstorm.
+
+Failure conditions:
+
+- The command hangs indefinitely.
+- The command exits successfully while all uploads failed.
+- The output hides the network failure.
+
+### Test 5: Missing and Unreadable Paths
+
+Purpose:
+
+- Confirm one bad path does not stop all readable files.
+- Confirm warnings or failed-file counters are visible.
+
+Use one readable directory, one unreadable directory or locked file, and one missing directory.
+
+Expected result:
+
+- The readable file is uploaded.
+- Missing or unreadable paths are reported.
+- The collector does not terminate with an unhandled exception.
+- The final status does not imply that every file was uploaded successfully when some files were skipped or failed.
+
+Failure conditions:
+
+- The readable file is not uploaded because another path failed.
+- The collector crashes without a useful message.
+- The collector silently ignores unreadable input while reporting full success.
+
+### Test 6: Filter Behavior
+
+Purpose:
+
+- Confirm file size, age, and extension filters include and exclude the intended files.
+
+Use the files in the `filter` test directory.
+
+Expected result:
+
+- Small files are uploaded when they match the active filter.
+- Oversized files are skipped when a size limit is set.
+- Old files are skipped when an age limit excludes them.
+- Extension filters include only the requested extensions.
+
+Failure conditions:
+
+- Filtered-out files appear in Thunderstorm.
+- Expected included files are missing.
+- The collector output does not explain skipped files where the collector claims to report filtering.
+
+### Test 7: README Accuracy
+
+Purpose:
+
+- Confirm documentation matches observed behavior.
+
+After testing, compare the collector README with actual results.
+
+Expected result:
+
+- Intended use, requirements, capabilities, and limitations are accurate.
+- Any observed runtime limitation is already documented or should be added before merge.
+
+Failure conditions:
+
+- README claims support for behavior that failed during testing.
+- README omits a material dependency or limitation found during testing.
+
 ## Checking Out a PR
 
 Use a local branch that tracks the remote PR branch:
@@ -204,13 +469,16 @@ Detailed manual test instructions:
 scripts/bash/README.md
 ```
 
-Minimum required manual checks:
+Manual test procedure:
 
-- Basic upload of text, binary, and nested files.
-- Dry-run against `127.0.0.1:1` does not contact the server.
-- Unreachable server fails visibly.
-- Missing and unreadable paths do not crash the collector.
-- File size filtering skips oversized files.
+- Set `COLLECTOR="bash"` when creating Unix test data.
+- Run the README manual acceptance command against the real Thunderstorm service with `--dir "$TEST_ROOT/input"`.
+- Verify `sample.txt`, `sample.bin`, and `nested/nested.txt` in Thunderstorm.
+- Run the README dry-run command with `--server 127.0.0.1 --port 1` and verify no Thunderstorm upload appears.
+- Run the unreachable-service command with `--server 127.0.0.1 --port 1` and verify visible failure.
+- Run the missing/unreadable path command with the readable, unreadable, and missing test directories.
+- Run the file size filter command with the `filter` directory and verify `small.txt` is uploaded while `large.bin` is skipped.
+- Record whether warnings, failed counters, and exit codes match the README expectations.
 
 Automated stub test:
 
@@ -233,13 +501,17 @@ Detailed manual test instructions:
 scripts/ash/README.md
 ```
 
-Minimum required manual checks:
+Manual test procedure:
 
-- Basic upload using the target shell, for example `sh`, `ash`, `dash`, or `busybox sh`.
-- Dry-run against `127.0.0.1:1` does not contact the server.
-- Unreachable server fails visibly or reports failed submissions.
-- Missing and unreadable paths do not crash the collector.
-- Binary upload behavior is reviewed on the intended minimal environment, especially when only BusyBox tooling is available.
+- Set `COLLECTOR="ash"` when creating Unix test data.
+- Run all commands with the shell that represents the target environment, for example `sh`, `ash`, `dash`, or `busybox sh`.
+- Run the README manual acceptance command against the real Thunderstorm service with the test `input` directory.
+- Verify `sample.txt` and `nested/nested.txt` in Thunderstorm.
+- If the target environment should support binary upload, add `sample.bin` to the acceptance check and compare size/hash if Thunderstorm exposes that data.
+- Run the dry-run test against `127.0.0.1:1` and verify no upload appears.
+- Run the unreachable-service test and verify a visible failure or failed-submission report.
+- Run missing/unreadable path testing and verify readable files are still processed.
+- On BusyBox-only systems, explicitly record which upload tool was used, for example BusyBox `wget` or `curl`.
 
 Automated stub test:
 
@@ -262,15 +534,18 @@ Detailed manual test instructions:
 scripts/python/README.md
 ```
 
-Minimum required manual checks:
+Manual test procedure:
 
-- Python 3 collector uploads text, binary, and nested files.
-- Python 2 collector is tested on a real Python 2.7 runtime if Python 2 support is part of the acceptance target.
-- Dry-run against `127.0.0.1:1` does not contact the server.
-- Unreachable server fails visibly.
-- Missing and unreadable paths do not crash the collector.
-- File size filtering skips oversized files.
-- Any TLS limitation on old Python 2 runtimes is documented as a runtime limitation.
+- Set `COLLECTOR="python"` when creating Unix test data.
+- Run the Python 3 README manual acceptance command against the real Thunderstorm service with the test `input` directory.
+- Verify `sample.txt`, `sample.bin`, and `nested/nested.txt` in Thunderstorm.
+- Repeat the same basic upload test with the Python 2 collector on a real Python 2.7 runtime if Python 2 support is in scope.
+- Run the dry-run test against `127.0.0.1:1` for Python 3, and repeat for Python 2 if in scope.
+- Run the unreachable-service test and verify a visible connection failure.
+- Run missing/unreadable path testing and verify readable files still upload.
+- Run the file size filter test and verify `small.txt` uploads while `large.bin` is skipped.
+- If HTTPS is required, test `--tls`; if the certificate is private or self-signed, test the documented insecure mode only if that is acceptable for the environment.
+- Record any Python 2 TLS or Unicode/path limitation as a runtime limitation.
 
 Automated stub tests:
 
@@ -298,15 +573,17 @@ Detailed manual test instructions:
 scripts/perl/README.md
 ```
 
-Minimum required manual checks:
+Manual test procedure:
 
-- Perl has `LWP::UserAgent` available.
-- Basic upload of text, binary, and nested files.
-- Dry-run against `127.0.0.1:1` does not contact the server.
-- Unreachable server fails visibly.
-- Missing and unreadable paths do not crash the collector.
-- File size filtering skips oversized files.
-- TLS behavior is reviewed on the intended legacy Perl runtime if HTTPS is required.
+- Set `COLLECTOR="perl"` when creating Unix test data.
+- Verify the runtime dependency before testing with `perl -MLWP::UserAgent -e 1`.
+- Run the README manual acceptance command against the real Thunderstorm service with the test `input` directory.
+- Verify `sample.txt`, `sample.bin`, and `nested/nested.txt` in Thunderstorm.
+- Run the dry-run test against `127.0.0.1:1` and verify no upload appears.
+- Run the unreachable-service test and verify a visible connection failure.
+- Run missing/unreadable path testing and verify readable files still upload.
+- Run the file size filter test and verify `small.txt` uploads while `large.bin` is skipped.
+- If HTTPS is required on the target host, explicitly test that host's Perl SSL stack against the real service.
 
 Automated stub test:
 
@@ -330,23 +607,29 @@ scripts/powershell/README.md
 scripts/batch/README.md
 ```
 
-Minimum required manual checks for PowerShell:
+Manual test procedure for PowerShell:
 
-- PowerShell 3+ collector uploads text and binary files.
-- PowerShell 2 collector is tested on a real PowerShell 2 host if PowerShell 2 support is part of the acceptance target.
-- Unreachable server fails visibly.
-- Missing folder does not crash with an unhandled exception.
-- Locked or unreadable file does not stop submission of readable files.
-- Extension filtering includes and excludes the expected files.
+- Set `$Collector = "powershell"` when creating Windows test data.
+- Run the README PowerShell 3+ manual acceptance command against the real Thunderstorm service with `$TestRoot\input`.
+- Verify `sample.txt` and `sample.bin` in Thunderstorm.
+- Repeat the basic upload test with the PowerShell 2 collector on a real PowerShell 2 host if PowerShell 2 support is in scope.
+- Run the unreachable-service test against `127.0.0.1:1` and verify visible failure.
+- Run the missing-folder test and verify the collector reports the issue without an unhandled exception.
+- Run the locked-file test and verify `ok.txt` uploads while `locked.txt` is skipped or reported failed.
+- Run the extension filter test and verify `include.exe` uploads while `skip.tmp` is absent.
+- Record the execution policy used, for example `-ExecutionPolicy Bypass`.
 
-Minimum required manual checks for Batch:
+Manual test procedure for Batch:
 
-- Batch collector uploads a simple matching file through `curl.exe`.
-- Unreachable server reports upload or curl failure.
-- Missing folder fails visibly or reports no matching files.
-- Extension filtering includes and excludes the expected files.
-- File size filtering skips oversized files.
-- Known Batch limitations are acceptable for the intended last-resort use case.
+- Run tests from `cmd.exe`, not PowerShell, unless PowerShell is only used to prepare test files.
+- Confirm `curl.exe` is available with `where curl`.
+- Run the README Batch manual acceptance command against the real Thunderstorm service with `%TEMP%\ts-batch-acceptance` or the prepared `$TestRoot\input` path translated to `%TESTDIR%`.
+- Verify the matching `.txt` file appears in Thunderstorm.
+- Run the unreachable-service test against `127.0.0.1:1` and verify curl/upload errors are visible.
+- Run the missing-folder test and verify the collector reports no matching files or invalid input without crashing the shell.
+- Run the extension filter test and verify `include.txt` uploads while `skip.tmp` is absent.
+- Run the file size filter test and verify `small.txt` uploads while `large.txt` is skipped.
+- Treat weak Batch error reporting as acceptable only if the failure is visible enough for an operator to detect.
 
 Automated checks:
 
