@@ -80,11 +80,11 @@ jobs:
 
           collector_exists() {
             case "$1" in
-              bash) [ -f scripts/thunderstorm-collector.sh ] ;;
-              ash) [ -f scripts/thunderstorm-collector-ash.sh ] ;;
-              python3) [ -f scripts/thunderstorm-collector.py ] ;;
-              python2) [ -f scripts/thunderstorm-collector-py2.py ] ;;
-              perl) [ -f scripts/thunderstorm-collector.pl ] ;;
+              bash) [ -f scripts/bash/thunderstorm-collector.sh ] ;;
+              ash) [ -f scripts/ash/thunderstorm-collector-ash.sh ] ;;
+              python3) [ -f scripts/python/thunderstorm-collector.py ] ;;
+              python2) [ -f scripts/python/thunderstorm-collector-py2.py ] ;;
+              perl) [ -f scripts/perl/thunderstorm-collector.pl ] ;;
               *) return 1 ;;
             esac
           }
@@ -167,13 +167,13 @@ jobs:
           $collectors = @()
           foreach ($collector in $requested.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)) {
             switch ($collector.Trim()) {
-              "ps3" { if (Test-Path "scripts\thunderstorm-collector.ps1") { $collectors += "ps3" } }
-              "ps2" { if (Test-Path "scripts\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" } }
-              "batch" { if (Test-Path "scripts\thunderstorm-collector.bat") { $collectors += "batch" } }
+              "ps3" { if (Test-Path "scripts\powershell\thunderstorm-collector.ps1") { $collectors += "ps3" } }
+              "ps2" { if (Test-Path "scripts\powershell\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" } }
+              "batch" { if (Test-Path "scripts\batch\thunderstorm-collector.bat") { $collectors += "batch" } }
               "windows" {
-                if (Test-Path "scripts\thunderstorm-collector.ps1") { $collectors += "ps3" }
-                if (Test-Path "scripts\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" }
-                if (Test-Path "scripts\thunderstorm-collector.bat") { $collectors += "batch" }
+                if (Test-Path "scripts\powershell\thunderstorm-collector.ps1") { $collectors += "ps3" }
+                if (Test-Path "scripts\powershell\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" }
+                if (Test-Path "scripts\batch\thunderstorm-collector.bat") { $collectors += "batch" }
               }
             }
           }
