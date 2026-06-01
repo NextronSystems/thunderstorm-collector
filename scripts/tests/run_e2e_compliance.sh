@@ -100,13 +100,13 @@ ASH_SHELL="${ASH_SHELL:-$(detect_ash_shell 2>/dev/null || true)}"
 
 collector_script_path() {
     case "$(normalize_collector "$1")" in
-        bash) printf '%s/thunderstorm-collector.sh\n' "$SCRIPTS_DIR" ;;
-        ash) printf '%s/thunderstorm-collector-ash.sh\n' "$SCRIPTS_DIR" ;;
-        python3) printf '%s/thunderstorm-collector.py\n' "$SCRIPTS_DIR" ;;
-        python2) printf '%s/thunderstorm-collector-py2.py\n' "$SCRIPTS_DIR" ;;
-        perl) printf '%s/thunderstorm-collector.pl\n' "$SCRIPTS_DIR" ;;
-        ps3) printf '%s/thunderstorm-collector.ps1\n' "$SCRIPTS_DIR" ;;
-        ps2) printf '%s/thunderstorm-collector-ps2.ps1\n' "$SCRIPTS_DIR" ;;
+        bash) printf '%s/bash/thunderstorm-collector.sh\n' "$SCRIPTS_DIR" ;;
+        ash) printf '%s/ash/thunderstorm-collector-ash.sh\n' "$SCRIPTS_DIR" ;;
+        python3) printf '%s/python/thunderstorm-collector.py\n' "$SCRIPTS_DIR" ;;
+        python2) printf '%s/python/thunderstorm-collector-py2.py\n' "$SCRIPTS_DIR" ;;
+        perl) printf '%s/perl/thunderstorm-collector.pl\n' "$SCRIPTS_DIR" ;;
+        ps3) printf '%s/powershell/thunderstorm-collector.ps1\n' "$SCRIPTS_DIR" ;;
+        ps2) printf '%s/powershell/thunderstorm-collector-ps2.ps1\n' "$SCRIPTS_DIR" ;;
         *) return 1 ;;
     esac
 }
@@ -494,9 +494,9 @@ create_fixtures
 
 # Bash
 if collector_enabled bash && collector_runnable bash; then
-    run_tests "bash" bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+    run_tests "bash" bash "$SCRIPTS_DIR/bash/thunderstorm-collector.sh" \
         --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
-    run_dry_run_test "bash" bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+    run_dry_run_test "bash" bash "$SCRIPTS_DIR/bash/thunderstorm-collector.sh" \
         --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
 fi
 
@@ -504,10 +504,10 @@ fi
 if collector_enabled ash && collector_runnable ash; then
     # Intentionally rely on shell word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
-    run_tests "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
+    run_tests "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/ash/thunderstorm-collector-ash.sh" \
         --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
     # shellcheck disable=SC2086
-    run_dry_run_test "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
+    run_dry_run_test "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/ash/thunderstorm-collector-ash.sh" \
         --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
 elif collector_enabled ash; then
     section "ash"; skip "no dash or busybox available"
@@ -515,9 +515,9 @@ fi
 
 # Python 3
 if collector_enabled python3 && collector_runnable python3; then
-    run_tests "python3" python3 "$SCRIPTS_DIR/thunderstorm-collector.py" \
+    run_tests "python3" python3 "$SCRIPTS_DIR/python/thunderstorm-collector.py" \
         -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
-    run_dry_run_test "python3" python3 "$SCRIPTS_DIR/thunderstorm-collector.py" \
+    run_dry_run_test "python3" python3 "$SCRIPTS_DIR/python/thunderstorm-collector.py" \
         -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
 elif collector_enabled python3; then
     section "python3"; skip "not available"
@@ -525,9 +525,9 @@ fi
 
 # Python 2
 if collector_enabled python2 && collector_runnable python2; then
-    run_tests "python2" python2 "$SCRIPTS_DIR/thunderstorm-collector-py2.py" \
+    run_tests "python2" python2 "$SCRIPTS_DIR/python/thunderstorm-collector-py2.py" \
         -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
-    run_dry_run_test "python2" python2 "$SCRIPTS_DIR/thunderstorm-collector-py2.py" \
+    run_dry_run_test "python2" python2 "$SCRIPTS_DIR/python/thunderstorm-collector-py2.py" \
         -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
 elif collector_enabled python2; then
     section "python2"; skip "not available"
@@ -535,9 +535,9 @@ fi
 
 # Perl
 if collector_enabled perl && collector_runnable perl; then
-    run_tests "perl" perl "$SCRIPTS_DIR/thunderstorm-collector.pl" \
+    run_tests "perl" perl "$SCRIPTS_DIR/perl/thunderstorm-collector.pl" \
         -s 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365
-    run_dry_run_test "perl" perl "$SCRIPTS_DIR/thunderstorm-collector.pl" \
+    run_dry_run_test "perl" perl "$SCRIPTS_DIR/perl/thunderstorm-collector.pl" \
         -s 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365
 elif collector_enabled perl; then
     section "perl"; skip "not available or missing LWP::UserAgent"
@@ -545,14 +545,14 @@ fi
 
 # PowerShell 3+
 if collector_enabled ps3 && collector_runnable ps3; then
-    run_tests_ps "powershell3+" "$SCRIPTS_DIR/thunderstorm-collector.ps1"
+    run_tests_ps "powershell3+" "$SCRIPTS_DIR/powershell/thunderstorm-collector.ps1"
 elif collector_enabled ps3; then
     section "powershell3+"; skip "pwsh not available"
 fi
 
 # PowerShell 2+
 if collector_enabled ps2 && collector_runnable ps2; then
-    run_tests_ps "powershell2+" "$SCRIPTS_DIR/thunderstorm-collector-ps2.ps1"
+    run_tests_ps "powershell2+" "$SCRIPTS_DIR/powershell/thunderstorm-collector-ps2.ps1"
 elif collector_enabled ps2; then
     section "powershell2+"; skip "pwsh not available"
 fi
@@ -568,10 +568,10 @@ if [ -n "$TS_HOST" ]; then
         printf '\x00BINARY\x00' > "$TS_FIX/live.bin"
 
         for info in \
-            "bash:bash $SCRIPTS_DIR/thunderstorm-collector.sh --server $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365 --quiet" \
-            "python3:python3 $SCRIPTS_DIR/thunderstorm-collector.py -s $TS_HOST -p $TS_PORT -d $TS_FIX --max-age 365" \
-            "perl:perl $SCRIPTS_DIR/thunderstorm-collector.pl -s $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365" \
-            "ps3:pwsh -NoProfile -ep bypass -c \"& '$SCRIPTS_DIR/thunderstorm-collector.ps1' -ThunderstormServer $TS_HOST -ThunderstormPort $TS_PORT -Folder '$TS_FIX' -MaxAge 365 -AllExtensions\""; do
+            "bash:bash $SCRIPTS_DIR/bash/thunderstorm-collector.sh --server $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365 --quiet" \
+            "python3:python3 $SCRIPTS_DIR/python/thunderstorm-collector.py -s $TS_HOST -p $TS_PORT -d $TS_FIX --max-age 365" \
+            "perl:perl $SCRIPTS_DIR/perl/thunderstorm-collector.pl -s $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365" \
+            "ps3:pwsh -NoProfile -ep bypass -c \"& '$SCRIPTS_DIR/powershell/thunderstorm-collector.ps1' -ThunderstormServer $TS_HOST -ThunderstormPort $TS_PORT -Folder '$TS_FIX' -MaxAge 365 -AllExtensions\""; do
             n="${info%%:*}"; c="${info#*:}"
             if eval "$c" >/dev/null 2>&1; then
                 pass "live/$n: upload succeeded"

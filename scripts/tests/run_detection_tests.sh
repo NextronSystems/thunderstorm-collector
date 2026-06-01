@@ -39,6 +39,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COLLECTOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BASH_COLLECTOR="$COLLECTOR_DIR/bash/thunderstorm-collector.sh"
+ASH_COLLECTOR="$COLLECTOR_DIR/ash/thunderstorm-collector-ash.sh"
+PYTHON_COLLECTOR="$COLLECTOR_DIR/python/thunderstorm-collector.py"
+PERL_COLLECTOR="$COLLECTOR_DIR/perl/thunderstorm-collector.pl"
+PS3_COLLECTOR="$COLLECTOR_DIR/powershell/thunderstorm-collector.ps1"
+PS2_COLLECTOR="$COLLECTOR_DIR/powershell/thunderstorm-collector-ps2.ps1"
 STUB_PORT="${STUB_PORT:-18098}"
 STUB_URL="http://localhost:${STUB_PORT}"
 STUB_LOG="${STUB_LOG:-}"
@@ -109,12 +115,12 @@ list_contains() {
 
 collector_script_path() {
     case "$(normalize_collector "$1")" in
-        bash) printf '%s/thunderstorm-collector.sh\n' "$COLLECTOR_DIR" ;;
-        ash) printf '%s/thunderstorm-collector-ash.sh\n' "$COLLECTOR_DIR" ;;
-        python) printf '%s/thunderstorm-collector.py\n' "$COLLECTOR_DIR" ;;
-        perl) printf '%s/thunderstorm-collector.pl\n' "$COLLECTOR_DIR" ;;
-        ps3) printf '%s/thunderstorm-collector.ps1\n' "$COLLECTOR_DIR" ;;
-        ps2) printf '%s/thunderstorm-collector-ps2.ps1\n' "$COLLECTOR_DIR" ;;
+        bash) printf '%s\n' "$BASH_COLLECTOR" ;;
+        ash) printf '%s\n' "$ASH_COLLECTOR" ;;
+        python) printf '%s\n' "$PYTHON_COLLECTOR" ;;
+        perl) printf '%s\n' "$PERL_COLLECTOR" ;;
+        ps3) printf '%s\n' "$PS3_COLLECTOR" ;;
+        ps2) printf '%s\n' "$PS2_COLLECTOR" ;;
         *) return 1 ;;
     esac
 }
@@ -380,7 +386,7 @@ print('no')
 run_bash() {
     local dir="$1"; shift
     # Extra args can override --max-age, --max-size-kb, etc.
-    bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+    bash "$BASH_COLLECTOR" \
         --server localhost --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
@@ -390,21 +396,21 @@ run_ash() {
     [ -n "$ASH_SHELL" ] || return 127
     # Intentionally rely on shell word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
-    $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+    $ASH_SHELL "$ASH_COLLECTOR" \
         --server localhost --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
 
 run_python() {
     local dir="$1"; shift
-    python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+    python3 "$PYTHON_COLLECTOR" \
         --server localhost --port "$STUB_PORT" -d "$dir" \
         "$@" 2>&1
 }
 
 run_perl() {
     local dir="$1"; shift
-    perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+    perl "$PERL_COLLECTOR" \
         -s localhost -p "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
@@ -425,7 +431,7 @@ run_ps3() {
     local dir="$1"; shift
     local args=()
     _translate_ps_args args "$@"
-    pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+    pwsh -NoProfile -File "$PS3_COLLECTOR" \
         -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$dir" \
         "${args[@]}" 2>&1
 }
@@ -434,7 +440,7 @@ run_ps2() {
     local dir="$1"; shift
     local args=()
     _translate_ps_args args "$@"
-    pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+    pwsh -NoProfile -File "$PS2_COLLECTOR" \
         -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$dir" \
         "${args[@]}" 2>&1
 }
@@ -1065,33 +1071,33 @@ test_retry_on_late_server() {
     # --retries 5 gives enough attempts for the stub to come up after 2s delay.
     case "$collector" in
         bash)
-            timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+            timeout 30 bash "$BASH_COLLECTOR" \
                 --server localhost --port "$retry_port" --dir "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         ash)
             # shellcheck disable=SC2086
-            timeout 30 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+            timeout 30 $ASH_SHELL "$ASH_COLLECTOR" \
                 --server localhost --port "$retry_port" --dir "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         python)
-            timeout 30 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            timeout 30 python3 "$PYTHON_COLLECTOR" \
                 --server localhost --port "$retry_port" -d "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         perl)
-            timeout 30 perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            timeout 30 perl "$PERL_COLLECTOR" \
                 -s localhost -p "$retry_port" --dir "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         ps3)
-            timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+            timeout 30 pwsh -NoProfile -File "$PS3_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$retry_port" -Folder "$fixtures/retry" \
                 -MaxAge 30 > "$collector_out" 2>&1 || true
             ;;
         ps2)
-            timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+            timeout 30 pwsh -NoProfile -File "$PS2_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$retry_port" -Folder "$fixtures/retry" \
                 -MaxAge 30 > "$collector_out" 2>&1 || true
             ;;
@@ -1151,33 +1157,33 @@ test_server_unreachable() {
     local exit_code=0
     case "$collector" in
         bash)
-            timeout 20 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+            timeout 20 bash "$BASH_COLLECTOR" \
                 --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         ash)
             # shellcheck disable=SC2086
-            timeout 20 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+            timeout 20 $ASH_SHELL "$ASH_COLLECTOR" \
                 --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         python)
-            timeout 20 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            timeout 20 python3 "$PYTHON_COLLECTOR" \
                 --server localhost --port "$dead_port" -d "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         perl)
-            timeout 20 perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            timeout 20 perl "$PERL_COLLECTOR" \
                 -s localhost -p "$dead_port" --dir "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         ps3)
-            timeout 20 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+            timeout 20 pwsh -NoProfile -File "$PS3_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$dead_port" -Folder "$fixtures/unreachable" \
                 -MaxAge 30 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         ps2)
-            timeout 20 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+            timeout 20 pwsh -NoProfile -File "$PS2_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$dead_port" -Folder "$fixtures/unreachable" \
                 -MaxAge 30 > "$collector_out" 2>&1 || exit_code=$?
             ;;

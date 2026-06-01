@@ -1,4 +1,5 @@
 curl.exe
 settings.json
 *.log
+*.lic
 go/dist/

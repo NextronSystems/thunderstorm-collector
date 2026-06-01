@@ -22,6 +22,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COLLECTOR_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BASH_COLLECTOR="$COLLECTOR_DIR/bash/thunderstorm-collector.sh"
+ASH_COLLECTOR="$COLLECTOR_DIR/ash/thunderstorm-collector-ash.sh"
+PYTHON_COLLECTOR="$COLLECTOR_DIR/python/thunderstorm-collector.py"
+PERL_COLLECTOR="$COLLECTOR_DIR/perl/thunderstorm-collector.pl"
+PS3_COLLECTOR="$COLLECTOR_DIR/powershell/thunderstorm-collector.ps1"
+PS2_COLLECTOR="$COLLECTOR_DIR/powershell/thunderstorm-collector-ps2.ps1"
 STUB_PORT="${STUB_PORT:-18200}"
 STUB_URL="http://localhost:${STUB_PORT}"
 STUB_LOG=""
@@ -91,12 +97,12 @@ list_contains() {
 
 collector_script_path() {
     case "$(normalize_collector "$1")" in
-        bash) printf '%s/thunderstorm-collector.sh\n' "$COLLECTOR_DIR" ;;
-        ash) printf '%s/thunderstorm-collector-ash.sh\n' "$COLLECTOR_DIR" ;;
-        python) printf '%s/thunderstorm-collector.py\n' "$COLLECTOR_DIR" ;;
-        perl) printf '%s/thunderstorm-collector.pl\n' "$COLLECTOR_DIR" ;;
-        ps3) printf '%s/thunderstorm-collector.ps1\n' "$COLLECTOR_DIR" ;;
-        ps2) printf '%s/thunderstorm-collector-ps2.ps1\n' "$COLLECTOR_DIR" ;;
+        bash) printf '%s\n' "$BASH_COLLECTOR" ;;
+        ash) printf '%s\n' "$ASH_COLLECTOR" ;;
+        python) printf '%s\n' "$PYTHON_COLLECTOR" ;;
+        perl) printf '%s\n' "$PERL_COLLECTOR" ;;
+        ps3) printf '%s\n' "$PS3_COLLECTOR" ;;
+        ps2) printf '%s\n' "$PS2_COLLECTOR" ;;
         *) return 1 ;;
     esac
 }
@@ -304,7 +310,7 @@ run_collector() {
 
 run_bash() {
     local dir="$1"; shift
-    bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+    bash "$BASH_COLLECTOR" \
         --server localhost --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
@@ -314,21 +320,21 @@ run_ash() {
     [ -n "$ASH_SHELL" ] || return 127
     # Intentionally rely on shell word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
-    $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+    $ASH_SHELL "$ASH_COLLECTOR" \
         --server localhost --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
 
 run_python() {
     local dir="$1"; shift
-    python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+    python3 "$PYTHON_COLLECTOR" \
         --server localhost --port "$STUB_PORT" -d "$dir" \
         "$@" 2>&1
 }
 
 run_perl() {
     local dir="$1"; shift
-    perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+    perl "$PERL_COLLECTOR" \
         -s localhost -p "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
@@ -337,7 +343,7 @@ run_ps3() {
     local dir="$1"; shift
     local args=()
     _translate_ps_args args "$@"
-    pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+    pwsh -NoProfile -File "$PS3_COLLECTOR" \
         -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$dir" \
         "${args[@]}" 2>&1
 }
@@ -346,7 +352,7 @@ run_ps2() {
     local dir="$1"; shift
     local args=()
     _translate_ps_args args "$@"
-    pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+    pwsh -NoProfile -File "$PS2_COLLECTOR" \
         -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$dir" \
         "${args[@]}" 2>&1
 }
@@ -425,38 +431,38 @@ test_interrupted_marker() {
     local pid_file; pid_file="$(mktemp /tmp/oper-pid-XXXXXX)"
     case "$collector" in
         bash)
-            bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+            bash "$BASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" \
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
         ash)
             # shellcheck disable=SC2086
-            $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+            $ASH_SHELL "$ASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" \
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
         python)
-            python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            python3 "$PYTHON_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" -d "$fixtures" \
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
         perl)
-            perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            perl "$PERL_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" --dir "$fixtures" \
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
         ps3)
-            pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+            pwsh -NoProfile -File "$PS3_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" \
                 -MaxAge 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
         ps2)
-            pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+            pwsh -NoProfile -File "$PS2_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" \
                 -MaxAge 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
@@ -559,22 +565,22 @@ test_source_identifier() {
             run_ash "$fixtures" --max-age 30 --source "$source_name" >/dev/null 2>&1 || true
             ;;
         python)
-            python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            python3 "$PYTHON_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" -d "$fixtures" \
                 --max-age 30 --source "$source_name" >/dev/null 2>&1 || true
             ;;
         perl)
-            perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            perl "$PERL_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" --dir "$fixtures" \
                 --max-age 30 --source "$source_name" >/dev/null 2>&1 || true
             ;;
         ps3)
-            pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+            pwsh -NoProfile -File "$PS3_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" \
                 -MaxAge 30 -Source "$source_name" >/dev/null 2>&1 || true
             ;;
         ps2)
-            pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+            pwsh -NoProfile -File "$PS2_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" \
                 -MaxAge 30 -Source "$source_name" >/dev/null 2>&1 || true
             ;;
@@ -675,27 +681,27 @@ test_multiple_dirs() {
 
     case "$collector" in
         bash)
-            bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+            bash "$BASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" \
                 --dir "$dir1" --dir "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
             ;;
         ash)
             # shellcheck disable=SC2086
-            $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+            $ASH_SHELL "$ASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" \
                 --dir "$dir1" --dir "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
             ;;
         python)
-            python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            python3 "$PYTHON_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" \
                 -d "$dir1" "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
             ;;
         perl)
             # Perl may only accept a single --dir — test and see
-            perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            perl "$PERL_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" --dir "$dir1" --dir "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
             ;;
@@ -742,28 +748,28 @@ test_503_backpressure() {
     local collector_exit=0
     case "$collector" in
         bash)
-            output="$(timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+            output="$(timeout 30 bash "$BASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
         ash)
             # shellcheck disable=SC2086
-            output="$(timeout 30 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+            output="$(timeout 30 $ASH_SHELL "$ASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
         python)
-            output="$(timeout 30 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            output="$(timeout 30 python3 "$PYTHON_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" -d "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
         perl)
-            output="$(timeout 30 perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            output="$(timeout 30 perl "$PERL_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
         ps3)
-            output="$(timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+            output="$(timeout 30 pwsh -NoProfile -File "$PS3_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" -MaxAge 30 2>&1)" || collector_exit=$?
             ;;
         ps2)
-            output="$(timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+            output="$(timeout 30 pwsh -NoProfile -File "$PS2_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" -MaxAge 30 2>&1)" || collector_exit=$?
             ;;
     esac
@@ -818,29 +824,29 @@ test_progress_reporting() {
     local output
     case "$collector" in
         bash)
-            output="$(timeout 30 bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+            output="$(timeout 30 bash "$BASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         ash)
             # shellcheck disable=SC2086
-            output="$(timeout 30 $ASH_SHELL "${COLLECTOR_DIR}/thunderstorm-collector-ash.sh" \
+            output="$(timeout 30 $ASH_SHELL "$ASH_COLLECTOR" \
                 --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         python)
-            output="$(timeout 30 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
+            output="$(timeout 30 python3 "$PYTHON_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" -d "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         perl)
-            output="$(timeout 30 perl "${COLLECTOR_DIR}/thunderstorm-collector.pl" \
+            output="$(timeout 30 perl "$PERL_COLLECTOR" \
                 -s localhost -p "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         ps3)
-            output="$(timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector.ps1" \
+            output="$(timeout 30 pwsh -NoProfile -File "$PS3_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" \
                 -MaxAge 30 -Progress 2>&1)" || true
             ;;
         ps2)
-            output="$(timeout 30 pwsh -NoProfile -File "${COLLECTOR_DIR}/thunderstorm-collector-ps2.ps1" \
+            output="$(timeout 30 pwsh -NoProfile -File "$PS2_COLLECTOR" \
                 -ThunderstormServer localhost -ThunderstormPort "$STUB_PORT" -Folder "$fixtures" \
                 -MaxAge 30 -Progress 2>&1)" || true
             ;;
@@ -932,7 +938,7 @@ test_wget_fallback() {
 
     local output
     output="$(timeout 30 env PATH="$shim_dir:$PATH" \
-        bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
+        bash "$BASH_COLLECTOR" \
         --server localhost --port "$STUB_PORT" --dir "$fixtures" \
         --max-age 30 2>&1)" || true
     sync_stub
