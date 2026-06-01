@@ -51,9 +51,6 @@ trap cleanup EXIT INT TERM
 "${THUNDERSTORM_MOCK_REAL}" --port "${BACKEND_PORT}" "${MOCK_ARGS[@]}" &
 MOCK_PID=$!
 
-# Brief pause to let mock bind
-sleep 0.5
-
 # Start API proxy on the original listen port
 "${API_PROXY_BINARY}" --port "${LISTEN_PORT}" --backend "${BACKEND_PORT}" &
 PROXY_PID=$!

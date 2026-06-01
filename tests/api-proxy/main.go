@@ -16,11 +16,11 @@ import (
 )
 
 func main() {
-	listenPort := flag.String("port", "8080", "Port to listen on")
-	backendPort := flag.String("backend", "8081", "Backend (mock server) port")
+	listenPort := flag.Int("port", 8080, "Port to listen on")
+	backendPort := flag.Int("backend", 8081, "Backend (mock server) port")
 	flag.Parse()
 
-	backend, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%s", *backendPort))
+	backend, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", *backendPort))
 	if err != nil {
 		log.Fatalf("invalid backend URL: %v", err)
 	}
@@ -35,7 +35,7 @@ func main() {
 		proxy.ServeHTTP(w, r)
 	})
 
-	addr := fmt.Sprintf(":%s", *listenPort)
+	addr := fmt.Sprintf(":%d", *listenPort)
 	log.Printf("API proxy listening on %s, forwarding /api/ -> /api/v1/ on backend %s", addr, backend)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
