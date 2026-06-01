@@ -229,7 +229,7 @@ main() {
     export THUNDERSTORM_MOCK_EXECUTABLE="${MOCK_EXECUTABLE}"
     export MOCK_PORT COLLECTOR_TIMEOUT VERBOSE
 
-    local overall_success=0
+    local overall_exit_code=0
     local total_passed=0
     local total_failed=0
     declare -A collector_results
@@ -260,7 +260,7 @@ main() {
             total_passed=$((total_passed + p))
             total_failed=$((total_failed + f))
             collector_results["${name}"]="${p}/$((p + f))"
-            [[ "${exit_code}" -ne 0 ]] && overall_success=1
+            [[ "${exit_code}" -ne 0 ]] && overall_exit_code=1
         fi
     done
 
@@ -284,8 +284,8 @@ main() {
     echo ""
     echo "Total: ${total_passed} passed, ${total_failed} failed"
 
-    [[ "${total_failed}" -gt 0 ]] && overall_success=1
-    exit "${overall_success}"
+    [[ "${total_failed}" -gt 0 ]] && overall_exit_code=1
+    exit "${overall_exit_code}"
 }
 
 main "$@"
