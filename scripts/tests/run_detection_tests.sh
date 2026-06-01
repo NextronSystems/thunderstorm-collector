@@ -119,11 +119,42 @@ collector_script_path() {
     esac
 }
 
+collector_has_flags() {
+    local script_path="$1" flag
+    shift
+    for flag in "$@"; do
+        grep -q -- "$flag" "$script_path" || return 1
+    done
+}
+
+collector_supports_shared_harness() {
+    local current script_path
+    current="$(normalize_collector "$1")"
+    script_path="$(collector_script_path "$current")" || return 1
+
+    case "$current" in
+        bash|ash)
+            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            ;;
+        python)
+            collector_has_flags "$script_path" --server --port --dirs --max-age --source --dry-run
+            ;;
+        perl)
+            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            ;;
+        ps3|ps2)
+            collector_has_flags "$script_path" ThunderstormServer ThunderstormPort Folder Source MaxAge MaxSize AllExtensions
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 collector_runnable() {
     local current script_path
     current="$(normalize_collector "$1")"
     script_path="$(collector_script_path "$current")" || return 1
     [ -f "$script_path" ] || return 1
+    collector_supports_shared_harness "$current" || return 1
 
     case "$current" in
         bash) command -v bash >/dev/null 2>&1 ;;
@@ -188,6 +219,20 @@ find_stub() {
 
 STUB_BIN="$(find_stub)"
 
+find_stub_rules() {
+    local candidates=(
+        "${STUB_RULES_DIR:-}"
+        "$SCRIPT_DIR/../../../thunderstorm-stub-server/rules"
+        "$SCRIPT_DIR/../../thunderstorm-stub-server/rules"
+    )
+    for c in "${candidates[@]}"; do
+        [ -n "$c" ] && [ -d "$c" ] && (cd "$c" 2>/dev/null && pwd) && return
+    done
+    echo ""
+}
+
+STUB_RULES="$(find_stub_rules)"
+
 # Start the stub server (once for the entire test run)
 start_stub() {
     local tmpdir; tmpdir="$(mktemp -d /tmp/detection-test-XXXXXX)"
@@ -195,7 +240,7 @@ start_stub() {
     STUB_UPLOADS="$tmpdir/uploads"
     mkdir -p "$STUB_UPLOADS"
 
-    local rules_dir="${STUB_RULES_DIR:-$(cd "$SCRIPT_DIR/../../../thunderstorm-stub-server/rules" 2>/dev/null && pwd)}"
+    local rules_dir="$STUB_RULES"
 
     "$STUB_BIN" \
         -port "$STUB_PORT" \
@@ -353,7 +398,7 @@ run_ash() {
 run_python() {
     local dir="$1"; shift
     python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
-        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        --server localhost --port "$STUB_PORT" -d "$dir" \
         "$@" 2>&1
 }
 
@@ -1003,8 +1048,8 @@ test_retry_on_late_server() {
 
     # Start the stub server FIRST on the retry port, but with a delayed start.
     # We use a wrapper that waits 2 seconds before launching the stub.
-    local stub_bin="${STUB_BIN:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/thunderstorm-stub}"
-    local stub_rules="${STUB_RULES_DIR:-/home/neo/.openclaw/workspace/projects/thunderstorm-stub-server/rules}"
+    local stub_bin="$STUB_BIN"
+    local stub_rules="$STUB_RULES"
 
     # Launch delayed stub in background.
     # All collectors send a begin marker with a single retry after 2s on failure.
@@ -1032,7 +1077,7 @@ test_retry_on_late_server() {
             ;;
         python)
             timeout 30 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
-                --server localhost --port "$retry_port" --dir "$fixtures/retry" \
+                --server localhost --port "$retry_port" -d "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         perl)
@@ -1118,7 +1163,7 @@ test_server_unreachable() {
             ;;
         python)
             timeout 20 python3 "${COLLECTOR_DIR}/thunderstorm-collector.py" \
-                --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
+                --server localhost --port "$dead_port" -d "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         perl)
@@ -1209,6 +1254,11 @@ else
     if [ -z "$STUB_BIN" ]; then
         echo "ERROR: thunderstorm-stub binary not found." >&2
         echo "Set STUB_BIN_PATH or build with: go build -tags yara -o thunderstorm-stub ." >&2
+        exit 1
+    fi
+    if [ -z "$STUB_RULES" ]; then
+        echo "ERROR: thunderstorm-stub rules directory not found." >&2
+        echo "Set STUB_RULES_DIR or keep thunderstorm-stub-server next to this repository." >&2
         exit 1
     fi
 

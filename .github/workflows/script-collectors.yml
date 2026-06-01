@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       collectors:
-        description: "Comma-separated collectors to test: bash, ash, python3, python2, perl, ps3, ps2, windows"
+        description: "Optional collector selectors for stacked collector branches, for example: bash, python3, windows"
         required: false
         default: ""
 
@@ -78,11 +78,28 @@ jobs:
             esac
           fi
 
+          collector_exists() {
+            case "$1" in
+              bash) [ -f scripts/thunderstorm-collector.sh ] ;;
+              ash) [ -f scripts/thunderstorm-collector-ash.sh ] ;;
+              python3) [ -f scripts/thunderstorm-collector.py ] ;;
+              python2) [ -f scripts/thunderstorm-collector-py2.py ] ;;
+              perl) [ -f scripts/thunderstorm-collector.pl ] ;;
+              *) return 1 ;;
+            esac
+          }
+
           collectors=()
           IFS=',' read -r -a requested_collectors <<< "$requested"
           for collector in "${requested_collectors[@]}"; do
             case "$collector" in
-              bash|ash|python3|python2|perl) collectors+=("$collector") ;;
+              bash|ash|python3|python2|perl)
+                if collector_exists "$collector"; then
+                  collectors+=("$collector")
+                else
+                  echo "Skipping missing Linux collector: $collector"
+                fi
+                ;;
             esac
           done
 
@@ -150,10 +167,14 @@ jobs:
           $collectors = @()
           foreach ($collector in $requested.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)) {
             switch ($collector.Trim()) {
-              "ps3" { $collectors += "ps3" }
-              "ps2" { $collectors += "ps2" }
-              "batch" { $collectors += "batch" }
-              "windows" { $collectors += @("ps3", "ps2", "batch") }
+              "ps3" { if (Test-Path "scripts\thunderstorm-collector.ps1") { $collectors += "ps3" } }
+              "ps2" { if (Test-Path "scripts\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" } }
+              "batch" { if (Test-Path "scripts\thunderstorm-collector.bat") { $collectors += "batch" } }
+              "windows" {
+                if (Test-Path "scripts\thunderstorm-collector.ps1") { $collectors += "ps3" }
+                if (Test-Path "scripts\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" }
+                if (Test-Path "scripts\thunderstorm-collector.bat") { $collectors += "batch" }
+              }
             }
           }
 

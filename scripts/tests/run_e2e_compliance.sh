@@ -111,11 +111,42 @@ collector_script_path() {
     esac
 }
 
+collector_has_flags() {
+    local script_path="$1" flag
+    shift
+    for flag in "$@"; do
+        grep -q -- "$flag" "$script_path" || return 1
+    done
+}
+
+collector_supports_shared_harness() {
+    local current script_path
+    current="$(normalize_collector "$1")"
+    script_path="$(collector_script_path "$current")" || return 1
+
+    case "$current" in
+        bash|ash)
+            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            ;;
+        python3|python2)
+            collector_has_flags "$script_path" --server --port --dirs --max-age --source --dry-run
+            ;;
+        perl)
+            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            ;;
+        ps3|ps2)
+            collector_has_flags "$script_path" ThunderstormServer ThunderstormPort Folder Source MaxAge MaxSize AllExtensions
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 collector_runnable() {
     local current script_path
     current="$(normalize_collector "$1")"
     script_path="$(collector_script_path "$current")" || return 1
     [ -f "$script_path" ] || return 1
+    collector_supports_shared_harness "$current" || return 1
 
     case "$current" in
         bash) command -v bash >/dev/null 2>&1 ;;
