@@ -248,6 +248,12 @@ if [ "${#available_collectors[@]}" -eq 0 ]; then
     exit 0
 fi
 
+collector_available() {
+    local current
+    current="$(normalize_collector "$1")"
+    list_contains "$current" "${available_collectors[@]}"
+}
+
 # Ensure stub server is running
 if ! curl -s "http://${STUB_HOST}:${STUB_PORT}/api/status" >/dev/null 2>&1; then
     echo "ERROR: Stub server not running on ${STUB_HOST}:${STUB_PORT}"
@@ -270,7 +276,7 @@ echo ""
 # ══════════════════════════════════════════════
 # BASH COLLECTOR
 # ══════════════════════════════════════════════
-if collector_enabled bash; then
+if collector_available bash; then
     echo "── Bash Collector ──────────────────────────"
 
     # max-size: 1000KB limit → small(100B), fresh(6B), old(4B), ancient(8B),
@@ -315,7 +321,7 @@ fi
 # ══════════════════════════════════════════════
 # ASH / POSIX SH COLLECTOR
 # ══════════════════════════════════════════════
-if collector_runnable ash; then
+if collector_available ash; then
     echo "── POSIX sh Collector (via $ASH_SHELL) ──────"
 
     start=$(log_lines)
@@ -349,7 +355,7 @@ fi
 # ══════════════════════════════════════════════
 # PYTHON 3 COLLECTOR
 # ══════════════════════════════════════════════
-if collector_enabled python3; then
+if collector_available python3; then
     echo "── Python 3 Collector ────────────────────────"
 
     # max-size test: 1024KB (~1MB), 365 days max_age
@@ -386,7 +392,7 @@ fi
 # ══════════════════════════════════════════════
 # PYTHON 2 COLLECTOR
 # ══════════════════════════════════════════════
-if collector_enabled python2 && command -v python2 >/dev/null 2>&1; then
+if collector_available python2; then
     echo "── Python 2 Collector ────────────────────────"
 
     py2_script="$(patch_python2 365 1024)"
@@ -413,7 +419,7 @@ fi
 # ══════════════════════════════════════════════
 # PERL COLLECTOR
 # ══════════════════════════════════════════════
-if collector_enabled perl; then
+if collector_available perl; then
     echo "── Perl Collector ────────────────────────────"
 
     # max-size test: 1024KB (~1MB), 365 days
@@ -440,7 +446,7 @@ fi
 # ══════════════════════════════════════════════
 # POWERSHELL COLLECTORS
 # ══════════════════════════════════════════════
-if collector_enabled ps3 && command -v pwsh >/dev/null 2>&1; then
+if collector_available ps3; then
     echo "── PowerShell 3+ Collector ─────────────────"
 
     # max-size: 1MB — use wildcard extension '*' to match all files
@@ -482,7 +488,7 @@ if collector_enabled ps3 && command -v pwsh >/dev/null 2>&1; then
     echo ""
 fi
 
-if collector_enabled ps2 && command -v pwsh >/dev/null 2>&1; then
+if collector_available ps2; then
     echo "── PowerShell 2+ Collector ─────────────────"
 
     start=$(log_lines)
