@@ -190,7 +190,12 @@ ASH_SHELL="${ASH_SHELL:-$(detect_ash_shell)}"
 find_stub() {
     local candidates=(
         "${STUB_BIN_PATH:-}"
+        "${STUB_SERVER_BIN:-}"
+        "$SCRIPT_DIR/../../thunderstorm-stub-server/thunderstorm-stub-server"
+        "$SCRIPT_DIR/../../thunderstorm-stub-server/thunderstorm-stub"
+        "$SCRIPT_DIR/../../../thunderstorm-stub-server/thunderstorm-stub-server"
         "$SCRIPT_DIR/../../../thunderstorm-stub-server/thunderstorm-stub"
+        "$(command -v thunderstorm-stub-server 2>/dev/null || true)"
         "$(command -v thunderstorm-stub 2>/dev/null || true)"
     )
     for c in "${candidates[@]}"; do
@@ -203,6 +208,7 @@ find_stub() {
 find_rules() {
     local candidates=(
         "${STUB_RULES_PATH:-}"
+        "$SCRIPT_DIR/../../thunderstorm-stub-server/rules"
         "$SCRIPT_DIR/../../../thunderstorm-stub-server/rules"
     )
     for c in "${candidates[@]}"; do
@@ -231,6 +237,13 @@ stop_stub() {
     [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null && wait "$STUB_PID" 2>/dev/null || true
     STUB_PID=""
 }
+
+cleanup() {
+    stop_stub
+    [ -n "$STUB_LOG" ] && rm -f "$STUB_LOG"
+    return 0
+}
+trap cleanup EXIT
 
 clear_log() {
     curl -s -X POST "$STUB_URL/api/test/reset" > /dev/null 2>&1 || true
@@ -905,7 +918,6 @@ test_wget_fallback() {
     local fixtures; fixtures="$(mktemp -d /tmp/oper-test-XXXXXX)"
     echo "$MALICIOUS_CONTENT" > "$fixtures/wget-${collector}.exe"
 
-    # Build a PATH that excludes directories containing real curl, but includes wget
     local wget_path; wget_path="$(command -v wget 2>/dev/null)"
     if [ -z "$wget_path" ]; then
         skip "$collector/wget-fallback: wget not installed"
@@ -913,19 +925,13 @@ test_wget_fallback() {
         return
     fi
 
-    local wget_dir; wget_dir="$(dirname "$wget_path")"
-    # Build a minimal PATH with only wget's directory and standard utils (but no curl)
-    local clean_path="$wget_dir:/usr/sbin:/sbin"
-    # Verify curl is NOT on this path
-    if env PATH="$clean_path" command -v curl >/dev/null 2>&1; then
-        # curl is in the same dir as wget — can't isolate
-        skip "$collector/wget-fallback: curl and wget in same directory, cannot isolate"
-        rm -rf "$fixtures"
-        return
-    fi
+    local shim_dir; shim_dir="$(mktemp -d /tmp/oper-wget-path-XXXXXX)"
+    printf '#!/usr/bin/env sh\nexit 127\n' > "$shim_dir/curl"
+    chmod +x "$shim_dir/curl"
+    ln -s "$wget_path" "$shim_dir/wget" 2>/dev/null || cp "$wget_path" "$shim_dir/wget"
 
     local output
-    output="$(timeout 30 env PATH="$clean_path" \
+    output="$(timeout 30 env PATH="$shim_dir:$PATH" \
         bash "${COLLECTOR_DIR}/thunderstorm-collector.sh" \
         --server localhost --port "$STUB_PORT" --dir "$fixtures" \
         --max-age 30 2>&1)" || true
@@ -942,7 +948,7 @@ test_wget_fallback() {
         fi
     fi
 
-    rm -rf "$fixtures"
+    rm -rf "$fixtures" "$shim_dir"
 }
 
 # ============================================================================

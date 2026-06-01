@@ -187,9 +187,11 @@ validate_available_collectors() {
 find_stub() {
     if [ -n "${1:-}" ] && [ -x "$1" ]; then echo "$1"; return 0; fi
     if [ -n "${STUB_SERVER_BIN:-}" ] && [ -x "$STUB_SERVER_BIN" ]; then echo "$STUB_SERVER_BIN"; return 0; fi
-    local sibling="$SCRIPTS_DIR/../../thunderstorm-stub-server/thunderstorm-stub-server"
-    if [ -x "$sibling" ]; then echo "$sibling"; return 0; fi
     for p in \
+        "$SCRIPTS_DIR/../thunderstorm-stub-server/thunderstorm-stub-server" \
+        "$SCRIPTS_DIR/../thunderstorm-stub-server/thunderstorm-stub" \
+        "$SCRIPTS_DIR/../../thunderstorm-stub-server/thunderstorm-stub-server" \
+        "$SCRIPTS_DIR/../../thunderstorm-stub-server/thunderstorm-stub" \
         "$HOME/.openclaw/workspace/projects/thunderstorm-stub-server/thunderstorm-stub-server" \
         "$HOME/thunderstorm-stub-server/thunderstorm-stub-server"; do
         if [ -x "$p" ]; then echo "$p"; return 0; fi
@@ -198,8 +200,16 @@ find_stub() {
     return 1
 }
 
+kill_port_listener() {
+    command -v lsof >/dev/null 2>&1 || return 0
+    local pid
+    for pid in $(lsof -tiTCP:"$STUB_PORT" -sTCP:LISTEN 2>/dev/null || true); do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+}
+
 start_stub() {
-    pkill -f "stub-server.*$STUB_PORT" 2>/dev/null || true
+    kill_port_listener
     sleep 1
     rm -f "$STUB_LOG"
     "$1" -port "$STUB_PORT" -log-file "$STUB_LOG" &

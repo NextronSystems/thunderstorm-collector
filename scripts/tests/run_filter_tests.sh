@@ -196,34 +196,50 @@ assert_not_uploaded() {
     fi
 }
 
+kb_to_mb_ceil() {
+    local kb="$1"
+    echo $(((kb + 1023) / 1024))
+}
+
 # Create patched copies of Python/Perl collectors with specific max_age/max_size
 patch_python() {
     local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-patched.py"
-    # Patch both the global default and the argparse default
+    local src="$SCRIPTS_DIR/thunderstorm-collector.py" max_size="$max_size_kb"
+    if ! grep -q -- "--max-size-kb" "$src"; then
+        max_size="$(kb_to_mb_ceil "$max_size_kb")"
+    fi
     sed -e "s/^max_age = .*/max_age = $max_age/" \
-        -e "s/^max_size = .*/max_size = $max_size_kb/" \
+        -e "s/^max_size = .*/max_size = $max_size/" \
         -e "s/\"--max-size-kb\", type=int, default=[0-9]*/\"--max-size-kb\", type=int, default=$max_size_kb/" \
         -e "s/\"--max-age\", type=int, default=[0-9]*/\"--max-age\", type=int, default=$max_age/" \
-        "$SCRIPTS_DIR/thunderstorm-collector.py" > "$out"
+        "$src" > "$out"
     echo "$out"
 }
 
 patch_python2() {
     local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-py2-patched.py"
-    # Patch both the global default and the argparse default
+    local src="$SCRIPTS_DIR/thunderstorm-collector-py2.py" max_size="$max_size_kb"
+    if ! grep -q -- "--max-size-kb" "$src"; then
+        max_size="$(kb_to_mb_ceil "$max_size_kb")"
+    fi
     sed -e "s/^max_age = .*/max_age = $max_age/" \
-        -e "s/^max_size = .*/max_size = $max_size_kb/" \
+        -e "s/^max_size = .*/max_size = $max_size/" \
         -e "s/\"--max-size-kb\", type=int, default=[0-9]*/\"--max-size-kb\", type=int, default=$max_size_kb/" \
         -e "s/\"--max-age\", type=int, default=[0-9]*/\"--max-age\", type=int, default=$max_age/" \
-        "$SCRIPTS_DIR/thunderstorm-collector-py2.py" > "$out"
+        "$src" > "$out"
     echo "$out"
 }
 
 patch_perl() {
     local max_age="$1" max_size_kb="$2" out="$TMP_DIR/thunderstorm-collector-patched.pl"
+    local src="$SCRIPTS_DIR/thunderstorm-collector.pl" max_size="$max_size_kb"
+    if ! grep -q 'our \$max_size_kb' "$src"; then
+        max_size="$(kb_to_mb_ceil "$max_size_kb")"
+    fi
     sed -e "s/^our \\\$max_age = .*/our \$max_age = $max_age;/" \
         -e "s/^our \\\$max_size_kb = .*/our \$max_size_kb = $max_size_kb;/" \
-        "$SCRIPTS_DIR/thunderstorm-collector.pl" > "$out"
+        -e "s/^our \\\$max_size = .*/our \$max_size = $max_size;/" \
+        "$src" > "$out"
     echo "$out"
 }
 
