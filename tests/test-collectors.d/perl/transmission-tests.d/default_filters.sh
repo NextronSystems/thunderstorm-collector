@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034
 # Test: Perl collector default filters skip .dat files and files older than 3 days
-ARGS="--server localhost:PORT --dir TESTDIR"
+ARGS="--server localhost --port PORT --dir TESTDIR"
 EXPECTED_FILES=(
     "small-file.txt"
     "medium-file.log"
