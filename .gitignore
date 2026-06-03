@@ -1,4 +1,15 @@
+# Windows artifacts
 curl.exe
 settings.json
+
+# Logs
 *.log
+
+# Build artifacts
+go/bin/
 go/dist/
+release/
+tests/api-proxy/api-proxy
+
+# Merge conflict leftovers
+*.orig
