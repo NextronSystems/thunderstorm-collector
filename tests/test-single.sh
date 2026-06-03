@@ -101,8 +101,17 @@ run_collector() {
     # Build and execute collector command
     local collector_cmd
     collector_cmd=$(collector_build_command "${args}")
-    run_with_timeout "${COLLECTOR_TIMEOUT}" "${collector_cmd}" >/dev/null 2>&1
+    local collector_log_file
+    collector_log_file=$("${MKTEMP_CMD}" --suffix=.log)
+    run_with_timeout "${COLLECTOR_TIMEOUT}" "${collector_cmd}" >"${collector_log_file}" 2>&1
     collector_exit=$?
+    if [[ "${VERBOSE}" = "true" ]]; then
+        echo "    Collector output (exit code ${collector_exit}):"
+        while IFS= read -r line; do
+            echo "      ${line}"
+        done < "${collector_log_file}"
+    fi
+    "${RM_CMD}" -f "${collector_log_file}"
     if [[ "${collector_exit}" -ne 0 ]]; then
         if [[ "${collector_exit}" -eq 124 ]]; then
             echo "    ERROR: Collector timed out after ${COLLECTOR_TIMEOUT}s"
