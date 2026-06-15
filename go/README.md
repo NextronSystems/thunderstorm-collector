@@ -101,6 +101,8 @@ The default configuration file named `config.yml` is used by default. We provide
 
 You can find precompiled binaries for numerous platforms in the [releases](https://github.com/NextronSystems/thunderstorm-collector/releases) section.
 
+**Note:** In general, Go 1.10 is used to build the binaries to ensure the broadest possible compatibility with older operating system versions. Additionally, this is complemented by builds with the latest stable Go version for targets that are not supported by Go 1.10.
+
 ### Unsupported Versions
 
 The Go Collector does not run on:
@@ -110,9 +112,11 @@ The Go Collector does not run on:
 
 You could try to use the [collector scripts](https://github.com/NextronSystems/thunderstorm-collector/tree/master/scripts) on unsupported systems.
 
-In case that the pre-build collector crashes on your end system, please see the [platform requirements](https://github.com/golang/go/wiki#platform-specific-information) for the different go versions to get the last supported go version for your OS version.
+In case that the pre-build collector crashes on your end system, please see the [platform requirements](https://go.dev/wiki/#platform-specific-information) for the different go versions to get the last supported go version for your OS version.
 
 This [page](https://golang.org/doc/install/source#environment) contains all possible `arch` and `os` values for the latest Go version.
+
+If you need to check which Go version was used to build a specific binary, unfortunately there is not an easy way that covers all Go versions. With a recent Go version (in fact, Go 1.13 and later), `go version <binary>` reports the Go version used to build the binary *if* the binary was built with Go 1.13 or later. If on the other hand the binary was built with an older Go version, the command reports the error "not a Go executable". (And unfortunately, there is no way (`strings` or `readelf`) to check the Go version for binaries built with older Go versions, as they don't include this information in the binary.)
 
 The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
 

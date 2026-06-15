@@ -7,8 +7,23 @@ export GOPATH := $(CURDIR)/.gopath
 
 # Get all supported platforms and filter out unsupported ones
 ALL_TARGETS := $(shell go tool dist list)
-BLACKLIST_OS := android ios
-FILTERED_TARGETS := $(filter-out $(addsuffix /%,$(BLACKLIST_OS)),$(ALL_TARGETS))
+BLOCKLIST_OS := android ios
+BLOCKLIST_TARGETS :=
+ifeq ($(shell go version | cut -d' ' -f3 | cut -d'.' -f 1-2),go1.10) # We use only go1.10 or a recent version for the build thus no need for a version comparison.
+	# go1.10 does not build some darwin targets on a somewhat recent cloud runnner.
+	# Please use a newer go version for the build, or provide your own legacy runner.
+	#
+	# - x86 targets (darwin/386 and darwin/arm) are listed by old go versions; go
+	#   dropped support in go1.15 (released 2020-08-11) due to lack of upstream
+	#   support (iOS 13 release in 2019-09-19 made darwin/arm obsolete, macOS
+	#   Catalina release in 2019-10-07 made darwin/386 obsolete). But the build
+	#   fails to call runtime.read_tls_fallback.
+	# - arm64: go1.10 tries to use ld's `-pagezero_size` option which is not
+	#   supported any more. See, e.g.,
+	#   https://github.com/golang/go/commit/5231ba2f054f2ecb1387bad00b8745d6fe532ea4
+	BLOCKLIST_TARGETS += darwin/386 darwin/arm darwin/arm64
+endif
+FILTERED_TARGETS := $(filter-out $(BLOCKLIST_TARGETS),$(filter-out $(addsuffix /%,$(BLOCKLIST_OS)),$(ALL_TARGETS)))
 
 # Extract unique architectures and operating systems
 ALLARCHS := $(sort $(foreach t,$(FILTERED_TARGETS),$(word 2,$(subst /, ,$(t)))))
@@ -102,7 +117,7 @@ help: ## Show this help menu
 	@echo "      Packages are gzipped tar archives (.tar.gz) by default,"
 	@echo "      except for Windows, which uses zip (.zip)."
 	@echo "      On Windows, binaries have an additional .exe suffix."
- 
+
 # Build for current platform
 .PHONY: build
 build: bin/$(CURRENT_ARCH)-$(CURRENT_OS)-thunderstorm-collector$(if $(findstring windows,$(CURRENT_OS)),.exe,)
