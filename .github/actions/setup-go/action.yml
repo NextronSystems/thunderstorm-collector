@@ -1,0 +1,29 @@
+name: Setup Go and vendor
+description: Vendor dependencies with stable Go, then set up the target Go version
+
+inputs:
+  go-version:
+    description: Target Go version to build/test with
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Go (stable, for vendoring)
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+        cache-dependency-path: ./go/go.sum
+    - name: Vendor dependencies
+      run: go mod vendor
+      working-directory: ./go
+      shell: bash
+    - name: Setup Go ${{ inputs.go-version }}
+      if: inputs.go-version != 'stable'
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache-dependency-path: ./go/go.sum
+    - name: Display Go version
+      run: go version
+      shell: bash

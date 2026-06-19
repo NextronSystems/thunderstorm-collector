@@ -10,20 +10,41 @@ permissions:
   contents: write
 
 jobs:
+  # Run the full Go workflow (test + build) as a gate before releasing.
+  # This verifies "make release" succeeds before we publish anything.
   build:
+    uses: ./.github/workflows/go.yml
+
+  release:
     name: Create Release
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      # Some targets do not build with go1.10 on the cloud runner (e.g.,
+      # darwin/arm64), and some targets are only available with a recent Go
+      # version (e.g., aix/ppc64, linux/riscv64, or windows/arm64, to name a
+      # few). Thus we need to build twice, once with go1.10 and once with
+      # stable.
+      # For targets that build with both version, we prefer the go1.10 build to
+      # widen the support of old systems. Therefore, we build with stable first,
+      # and let the go1.10 build overwrite stable builds if there are any for
+      # the approriate target.
+      - name: Setup Go and vendor
+        uses: ./.github/actions/setup-go
         with:
-          go-version: stable
-          cache-dependency-path: ./go/go.sum
-      - name: Display Go version
-        run: go version
-      - name: Build project
+          go-version: 'stable'
+      - name: Build project with Go stable
+        env:
+          VERSION: ${{ github.ref }}
+        run: |
+          make release
+      - name: Setup Go and vendor
+        uses: ./.github/actions/setup-go
+        with:
+          go-version: '1.10.x'
+      - name: Build project with Go 1.10
         env:
           VERSION: ${{ github.ref }}
         run: |

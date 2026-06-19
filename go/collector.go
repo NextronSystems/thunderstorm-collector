@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v3"
+	"github.com/bmatcuk/doublestar"
 )
 
 // SkipReason represents why a file was excluded from collection.
@@ -194,7 +194,7 @@ func (c *Collector) CheckThunderstormUp() error {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
 			if opError, isOpError := urlError.Err.(*net.OpError); isOpError {
 				if opError.Op == "dial" {
-					return fmt.Errorf("%w - did you enter host and port correctly", opError)
+					return fmt.Errorf("%v - did you enter host and port correctly", opError)
 				}
 			}
 			return urlError.Err
@@ -204,7 +204,7 @@ func (c *Collector) CheckThunderstormUp() error {
 	defer response.Body.Close()
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		return fmt.Errorf("could not read response body: %w", err)
+		return fmt.Errorf("could not read response body: %v", err)
 	}
 	if response.StatusCode != 200 {
 		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d: %s", response.StatusCode, body)
@@ -302,7 +302,11 @@ func (c *Collector) Stop() {
 	}
 	c.logger.Printf("")
 	c.logger.Printf("Processing:")
-	c.logger.Printf("  - Successfully %s: %d", map[bool]string{true: "would be sent (dry-run)", false: "uploaded"}[c.DryRun], atomic.LoadInt64(&c.Statistics.uploadedFiles))
+	uploadLabel := "uploaded"
+	if c.DryRun {
+		uploadLabel = "would be sent (dry-run)"
+	}
+	c.logger.Printf("  - Successfully %s: %d", uploadLabel, atomic.LoadInt64(&c.Statistics.uploadedFiles))
 	c.logger.Printf("  - Read/transmission errors: %d", atomic.LoadInt64(&c.Statistics.fileErrors)+atomic.LoadInt64(&c.Statistics.uploadErrors))
 	c.logger.Printf("")
 	c.logger.Printf("Timing:")
@@ -534,15 +538,15 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 	go func() {
 		fw, err := w.CreateFormFile("file", abspath)
 		if err != nil {
-			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %w", err))
+			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %v", err))
 			return
 		}
 		if _, err := io.Copy(fw, f); err != nil {
-			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %w", err))
+			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %v", err))
 			return
 		}
 		if err := w.Close(); err != nil {
-			multipartWriter.CloseWithError(fmt.Errorf("could not close multipart writer: %w", err))
+			multipartWriter.CloseWithError(fmt.Errorf("could not close multipart writer: %v", err))
 			return
 		}
 		multipartWriter.Close()

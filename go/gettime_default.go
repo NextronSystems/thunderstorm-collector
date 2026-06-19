@@ -1,4 +1,3 @@
-//go:build !(aix || android || dragonfly || illumos || linux || solaris || openbsd || js || nacl || darwin || freebsd || netbsd || windows)
 // +build !aix,!android,!dragonfly,!illumos,!linux,!solaris,!openbsd,!js,!nacl,!darwin,!freebsd,!netbsd,!windows
 
 package main
