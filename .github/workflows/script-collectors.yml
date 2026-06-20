@@ -1,0 +1,300 @@
+name: Script Collectors
+
+on:
+  push:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/script-collectors.yml"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/script-collectors.yml"
+  workflow_dispatch:
+    inputs:
+      collectors:
+        description: "Optional collector selectors for stacked collector branches, for example: bash, python3, windows"
+        required: false
+        default: ""
+
+env:
+  STUB_SERVER_REF: 6b57bca2f2ae33c499ff717847bec3154a3841ad
+
+jobs:
+  linux:
+    name: Linux script collectors
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install script dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dash libwww-perl
+
+      - name: Checkout thunderstorm-stub-server
+        uses: actions/checkout@v4
+        with:
+          repository: Nextron-Labs/thunderstorm-stub-server
+          ref: ${{ env.STUB_SERVER_REF }}
+          path: thunderstorm-stub-server
+
+      - name: Build thunderstorm-stub-server
+        working-directory: thunderstorm-stub-server
+        run: go build -o "$RUNNER_TEMP/thunderstorm-stub-server" .
+
+      - name: Syntax check shared harness
+        run: |
+          bash -n scripts/tests/run_detection_tests.sh
+          bash -n scripts/tests/run_e2e_compliance.sh
+          bash -n scripts/tests/run_filter_tests.sh
+          bash -n scripts/tests/run_operational_tests.sh
+
+      - name: Detect Linux collectors
+        id: collectors
+        run: |
+          set -euo pipefail
+          requested="${{ github.event.inputs.collectors || '' }}"
+          branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+
+          if [ -z "$requested" ]; then
+            case "$branch" in
+              *script-bash*) requested="bash" ;;
+              *script-ash*) requested="ash" ;;
+              *script-python*) requested="python3,python2" ;;
+              *script-perl*) requested="perl" ;;
+              *script-windows*) requested="" ;;
+              *) requested="" ;;
+            esac
+          fi
+
+          collector_exists() {
+            case "$1" in
+              bash) [ -f scripts/thunderstorm-collector.sh ] ;;
+              ash) [ -f scripts/thunderstorm-collector-ash.sh ] ;;
+              python3) [ -f scripts/thunderstorm-collector.py ] ;;
+              python2) [ -f scripts/thunderstorm-collector-py2.py ] ;;
+              perl) [ -f scripts/thunderstorm-collector.pl ] ;;
+              *) return 1 ;;
+            esac
+          }
+
+          collectors=()
+          IFS=',' read -r -a requested_collectors <<< "$requested"
+          for collector in "${requested_collectors[@]}"; do
+            case "$collector" in
+              bash|ash|python3|python2|perl)
+                if collector_exists "$collector"; then
+                  collectors+=("$collector")
+                else
+                  echo "Skipping missing Linux collector: $collector"
+                fi
+                ;;
+            esac
+          done
+
+          if [ "${#collectors[@]}" -eq 0 ]; then
+            echo "collectors=" >> "$GITHUB_OUTPUT"
+            echo "No Linux script collectors selected for branch '$branch'."
+          else
+            IFS=,
+            echo "collectors=${collectors[*]}" >> "$GITHUB_OUTPUT"
+            echo "Linux collectors: ${collectors[*]}"
+          fi
+
+      - name: Shared e2e compliance
+        if: steps.collectors.outputs.collectors != ''
+        env:
+          THUNDERSTORM_TEST_COLLECTORS: ${{ steps.collectors.outputs.collectors }}
+          THUNDERSTORM_TEST_REQUIRE_MATCH: "1"
+        run: scripts/tests/run_e2e_compliance.sh "$RUNNER_TEMP/thunderstorm-stub-server"
+
+      - name: Bash collector suite
+        if: hashFiles('scripts/tests/run_tests.sh') != ''
+        run: bash scripts/tests/run_tests.sh "$RUNNER_TEMP/thunderstorm-stub-server"
+
+      - name: Ash regression suite
+        if: hashFiles('scripts/tests/run_ash_regression_tests.sh') != ''
+        run: sh scripts/tests/run_ash_regression_tests.sh
+
+      - name: Python regression suite
+        if: hashFiles('scripts/tests/run_python_regression_tests.sh') != ''
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: bash scripts/tests/run_python_regression_tests.sh
+
+  windows:
+    name: Windows script collectors
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Detect Windows collectors
+        id: collectors
+        shell: pwsh
+        run: |
+          $requested = "${{ github.event.inputs.collectors || '' }}"
+          $branch = if ($env:GITHUB_HEAD_REF) { $env:GITHUB_HEAD_REF } else { $env:GITHUB_REF_NAME }
+          if (-not $requested) {
+            if ($branch -like "*script-windows*") {
+              $requested = "ps3,ps2,batch"
+            } else {
+              $requested = ""
+            }
+          }
+
+          $collectors = @()
+          foreach ($collector in $requested.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            switch ($collector.Trim()) {
+              "ps3" { if (Test-Path "scripts\thunderstorm-collector.ps1") { $collectors += "ps3" } }
+              "ps2" { if (Test-Path "scripts\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" } }
+              "batch" { if (Test-Path "scripts\thunderstorm-collector.bat") { $collectors += "batch" } }
+              "windows" {
+                if (Test-Path "scripts\thunderstorm-collector.ps1") { $collectors += "ps3" }
+                if (Test-Path "scripts\thunderstorm-collector-ps2.ps1") { $collectors += "ps2" }
+                if (Test-Path "scripts\thunderstorm-collector.bat") { $collectors += "batch" }
+              }
+            }
+          }
+
+          "count=$($collectors.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "collectors=$($collectors -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Checkout thunderstorm-stub-server
+        if: steps.collectors.outputs.count != '0'
+        uses: actions/checkout@v4
+        with:
+          repository: Nextron-Labs/thunderstorm-stub-server
+          ref: ${{ env.STUB_SERVER_REF }}
+          path: thunderstorm-stub-server
+
+      - name: Build thunderstorm-stub-server
+        if: steps.collectors.outputs.count != '0'
+        shell: pwsh
+        working-directory: thunderstorm-stub-server
+        run: go build -o "$env:RUNNER_TEMP\thunderstorm-stub-server.exe" .
+
+      - name: Run Windows collectors
+        if: steps.collectors.outputs.count != '0'
+        shell: pwsh
+        env:
+          SELECTED_COLLECTORS: ${{ steps.collectors.outputs.collectors }}
+        run: |
+          $sampleDir = Join-Path $env:RUNNER_TEMP "script-collector-sample"
+          $uploadsDir = Join-Path $env:RUNNER_TEMP "script-collector-uploads"
+          $auditFile = Join-Path $env:RUNNER_TEMP "stub-audit.jsonl"
+          $stdoutLog = Join-Path $env:RUNNER_TEMP "stub-stdout.log"
+          $stderrLog = Join-Path $env:RUNNER_TEMP "stub-stderr.log"
+          New-Item -ItemType Directory -Path $sampleDir, $uploadsDir -Force | Out-Null
+
+          $samplePath = Join-Path $sampleDir "sample.exe"
+          [IO.File]::WriteAllBytes($samplePath, [byte[]](0, 1, 2, 3, 84, 72, 85, 78, 68, 69, 82))
+          $expectedSha256 = (Get-FileHash -Path $samplePath -Algorithm SHA256).Hash.ToLower()
+
+          $port = "18080"
+          $proc = $null
+          $expectedCount = 0
+          try {
+            $proc = Start-Process `
+              -FilePath "$env:RUNNER_TEMP\thunderstorm-stub-server.exe" `
+              -ArgumentList @("--port", $port, "--uploads-dir", $uploadsDir, "--log-file", $auditFile) `
+              -RedirectStandardOutput $stdoutLog `
+              -RedirectStandardError $stderrLog `
+              -PassThru
+
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/status" | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw "Stub server did not become ready" }
+
+            $selected = ",$($env:SELECTED_COLLECTORS),"
+
+            if ($selected.Contains(",ps3,")) {
+              if (-not (Test-Path "scripts\thunderstorm-collector.ps1")) {
+                throw "Requested ps3 collector, but scripts\thunderstorm-collector.ps1 is missing"
+              }
+              powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector.ps1 `
+                -ThunderstormServer 127.0.0.1 `
+                -ThunderstormPort $port `
+                -Folder $sampleDir `
+                -Source windows-ps-e2e `
+                -MaxAge 30 `
+                -MaxSize 100
+              if ($LASTEXITCODE -ne 0) { throw "PowerShell collector failed with exit code $LASTEXITCODE" }
+              $expectedCount++
+            }
+
+            if ($selected.Contains(",ps2,")) {
+              if (-not (Test-Path "scripts\thunderstorm-collector-ps2.ps1")) {
+                throw "Requested ps2 collector, but scripts\thunderstorm-collector-ps2.ps1 is missing"
+              }
+              powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\thunderstorm-collector-ps2.ps1 `
+                -ThunderstormServer 127.0.0.1 `
+                -ThunderstormPort $port `
+                -Folder $sampleDir `
+                -Source windows-ps2-e2e `
+                -MaxAge 30 `
+                -MaxSize 100
+              if ($LASTEXITCODE -ne 0) { throw "PowerShell 2 collector failed with exit code $LASTEXITCODE" }
+              $expectedCount++
+            }
+
+            if ($selected.Contains(",batch,")) {
+              if (-not (Test-Path "scripts\thunderstorm-collector.bat")) {
+                throw "Requested batch collector, but scripts\thunderstorm-collector.bat is missing"
+              }
+              $env:THUNDERSTORM_SERVER = "127.0.0.1"
+              $env:THUNDERSTORM_PORT = $port
+              $env:URL_SCHEME = "http"
+              $env:COLLECT_DIRS = $sampleDir
+              $env:RELEVANT_EXTENSIONS = ".exe"
+              $env:COLLECT_MAX_SIZE = "50000000"
+              $env:MAX_AGE = "30"
+              $env:SOURCE = "windows-bat-e2e"
+              cmd /c scripts\thunderstorm-collector.bat
+              if ($LASTEXITCODE -ne 0) { throw "Batch collector failed with exit code $LASTEXITCODE" }
+              $expectedCount++
+            }
+
+            python .\scripts\tests\verify_uploads.py `
+              --uploads-dir "$uploadsDir" `
+              --expected-sha256 "$expectedSha256" `
+              --min-count "$expectedCount" `
+              --timeout-seconds 180
+            if ($LASTEXITCODE -ne 0) { throw "Upload verification failed with exit code $LASTEXITCODE" }
+          } finally {
+            if ($proc) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path $stdoutLog) { Get-Content -Path $stdoutLog }
+            if (Test-Path $stderrLog) { Get-Content -Path $stderrLog }
+            if (Test-Path $auditFile) { Get-Content -Path $auditFile }
+          }

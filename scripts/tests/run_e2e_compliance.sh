@@ -1,0 +1,592 @@
+#!/usr/bin/env bash
+#
+# End-to-End Compliance Tests for Thunderstorm Collector Scripts
+#
+# Verifies that each collector sends correctly formatted multipart uploads
+# with proper metadata fields that a Thunderstorm server can parse.
+#
+# Tests run against a stub server with JSONL audit log for field verification.
+# Checks: source, filename, file integrity (MD5), collection markers,
+#         zero-byte files, binary files, filenames with spaces/special chars.
+#
+# Usage:
+#   ./run_e2e_compliance.sh [stub-server-binary]
+#
+# Environment:
+#   STUB_SERVER_BIN      Path to stub server binary
+#   THUNDERSTORM_HOST    Real Thunderstorm host (optional, for live smoke tests)
+#   THUNDERSTORM_PORT    Real Thunderstorm port (default: 8081)
+#
+
+set -euo pipefail
+
+TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPTS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+
+STUB_PORT=19993
+STUB_LOG="/tmp/e2e-compliance.jsonl"
+STUB_PID=""
+
+TS_HOST="${THUNDERSTORM_HOST:-}"
+TS_PORT="${THUNDERSTORM_PORT:-8081}"
+COLLECTOR_FILTER_RAW="${THUNDERSTORM_TEST_COLLECTORS:-}"
+COLLECTOR_REQUIRE_MATCH="${THUNDERSTORM_TEST_REQUIRE_MATCH:-0}"
+COLLECTOR_REQUIRE_ALL="${THUNDERSTORM_TEST_REQUIRE_ALL:-0}"
+
+FIXTURES="/tmp/e2e-compliance-fixtures"
+PASS=0
+FAIL=0
+SKIP=0
+
+RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'; CYAN='\033[36m'; BOLD='\033[1m'; RESET='\033[0m'
+
+pass()    { PASS=$((PASS+1)); printf "  ${GREEN}PASS${RESET} %s\n" "$1"; }
+fail()    { FAIL=$((FAIL+1)); printf "  ${RED}FAIL${RESET} %s\n" "$1"; }
+skip()    { SKIP=$((SKIP+1)); printf "  ${YELLOW}SKIP${RESET} %s\n" "$1"; }
+section() { printf "\n${BOLD}${CYAN}── %s ──${RESET}\n" "$1"; }
+
+normalize_collector() {
+    case "$1" in
+        bash|ash|perl|python2|python3|ps3|ps2) printf '%s\n' "$1" ;;
+        python) printf 'python3\n' ;;
+        powershell|powershell3|pwsh|ps) printf 'ps3\n' ;;
+        powershell2|psv2) printf 'ps2\n' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+collector_enabled() {
+    local current wanted
+    current="$(normalize_collector "$1")"
+    [ -z "$COLLECTOR_FILTER_RAW" ] && return 0
+
+    for wanted in ${COLLECTOR_FILTER_RAW//,/ }; do
+        if [ "$(normalize_collector "$wanted")" = "$current" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_truthy() {
+    case "${1:-0}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+list_contains() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+detect_ash_shell() {
+    if command -v dash >/dev/null 2>&1; then
+        command -v dash
+        return 0
+    fi
+    if command -v busybox >/dev/null 2>&1; then
+        printf '%s sh\n' "$(command -v busybox)"
+        return 0
+    fi
+    return 1
+}
+
+ASH_SHELL="${ASH_SHELL:-$(detect_ash_shell 2>/dev/null || true)}"
+
+collector_script_path() {
+    case "$(normalize_collector "$1")" in
+        bash) printf '%s/thunderstorm-collector.sh\n' "$SCRIPTS_DIR" ;;
+        ash) printf '%s/thunderstorm-collector-ash.sh\n' "$SCRIPTS_DIR" ;;
+        python3) printf '%s/thunderstorm-collector.py\n' "$SCRIPTS_DIR" ;;
+        python2) printf '%s/thunderstorm-collector-py2.py\n' "$SCRIPTS_DIR" ;;
+        perl) printf '%s/thunderstorm-collector.pl\n' "$SCRIPTS_DIR" ;;
+        ps3) printf '%s/thunderstorm-collector.ps1\n' "$SCRIPTS_DIR" ;;
+        ps2) printf '%s/thunderstorm-collector-ps2.ps1\n' "$SCRIPTS_DIR" ;;
+        *) return 1 ;;
+    esac
+}
+
+collector_has_flags() {
+    local script_path="$1" flag
+    shift
+    for flag in "$@"; do
+        grep -q -- "$flag" "$script_path" || return 1
+    done
+}
+
+collector_supports_shared_harness() {
+    local current script_path
+    current="$(normalize_collector "$1")"
+    script_path="$(collector_script_path "$current")" || return 1
+
+    case "$current" in
+        bash|ash)
+            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            ;;
+        python3|python2)
+            collector_has_flags "$script_path" --server --port --dirs --max-age --source --dry-run
+            ;;
+        perl)
+            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            ;;
+        ps3|ps2)
+            collector_has_flags "$script_path" ThunderstormServer ThunderstormPort Folder Source MaxAge MaxSize AllExtensions
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+collector_runnable() {
+    local current script_path
+    current="$(normalize_collector "$1")"
+    script_path="$(collector_script_path "$current")" || return 1
+    [ -f "$script_path" ] || return 1
+    collector_supports_shared_harness "$current" || return 1
+
+    case "$current" in
+        bash) command -v bash >/dev/null 2>&1 ;;
+        ash) [ -n "$ASH_SHELL" ] ;;
+        python3) command -v python3 >/dev/null 2>&1 ;;
+        python2) command -v python2 >/dev/null 2>&1 ;;
+        perl) command -v perl >/dev/null 2>&1 && perl -MLWP::UserAgent -e1 2>/dev/null ;;
+        ps3|ps2) command -v pwsh >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_available_collectors() {
+    local available=("$@")
+    local wanted normalized missing=()
+
+    if is_truthy "$COLLECTOR_REQUIRE_MATCH" && [ "${#available[@]}" -eq 0 ]; then
+        echo "ERROR: no runnable collectors matched THUNDERSTORM_TEST_COLLECTORS='${COLLECTOR_FILTER_RAW}'" >&2
+        exit 1
+    fi
+
+    if is_truthy "$COLLECTOR_REQUIRE_ALL" && [ -n "$COLLECTOR_FILTER_RAW" ]; then
+        for wanted in ${COLLECTOR_FILTER_RAW//,/ }; do
+            normalized="$(normalize_collector "$wanted")"
+            if ! list_contains "$normalized" "${available[@]}"; then
+                missing+=("$normalized")
+            fi
+        done
+        if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: requested collectors are not runnable: ${missing[*]}" >&2
+            exit 1
+        fi
+    fi
+}
+
+# ── Stub Server ───────────────────────────────────────────────────────────────
+
+find_stub() {
+    if [ -n "${1:-}" ] && [ -x "$1" ]; then echo "$1"; return 0; fi
+    if [ -n "${STUB_SERVER_BIN:-}" ] && [ -x "$STUB_SERVER_BIN" ]; then echo "$STUB_SERVER_BIN"; return 0; fi
+    for p in \
+        "$SCRIPTS_DIR/../thunderstorm-stub-server/thunderstorm-stub-server" \
+        "$SCRIPTS_DIR/../thunderstorm-stub-server/thunderstorm-stub" \
+        "$SCRIPTS_DIR/../../thunderstorm-stub-server/thunderstorm-stub-server" \
+        "$SCRIPTS_DIR/../../thunderstorm-stub-server/thunderstorm-stub" \
+        "$HOME/.openclaw/workspace/projects/thunderstorm-stub-server/thunderstorm-stub-server" \
+        "$HOME/thunderstorm-stub-server/thunderstorm-stub-server"; do
+        if [ -x "$p" ]; then echo "$p"; return 0; fi
+    done
+    command -v thunderstorm-stub-server 2>/dev/null && return 0
+    return 1
+}
+
+kill_port_listener() {
+    command -v lsof >/dev/null 2>&1 || return 0
+    local pid
+    for pid in $(lsof -tiTCP:"$STUB_PORT" -sTCP:LISTEN 2>/dev/null || true); do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+}
+
+start_stub() {
+    kill_port_listener
+    sleep 1
+    rm -f "$STUB_LOG"
+    "$1" -port "$STUB_PORT" -log-file "$STUB_LOG" &
+    STUB_PID=$!
+    sleep 2
+    if ! curl -sf "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
+        echo "ERROR: Stub server failed to start on port $STUB_PORT"; exit 1
+    fi
+}
+
+stop_stub() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null && wait "$STUB_PID" 2>/dev/null || true; STUB_PID=""; }
+
+cleanup() { stop_stub; rm -rf "$FIXTURES"; }
+trap cleanup EXIT
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+create_fixtures() {
+    rm -rf "$FIXTURES"
+    mkdir -p "$FIXTURES/subdir with spaces" "$FIXTURES/nested/deep"
+    echo "hello world" > "$FIXTURES/normal.txt"
+    echo "spaced" > "$FIXTURES/file with spaces.txt"
+    echo "special" > "$FIXTURES/special-chars_v2.0(1).txt"
+    printf '\x00\x01\x02\x03DEADBEEF\x00\xff\xfe' > "$FIXTURES/binary.bin"
+    echo "nested space" > "$FIXTURES/subdir with spaces/inner.txt"
+    echo "deep" > "$FIXTURES/nested/deep/deep.txt"
+    touch "$FIXTURES/empty.txt"
+    echo "report" > "$FIXTURES/report-2024.txt"
+}
+
+# ── JSONL Helpers ─────────────────────────────────────────────────────────────
+
+jsonl_count() { wc -l < "$STUB_LOG" 2>/dev/null | tr -d ' '; }
+
+# Get upload entries (type="THOR finding") since line N
+jsonl_uploads_since() {
+    tail -n +"$1" "$STUB_LOG" 2>/dev/null | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        if d.get('type') == 'THOR finding': print(line)
+    except: pass
+"
+}
+
+# Get all entries since line N
+jsonl_since() { tail -n +"$1" "$STUB_LOG" 2>/dev/null; }
+
+# Extract a dotted field path from a JSON line
+jf() {
+    echo "$1" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+keys = '${2}'.split('.')
+val = data
+for k in keys:
+    val = val.get(k) if isinstance(val, dict) else None
+    if val is None: break
+if val is not None: print(val)
+" 2>/dev/null
+}
+
+# Find first upload entry matching a client_filename substring
+find_upload() {
+    echo "$1" | python3 -c "
+import sys, json
+target = '${2}'
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    d = json.loads(line)
+    cf = d.get('subject',{}).get('client_filename','')
+    if target in cf: print(line); break
+" 2>/dev/null
+}
+
+# Find marker entry by type
+find_marker() {
+    echo "$1" | python3 -c "
+import sys, json
+target = '${2}'
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    d = json.loads(line)
+    if d.get('type') == 'collection_marker' and d.get('marker') == target: print(line); break
+" 2>/dev/null
+}
+
+# ── Assertions ────────────────────────────────────────────────────────────────
+
+assert_eq()       { [ "$(jf "$1" "$2")" = "$3" ] && pass "$4" || fail "$4: expected='$3' got='$(jf "$1" "$2")'"; }
+assert_nonempty() { [ -n "$(jf "$1" "$2")" ] && pass "$3: $(jf "$1" "$2")" || fail "$3: empty"; }
+assert_md5()      { local exp; exp=$(md5sum "$2" | awk '{print $1}'); local got; got=$(jf "$1" "subject.hashes.md5"); [ "$exp" = "$got" ] && pass "$3: MD5 $exp" || fail "$3: MD5 expected=$exp got=$got"; }
+
+# ── Test Runner ───────────────────────────────────────────────────────────────
+
+run_tests() {
+    local name="$1"; shift
+    local source_val="E2E Test (v2.0)"
+    local start_line uploads all_entries entry
+
+    section "$name"
+
+    start_line=$(($(jsonl_count) + 1))
+    "$@" --source "$source_val" > /dev/null 2>&1 || true
+    sleep 2
+
+    uploads=$(jsonl_uploads_since "$start_line")
+    all_entries=$(jsonl_since "$start_line")
+
+    if [ -z "$uploads" ]; then
+        fail "$name: no uploads recorded (collector may have crashed)"
+        return
+    fi
+
+    # Source parameter arrives correctly
+    entry=$(echo "$uploads" | head -1)
+    assert_eq "$entry" "subject.source" "$source_val" "$name/source"
+
+    # Collection markers
+    local begin_m; begin_m=$(find_marker "$all_entries" "begin")
+    local end_m; end_m=$(find_marker "$all_entries" "end")
+    if [ -n "$begin_m" ]; then
+        pass "$name/marker-begin"
+        assert_nonempty "$begin_m" "collector" "$name/marker-collector"
+        assert_eq "$begin_m" "source" "$source_val" "$name/marker-source"
+    else
+        fail "$name/marker-begin: not found"
+    fi
+    [ -n "$end_m" ] && pass "$name/marker-end" || fail "$name/marker-end: not found"
+
+    # File content integrity — text
+    entry=$(find_upload "$uploads" "normal.txt")
+    if [ -n "$entry" ]; then
+        assert_md5 "$entry" "$FIXTURES/normal.txt" "$name/integrity-text"
+    else
+        fail "$name/integrity-text: not found"
+    fi
+
+    # File content integrity — binary with NUL bytes
+    entry=$(find_upload "$uploads" "binary.bin")
+    if [ -n "$entry" ]; then
+        assert_md5 "$entry" "$FIXTURES/binary.bin" "$name/integrity-binary"
+    else
+        fail "$name/integrity-binary: not found"
+    fi
+
+    # Filename with spaces
+    entry=$(find_upload "$uploads" "file with spaces")
+    if [ -n "$entry" ]; then
+        assert_md5 "$entry" "$FIXTURES/file with spaces.txt" "$name/spaces-in-name"
+    else
+        fail "$name/spaces-in-name: not found"
+    fi
+
+    # Special characters in filename
+    entry=$(find_upload "$uploads" "special-chars")
+    if [ -n "$entry" ]; then
+        assert_md5 "$entry" "$FIXTURES/special-chars_v2.0(1).txt" "$name/special-chars"
+    else
+        fail "$name/special-chars: not found"
+    fi
+
+    # Zero-byte file
+    entry=$(find_upload "$uploads" "empty.txt")
+    if [ -n "$entry" ]; then
+        local sz; sz=$(jf "$entry" "subject.size")
+        [ "$sz" = "0" ] && pass "$name/zero-byte" || fail "$name/zero-byte: size=$sz"
+    else
+        fail "$name/zero-byte: not found"
+    fi
+
+    # Nested directory
+    entry=$(find_upload "$uploads" "deep.txt")
+    [ -n "$entry" ] && pass "$name/nested-dir" || fail "$name/nested-dir: not found"
+
+    # Subdirectory with spaces
+    entry=$(find_upload "$uploads" "inner.txt")
+    [ -n "$entry" ] && pass "$name/subdir-spaces" || fail "$name/subdir-spaces: not found"
+
+    # Total count
+    local n; n=$(echo "$uploads" | wc -l | tr -d ' ')
+    [ "$n" -ge 8 ] && pass "$name/count: $n files" || fail "$name/count: $n files (expected ≥8)"
+}
+
+# PowerShell wrapper (uses -Source instead of --source)
+run_tests_ps() {
+    local name="$1" script="$2"
+    local source_val="E2E Test (v2.0)"
+    local start_line uploads entry
+
+    section "$name"
+
+    start_line=$(($(jsonl_count) + 1))
+    pwsh -NoProfile -ep bypass -c "& '$script' \
+        -ThunderstormServer '127.0.0.1' -ThunderstormPort $STUB_PORT \
+        -Folder '$FIXTURES' -MaxAge 365 -AllExtensions \
+        -Source '$source_val'" > /dev/null 2>&1 || true
+    sleep 2
+
+    uploads=$(jsonl_uploads_since "$start_line")
+    if [ -z "$uploads" ]; then
+        fail "$name: no uploads recorded (collector may have crashed)"
+        return
+    fi
+
+    entry=$(echo "$uploads" | head -1)
+    assert_eq "$entry" "subject.source" "$source_val" "$name/source"
+
+    entry=$(find_upload "$uploads" "normal.txt")
+    [ -n "$entry" ] && assert_md5 "$entry" "$FIXTURES/normal.txt" "$name/integrity-text" || fail "$name/integrity-text"
+
+    entry=$(find_upload "$uploads" "binary.bin")
+    [ -n "$entry" ] && assert_md5 "$entry" "$FIXTURES/binary.bin" "$name/integrity-binary" || fail "$name/integrity-binary"
+
+    entry=$(find_upload "$uploads" "file with spaces")
+    [ -n "$entry" ] && assert_md5 "$entry" "$FIXTURES/file with spaces.txt" "$name/spaces-in-name" || fail "$name/spaces-in-name"
+
+    entry=$(find_upload "$uploads" "empty.txt")
+    if [ -n "$entry" ]; then
+        local sz; sz=$(jf "$entry" "subject.size")
+        [ "$sz" = "0" ] && pass "$name/zero-byte" || fail "$name/zero-byte: size=$sz"
+    else fail "$name/zero-byte"; fi
+
+    local n; n=$(echo "$uploads" | wc -l | tr -d ' ')
+    [ "$n" -ge 5 ] && pass "$name/count: $n files" || fail "$name/count: $n files (expected ≥5)"
+}
+
+run_dry_run_test() {
+    local name="$1"; shift
+    local start_line n
+    start_line=$(($(jsonl_count) + 1))
+    "$@" --dry-run > /dev/null 2>&1 || true
+    sleep 1
+    n=$(jsonl_uploads_since "$start_line" | wc -l | tr -d ' ')
+    [ "$n" -eq 0 ] && pass "$name/dry-run" || fail "$name/dry-run: $n uploads (should be 0)"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+echo ""
+echo "============================================"
+echo " E2E Compliance Tests"
+echo " Stub: 127.0.0.1:$STUB_PORT"
+[ -n "$TS_HOST" ] && echo " Thunderstorm: $TS_HOST:$TS_PORT"
+echo "============================================"
+
+available_collectors=()
+collector_enabled bash && collector_runnable bash && available_collectors+=("bash")
+collector_enabled ash && collector_runnable ash && available_collectors+=("ash")
+collector_enabled python3 && collector_runnable python3 && available_collectors+=("python3")
+collector_enabled python2 && collector_runnable python2 && available_collectors+=("python2")
+collector_enabled perl && collector_runnable perl && available_collectors+=("perl")
+collector_enabled ps3 && collector_runnable ps3 && available_collectors+=("ps3")
+collector_enabled ps2 && collector_runnable ps2 && available_collectors+=("ps2")
+
+if [ "${#available_collectors[@]}" -gt 0 ]; then
+    validate_available_collectors "${available_collectors[@]}"
+else
+    validate_available_collectors
+fi
+
+if [ "${#available_collectors[@]}" -eq 0 ]; then
+    echo "Available collectors: none"
+    echo "No runnable collectors selected; nothing to do."
+    exit 0
+fi
+
+echo "Available collectors: ${available_collectors[*]}"
+
+STUB_BIN=$(find_stub "${1:-}" || true)
+if [ -z "$STUB_BIN" ]; then
+    echo "ERROR: Cannot find stub server binary"; exit 1
+fi
+echo "Stub: $STUB_BIN"
+start_stub "$STUB_BIN"
+create_fixtures
+
+# Bash
+if collector_enabled bash && collector_runnable bash; then
+    run_tests "bash" bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
+    run_dry_run_test "bash" bash "$SCRIPTS_DIR/thunderstorm-collector.sh" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
+fi
+
+# Ash / POSIX sh
+if collector_enabled ash && collector_runnable ash; then
+    # Intentionally rely on shell word splitting so "busybox sh" works.
+    # shellcheck disable=SC2086
+    run_tests "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
+    # shellcheck disable=SC2086
+    run_dry_run_test "ash (${ASH_SHELL##*/})" $ASH_SHELL "$SCRIPTS_DIR/thunderstorm-collector-ash.sh" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365 --quiet
+elif collector_enabled ash; then
+    section "ash"; skip "no dash or busybox available"
+fi
+
+# Python 3
+if collector_enabled python3 && collector_runnable python3; then
+    run_tests "python3" python3 "$SCRIPTS_DIR/thunderstorm-collector.py" \
+        -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
+    run_dry_run_test "python3" python3 "$SCRIPTS_DIR/thunderstorm-collector.py" \
+        -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
+elif collector_enabled python3; then
+    section "python3"; skip "not available"
+fi
+
+# Python 2
+if collector_enabled python2 && collector_runnable python2; then
+    run_tests "python2" python2 "$SCRIPTS_DIR/thunderstorm-collector-py2.py" \
+        -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
+    run_dry_run_test "python2" python2 "$SCRIPTS_DIR/thunderstorm-collector-py2.py" \
+        -s 127.0.0.1 -p "$STUB_PORT" -d "$FIXTURES" --max-age 365
+elif collector_enabled python2; then
+    section "python2"; skip "not available"
+fi
+
+# Perl
+if collector_enabled perl && collector_runnable perl; then
+    run_tests "perl" perl "$SCRIPTS_DIR/thunderstorm-collector.pl" \
+        -s 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365
+    run_dry_run_test "perl" perl "$SCRIPTS_DIR/thunderstorm-collector.pl" \
+        -s 127.0.0.1 --port "$STUB_PORT" --dir "$FIXTURES" --max-age 365
+elif collector_enabled perl; then
+    section "perl"; skip "not available or missing LWP::UserAgent"
+fi
+
+# PowerShell 3+
+if collector_enabled ps3 && collector_runnable ps3; then
+    run_tests_ps "powershell3+" "$SCRIPTS_DIR/thunderstorm-collector.ps1"
+elif collector_enabled ps3; then
+    section "powershell3+"; skip "pwsh not available"
+fi
+
+# PowerShell 2+
+if collector_enabled ps2 && collector_runnable ps2; then
+    run_tests_ps "powershell2+" "$SCRIPTS_DIR/thunderstorm-collector-ps2.ps1"
+elif collector_enabled ps2; then
+    section "powershell2+"; skip "pwsh not available"
+fi
+
+# Real Thunderstorm smoke tests
+if [ -n "$TS_HOST" ]; then
+    section "Real Thunderstorm ($TS_HOST:$TS_PORT)"
+    if curl -sf "http://$TS_HOST:$TS_PORT/api/status" >/dev/null 2>&1; then
+        pass "connectivity: server reachable"
+        TS_FIX="/tmp/e2e-ts-smoke"
+        rm -rf "$TS_FIX"; mkdir -p "$TS_FIX"
+        echo "live test" > "$TS_FIX/live.txt"
+        printf '\x00BINARY\x00' > "$TS_FIX/live.bin"
+
+        for info in \
+            "bash:bash $SCRIPTS_DIR/thunderstorm-collector.sh --server $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365 --quiet" \
+            "python3:python3 $SCRIPTS_DIR/thunderstorm-collector.py -s $TS_HOST -p $TS_PORT -d $TS_FIX --max-age 365" \
+            "perl:perl $SCRIPTS_DIR/thunderstorm-collector.pl -s $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365" \
+            "ps3:pwsh -NoProfile -ep bypass -c \"& '$SCRIPTS_DIR/thunderstorm-collector.ps1' -ThunderstormServer $TS_HOST -ThunderstormPort $TS_PORT -Folder '$TS_FIX' -MaxAge 365 -AllExtensions\""; do
+            n="${info%%:*}"; c="${info#*:}"
+            if eval "$c" >/dev/null 2>&1; then
+                pass "live/$n: upload succeeded"
+            else
+                fail "live/$n: upload failed"
+            fi
+        done
+        rm -rf "$TS_FIX"
+    else
+        fail "connectivity: unreachable at $TS_HOST:$TS_PORT"
+    fi
+fi
+
+echo ""
+echo "============================================"
+printf " Results: ${GREEN}%d passed${RESET}, ${RED}%d failed${RESET}, ${YELLOW}%d skipped${RESET}\n" "$PASS" "$FAIL" "$SKIP"
+echo "============================================"
+[ "$FAIL" -eq 0 ] && exit 0 || exit 1
