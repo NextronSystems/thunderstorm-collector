@@ -3,3 +3,5 @@ settings.json
 *.log
 *.lic
 go/dist/
+.DS_Store
+CLAUDE.md
