@@ -7,6 +7,20 @@
 # - work on old and new Bash versions (Bash 3+)
 # - handle missing dependencies with fallbacks
 # - degrade gracefully on partial failures
+#
+# Exit codes:
+# 0        success — everything discovered was collected
+# 1        runtime error — could not run (server unreachable, temp-file creation failed)
+# 2        usage/config error — bad arguments or invalid configuration
+# 3        missing dependency — neither curl nor wget available; or no mkdir / find
+# 4        partial failure — ran, but something could not be collected: an upload failed, a
+# discovered file was unreadable, a directory could not be read, or an explicitly
+# named target was unusable (rsync's exit 23, "partial transfer due to error")
+# 5        partial: files VANISHED — every loss was a file that disappeared or changed type
+# between discovery and collection, i.e. ordinary churn on a live host and nothing
+# the collector or the operator did wrong (rsync's exit 24, "vanished source
+# files"). 4 wins when both happened, as rsync lets 23 override 24.
+# 130/143  interrupted by SIGINT / SIGTERM (128 + signal number)
 
 VERSION="0.5.0"
 
@@ -14,6 +28,10 @@ VERSION="0.5.0"
 
 LOGFILE="./thunderstorm.log"
 LOG_TO_FILE=1
+# The file sink stays closed until the command line is parsed: a usage error thrown mid-parse
+# (e.g. '--bogus --no-log-file') used to create./thunderstorm.log in the cwd although the
+# operator disabled or redirected the log later on the same command line.
+LOG_FILE_READY=0
 LOG_TO_SYSLOG=0
 LOG_TO_CMDLINE=1
 SYSLOG_FACILITY="user"
@@ -32,25 +50,78 @@ DRY_RUN=0
 RETRIES=3
 
 UPLOAD_TOOL=""
-declare -a TMP_FILES_ARR=()
+# every temp file the collector makes lives in ONE private work directory (created on
+# demand, mode 700), which is excluded from scanning by exact path — the collector must
+# never collect its own working files. Cleanup is a single rm -rf of this directory.
+TS_WORK_DIR=""
 declare -a CURL_EXTRA_OPTS=()
 declare -a WGET_EXTRA_OPTS=()
 
 # Keep defaults simple and stable for Bash 3+.
-SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr')
+# /dev/shm and /run are tmpfs: memory-backed staging areas that Linux malware routinely writes
+# to and that leave no trace on disk, so they are scanned by default even though /dev and /run
+# are otherwise excluded. Do not remove them as "virtual" paths — the sibling Go
+# collector covers them too (it skips proc/sysfs/network filesystems, not tmpfs). Both are
+# absent on macOS/BSD, where a missing default is skipped quietly.
+SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr' '/dev/shm' '/run')
+# 1 once the operator supplies dirs via --dir/positional (defaults replaced). Lets us treat
+# an unreadable explicitly-named dir as a collection failure, but an unreadable built-in
+# default dir (e.g. /root on a non-root run) as best-effort — preserving graceful degradation.
+SCAN_FOLDERS_FROM_USER=0
+# Follow symbolic links when scanning. Default off: a symlinked scan root is absolutized
+# but not dereferenced. --follow-symlinks resolves symlinks to the real target instead.
+FOLLOW_SYMLINKS=0
 
 FILES_SCANNED=0
 FILES_SUBMITTED=0
-FILES_SKIPPED=0
+FILES_SKIPPED=0        # reserved for policy skips; size/age are applied at discovery, so 0
+# A discovered file that was not collected is FAILED, whatever the reason — the convention of
+# rsync ("partial transfer", code 23; "vanished", code 24) and of tar/find on unreadable input.
+# The breakdown names the reason. Identity, checked at reconciliation:
+# FILES_FAILED = FILES_UNREADABLE + FILES_VANISHED + FILES_UPLOAD_FAILED   (link uploads included)
 FILES_FAILED=0
+FILES_UNREADABLE=0     # discovered, then found unreadable ([ -r ] false; regular files and link targets)
+FIRST_UNREADABLE=""    # first such path, named once in the end-of-run error
+FILES_VANISHED=0       # discovered, then gone (or of another type) before it could be read
+FILES_UPLOAD_FAILED=0  # readable, but every upload attempt failed (regular files and link targets)
+# Directories find could not read. A directory is not an artifact: what it held is unknown, so
+# the files missed cannot be counted — only the directories can (one find diagnostic each on
+# GNU, BSD and busybox). Any such directory makes the run partial (exit 4).
+UNREADABLE_DIRS=0
 TOTAL_FILES=0
+# Explicitly named scan targets that could not be scanned at all (missing, not a
+# directory, unreadable, on a refused filesystem, or whose enumeration could not be completed).
+# Reported as unusable_dirs=; any makes the run partial (exit 4). Skipped built-in defaults are
+# best-effort and are not counted. Each refused operand counts once, however it was spelled.
+UNUSABLE_DIRS=0
+# Symlink accounting: every enumerated symlink ends up collected (target uploaded),
+# skipped (exactly one breakdown counter below names the reason), or failed (upload error or
+# unreadable target — also counted in FILES_FAILED, with its FILES_* reason). Identities,
+# checked at reconciliation:
+# LINKS_SEEN    = LINKS_COLLECTED + LINKS_SKIPPED + LINKS_FAILED
+# LINKS_SKIPPED = not_followed + dir_surfaced + fs_refused + self_excluded + in_scope
+# + dup + filtered + dangling + unresolvable
+LINKS_SEEN=0
+LINKS_COLLECTED=0
+LINKS_SKIPPED=0
+LINKS_FAILED=0
+LINKS_NOT_FOLLOWED=0   # default mode: link seen, following is off
+LINKS_DIR_SURFACED=0   # directory link: listed, never traversed (opt in with --dir)
+LINKS_FS_REFUSED=0     # target on a network or kernel pseudo-filesystem (refused before any stat)
+LINKS_SELF_EXCLUDED=0  # target is the collector's own work directory or log file
+LINKS_IN_SCOPE=0       # target inside a scan root: the walk already decided about it
+LINKS_DUP=0            # another link already delivered this resolved target
+LINKS_FILTERED=0       # target outside the size/age policy
+LINKS_DANGLING=0       # dangling, or target is not a regular file (FIFO, device, socket)
+LINKS_UNRESOLVABLE=0   # readlink unavailable, chain too long, or broken mid-chain
+TOTAL_LINKS=0          # symlinks among the discovered entries (for the discovery summary)
 SCAN_ID=""
 
 PROGRESS_MODE=""  # auto (empty), "on", or "off"
 SHOW_PROGRESS=0
 
 SCRIPT_NAME="${0##*/}"
-START_TS="$(date +%s 2>/dev/null || echo 0)"
+START_TS="$(date +%s 2>/dev/null || printf '%s\n' 0)"
 SOURCE_NAME=""
 
 # Filesystem exclusions -------------------------------------------------------
@@ -66,7 +137,15 @@ EXCLUDE_PATHS=(
 
 # Network and special filesystem types — mount points with these types are
 # discovered from /proc/mounts and excluded automatically.
-NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs"
+# A "network filesystem" is another machine's storage mounted into this host's tree (NFS and
+# SMB shares, SSHFS, cluster and S3/cloud FUSE mounts). Walking it would submit that machine's
+# files as this host's evidence — again on every host mounting the same share — and a dead
+# share or autofs trigger hangs the collector unkillably. Every comparable collector excludes
+# them by default (the Go sibling unless --all-filesystems, UAC's exclude_file_system, GRR's
+# physical-devices-only default). Names are matched exactly: there is deliberately no fuse.*
+# prefix rule, because local FUSE filesystems (gocryptfs/encfs decrypted folders, bindfs,
+# mergerfs, ntfs-3g as fuseblk) hold user data that must stay collectable.
+NETWORK_FS_TYPES="nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp webdav davfs2 fuse.rclone fuse.s3fs 9p ceph fuse.ceph afs glusterfs fuse.glusterfs lustre ocfs2 gfs2 gpfs fuse.juicefs fuse.goofys fuse.gcsfuse fuse.blobfuse2 fuse.gvfsd-fuse"
 SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts cgroup cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue autofs fusectl rpc_pipefs nsfs configfs binfmt_misc selinuxfs efivarfs ramfs"
 
 # Cloud storage folder names — if any path segment matches (case-insensitive),
@@ -77,48 +156,188 @@ CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive iCloudDrive Nextcloud own
 CLOUD_DIR_NAMES_SPACED="Google Drive|iCloud Drive"
 CLOUD_DIR_PATTERNS="OneDrive -|OneDrive-|Nextcloud-"
 
-# get_excluded_mounts: parse /proc/mounts and return mount points for
-# network and special filesystem types (one per line).
-get_excluded_mounts() {
-    [ -r /proc/mounts ] || return 0
-    while IFS=' ' read -r _dev _mp _fstype _rest; do
-        case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
-            *" $_fstype "*) printf '%s\n' "$_mp" ;;
+# Mount table snapshot, taken once per run. The symlink gate consults it for every
+# hop of every link, so re-reading and re-parsing the table per lookup was the dominant
+# per-link cost. Two parallel indexed arrays keep this Bash 3.2-safe (no associative arrays).
+declare -a MOUNT_POINTS=()
+declare -a MOUNT_TYPES=()
+MOUNT_TABLE_LOADED=0
+
+# load_mount_table: fill MOUNT_POINTS/MOUNT_TYPES once. Linux reads /proc/mounts (mount
+# points appear with '\040' for spaces — decoded). Where that cannot be read (macOS, the BSDs,
+# a chroot or a container with a masked /proc) `mount` is parsed instead: BSD prints
+# "dev on /point (type, opts)", util-linux and busybox print "dev on /point type ext4 (opts)"
+# — without this the whole filesystem-class gate would be a silent no-op on exactly the
+# platforms where autofs triggers and dead NFS mounts are most common. (util-linux mount itself
+# needs /proc or a real /etc/mtab to print anything; an empty result lands on the "mount table
+# unavailable" warning in main.) Parsing is line-oriented and quoted throughout, so a mount
+# point containing spaces stays intact.
+load_mount_table() {
+    [ "$MOUNT_TABLE_LOADED" -eq 1 ] && return 0
+    MOUNT_TABLE_LOADED=1
+    local _dev _mp _fstype _rest _line _linux
+    if [ -r /proc/mounts ]; then
+        while IFS=' ' read -r _dev _mp _fstype _rest; do
+            [ -n "$_mp" ] || continue
+            # /proc/mounts escapes space, tab, newline and backslash as \040 \011 \012 \134;
+            # decoding only the space left a mount point spelled with any of the others
+            # unmatched by the string gate.
+            _mp="${_mp//\\040/ }"
+            _mp="${_mp//\\011/$'\t'}"
+            _mp="${_mp//\\012/$'\n'}"
+            _mp="${_mp//\\134/\\}"
+            MOUNT_POINTS+=("$_mp")
+            MOUNT_TYPES+=("$_fstype")
+        done < /proc/mounts
+        return 0
+    fi
+    command -v mount >/dev/null 2>&1 || return 0
+    while IFS= read -r _line; do
+        # Both shapes carry "dev on /point"; they differ in what follows. On util-linux and
+        # busybox the options are ONE space-free word in parentheses, so the LAST word of the
+        # line starts with "(":      dev on /point type fstype (rw,relatime)
+        # BSD/macOS puts the type first inside a comma+space list, so the last word does not:
+        # dev on /point (fstype, local, journaled)
+        # The shape decides, not the word "type" — a BSD volume named "my type disk" must stay
+        # intact — and the mount point is cut at the LAST " type " / " (" so a point containing
+        # those characters survives.
+        case "$_line" in
+            *" on "*" ("*) ;;
+            *) continue ;;
         esac
-    done < /proc/mounts
+        _linux=0
+        case "$_line" in
+            *" on "*" type "*" ("*) case "${_line##* }" in "("*) _linux=1 ;; esac ;;
+        esac
+        _mp="${_line#* on }"
+        if [ "$_linux" -eq 1 ]; then
+            _mp="${_mp% type *}"
+            _rest="${_line##* type }"
+            _fstype="${_rest%% (*}"
+        else
+            _mp="${_mp% (*}"
+            _rest="${_line##* (}"
+            _fstype="${_rest%%,*}"
+            _fstype="${_fstype%%)*}"
+        fi
+        _fstype="${_fstype# }"
+        [ -n "$_mp" ] && [ -n "$_fstype" ] || continue
+        MOUNT_POINTS+=("$_mp")
+        MOUNT_TYPES+=("$_fstype")
+    done <<< "$(mount 2>/dev/null)"
 }
 
-# is_cloud_path: check if a path contains a known cloud storage folder name.
-# Returns 0 (true) if it matches, 1 (false) otherwise.
-is_cloud_path() {
-    local path_lower
-    path_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    local name name_lower
-    for name in $CLOUD_DIR_NAMES; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-        case "$path_lower" in
-            *"/$name_lower"/*|*"/$name_lower") return 0 ;;
+# excluded_mounts_lookup: mount points whose filesystem type is a network or kernel
+# pseudo-filesystem, from the one-time snapshot, in the array EXCLUDED_MOUNTS_OUT — an array,
+# not stdout, so a mount point containing a newline stays ONE path (and no fork). The collector
+# consumes the array; get_excluded_mounts prints the same list one per line for
+# scripts/tests/verify_portable.sh, which sources this file.
+declare -a EXCLUDED_MOUNTS_OUT=()
+excluded_mounts_lookup() {
+    EXCLUDED_MOUNTS_OUT=()
+    load_mount_table
+    local _i=0
+    while [ "$_i" -lt "${#MOUNT_POINTS[@]}" ]; do
+        case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
+            *" ${MOUNT_TYPES[$_i]} "*) EXCLUDED_MOUNTS_OUT+=("${MOUNT_POINTS[$_i]}") ;;
         esac
+        _i=$((_i + 1))
     done
-    local old_ifs
-    old_ifs="$IFS"
-    IFS='|'
-    for name in $CLOUD_DIR_NAMES_SPACED; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-        case "$path_lower" in
-            *"/$name_lower"/*|*"/$name_lower") IFS="$old_ifs"; return 0 ;;
+}
+# shellcheck disable=SC2317  # not called by the collector itself; kept for verify_portable.sh
+get_excluded_mounts() {
+    excluded_mounts_lookup
+    local _m
+    for _m in "${EXCLUDED_MOUNTS_OUT[@]+"${EXCLUDED_MOUNTS_OUT[@]}"}"; do printf '%s\n' "$_m"; done
+}
+
+# fs_type_lookup: filesystem type of the mount containing $1, by longest-prefix match over
+# the snapshot. $1 is used as a STRING only — the path itself is never touched, which is what
+# makes it safe to call before a target has been stat'ed. Result in FS_TYPE_OUT (no subshell,
+# so the per-symlink gate costs no fork and no file read). Empty + return 1 when the
+# mount table is unavailable or nothing matches — callers then keep path-based behavior.
+# fs_type_of is the same lookup printed to stdout.
+FS_TYPE_OUT=""
+fs_type_lookup() {
+    FS_TYPE_OUT=""
+    load_mount_table
+    local _path="$1" _best="" _best_type="" _mp _i=0
+    while [ "$_i" -lt "${#MOUNT_POINTS[@]}" ]; do
+        _mp="${MOUNT_POINTS[$_i]}"
+        case "$_path" in
+            "$_mp"|"$_mp"/*) : ;;
+            *) [ "$_mp" = "/" ] || { _i=$((_i + 1)); continue; } ;;
         esac
+        # Longest mount point wins; on equal length the later entry (mounted over) wins.
+        if [ "${#_mp}" -ge "${#_best}" ]; then
+            _best="$_mp"
+            _best_type="${MOUNT_TYPES[$_i]}"
+        fi
+        _i=$((_i + 1))
     done
-    for name in $CLOUD_DIR_PATTERNS; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-        case "$path_lower" in
-            *"/$name_lower"*) IFS="$old_ifs"; return 0 ;;
-        esac
+    [ -n "$_best_type" ] || return 1
+    FS_TYPE_OUT="$_best_type"
+}
+# shellcheck disable=SC2317  # not called by the collector itself; kept for verify_portable.sh
+fs_type_of() {
+    fs_type_lookup "$1" || return 1
+    printf '%s' "$FS_TYPE_OUT"
+}
+
+# fs_class_of_path: name the refused filesystem class for path $1 ("network filesystem" /
+# "pseudo-filesystem") in FS_CLASS_OUT and return 0; return 1 when the path may proceed.
+# String-only, like fs_type_lookup — safe before any access.
+FS_CLASS_OUT=""
+FS_CLASS_TYPE_OUT=""
+fs_class_of_path() {
+    FS_CLASS_OUT=""
+    FS_CLASS_TYPE_OUT=""
+    fs_type_lookup "$1" || return 1
+    case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
+        *" $FS_TYPE_OUT "*) ;;
+        *) return 1 ;;
+    esac
+    FS_CLASS_TYPE_OUT="$FS_TYPE_OUT"
+    case " $NETWORK_FS_TYPES " in
+        *" $FS_TYPE_OUT "*) FS_CLASS_OUT="network filesystem" ;;
+        *)                  FS_CLASS_OUT="pseudo-filesystem" ;;
+    esac
+    return 0
+}
+
+# cloud_dir_evidence: decide whether a directory is REAL, actively-synced cloud storage.
+# A name like "Dropbox" is only a hint — a user (or an attacker hiding files) can name any
+# folder that way — so exclusion requires positive evidence: marker files that only the cloud
+# client itself creates inside its sync root, or an OS-mandated cloud location. Cloud/network
+# FUSE mounts are covered separately by fstype (excluded_mounts_lookup).
+# Outputs the evidence label on stdout and returns 0 if proven; returns 1 when there is none.
+cloud_dir_evidence() {
+    local _d="$1" _f
+    if [ -e "$_d/.dropbox.cache" ] || [ -e "$_d/.dropbox" ]; then
+        printf 'dropbox markers'
+        return 0
+    fi
+    if [ -d "$_d/.stfolder" ]; then
+        printf 'syncthing marker'
+        return 0
+    fi
+    if [ -d "$_d/.debris" ]; then
+        printf 'megasync marker'
+        return 0
+    fi
+    # Nextcloud/ownCloud desktop clients keep a sync database in the sync root. The glob is
+    # guarded: with no match Bash keeps the literal pattern, which the -e test rejects.
+    for _f in "$_d"/.sync_*.db; do
+        if [ -e "$_f" ]; then
+            printf 'nextcloud/owncloud sync database'
+            return 0
+        fi
     done
-    IFS="$old_ifs"
-    # macOS: ~/Library/CloudStorage
-    case "$path_lower" in
-        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+    case "$_d" in
+        */Library/CloudStorage/*|*/Library/CloudStorage|*"/Library/Mobile Documents/"*|*"/Library/Mobile Documents")
+            printf 'OS cloud location'
+            return 0
+            ;;
     esac
     return 1
 }
@@ -130,13 +349,9 @@ timestamp() {
 }
 
 cleanup_tmp_files() {
-    local f
-    for f in "${TMP_FILES_ARR[@]}"; do
-        [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
-    done
-    # Remove fallback temp directory if it exists (created by mktemp_portable)
-    local _fallback_dir="${TMPDIR:-/tmp}/thunderstorm.$$"
-    [ -d "$_fallback_dir" ] && rm -rf "$_fallback_dir"
+    if [ -n "$TS_WORK_DIR" ] && [ -d "$TS_WORK_DIR" ]; then
+        rm -rf -- "$TS_WORK_DIR" 2>/dev/null || :
+    fi
 }
 
 INTERRUPTED=0
@@ -145,12 +360,12 @@ send_interrupted_marker() {
     if [ "$DRY_RUN" -eq 0 ] && [ -n "$THUNDERSTORM_SERVER" ]; then
         local _elapsed=0
         local _now
-        _now="$(date +%s 2>/dev/null || echo "$START_TS")"
+        _now="$(date +%s 2>/dev/null || printf '%s\n' "$START_TS")"
         if [ "$START_TS" -gt 0 ] 2>/dev/null; then
             _elapsed=$(( _now - START_TS ))
             [ "$_elapsed" -lt 0 ] && _elapsed=0
         fi
-        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${_elapsed}}"
+        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${_elapsed}}"
         local _scheme="http"
         [ "$USE_SSL" -eq 1 ] && _scheme="https"
         local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
@@ -166,8 +381,8 @@ on_signal() {
     log_msg warn "Received signal, sending interrupted marker and exiting..."
     send_interrupted_marker
     cleanup_tmp_files
-    # Exit 1 for partial failure (interrupted collection)
-    exit 1
+    # Exit 128+signum (130 SIGINT / 143 SIGTERM); the trap passes the code.
+    exit "${1:-130}"
 }
 
 on_exit() {
@@ -175,7 +390,8 @@ on_exit() {
 }
 
 trap on_exit EXIT
-trap on_signal INT TERM
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 log_msg() {
     local level="$1"
@@ -187,12 +403,14 @@ log_msg() {
 
     [ "$level" = "debug" ] && [ "$DEBUG" -ne 1 ] && return 0
 
-    ts="$(timestamp)"
     clean="$message"
     clean="${clean//$'\r'/ }"
     clean="${clean//$'\n'/ }"
 
-    if [ "$LOG_TO_FILE" -eq 1 ]; then
+    if [ "$LOG_TO_FILE" -eq 1 ] && [ "$LOG_FILE_READY" -eq 1 ]; then
+        # the timestamp (a `date` fork) is only needed by the file sink — computing it
+        # unconditionally cost one fork per logged message even with all sinks disabled.
+        ts="$(timestamp)"
         if ! printf "%s %s %s\n" "$ts" "$level" "$clean" >> "$LOGFILE" 2>/dev/null; then
             LOG_TO_FILE=0
             printf "%s warn Could not write to log file '%s'; disabling file logging\n" "$ts" "$LOGFILE" >&2
@@ -226,6 +444,10 @@ log_msg() {
 }
 
 die() {
+    # A usage error thrown while options are still being parsed cannot reach the log file yet
+    # (LOG_FILE_READY); make sure it reaches the terminal even under --quiet rather than
+    # exiting 2 without a word. die exits, so forcing the sink here changes nothing else.
+    [ "$LOG_FILE_READY" -eq 1 ] || LOG_TO_CMDLINE=1
     log_msg error "$*"
     exit 2
 }
@@ -252,7 +474,7 @@ Usage:
 Options:
   -s, --server <host>        Thunderstorm server hostname or IP
   -p, --port <port>          Thunderstorm port (default: 8080)
-  -d, --dir <path>           Directory to scan (repeatable)
+  -d, --dir <path>           Directory to scan (repeatable; replaces the defaults)
   --max-age <days>           Max file age in days (default: 14)
   --max-size-kb <kb>         Max file size in KB (default: 2000)
   --source <name>            Source identifier (default: hostname)
@@ -261,7 +483,8 @@ Options:
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
   --sync                     Use /api/check (default: /api/checkAsync)
   --retries <num>            Retry attempts per file (default: 3)
-            --dry-run                  Do not upload or contact the server; only show what would be submitted
+  --follow-symlinks          Collect the files symlinks point to (default: off)
+  --dry-run                  Show what would be submitted; contact no server
   --progress                 Force progress reporting
   --no-progress              Disable progress reporting
   --debug                    Enable debug log messages
@@ -271,9 +494,30 @@ Options:
   --quiet                    Disable command-line logging
   -h, --help                 Show this help text
 
+Notes:
+  Long options also accept the --option=value form. Short options take the next argument:
+  they do not bundle (-dk) and do not accept -d=value. For a directory whose name starts
+  with '-', use './-name', an absolute path, or end the options with '--'.
+  Bare arguments are scan directories too. The first directory you supply
+  replaces the built-in defaults: /root /tmp /home /var /usr /dev/shm /run.
+  A directory you name that cannot be scanned is an error (exit 4);
+  an unavailable built-in default is only a warning.
+  Directories named twice, or inside one another, are scanned once.
+  Symbolic links are never followed by default. With --follow-symlinks a link to a FILE is
+  collected under its real path; a link to a DIRECTORY is listed and scanned only if you
+  name it with --dir.
+  Never collected: kernel pseudo-filesystems, network filesystems unless you name them, and
+  cloud-sync folders excluded on positive evidence (their client's marker files).
+  scripts/bash/README.md documents the exclusion, accounting and exit-code rules in full.
+
+Exit codes:
+  0 success · 1 runtime error · 2 usage/config · 3 missing dependency · 4 partial failure
+  5 partial: files vanished mid-run (host churn only) · 130/143 interrupted
+
 Examples:
   bash thunderstorm-collector.sh --server thunderstorm.local
   bash thunderstorm-collector.sh --server 10.0.0.5 --ssl --dir "/tmp/My Files" --dry-run
+  bash thunderstorm-collector.sh --server=thunderstorm.local --dir=/evidence --max-age=30
 EOF
 }
 
@@ -284,9 +528,18 @@ is_integer() {
     esac
 }
 
-is_positive_integer() {
-    is_integer "$1" || return 1
-    [ "$1" -gt 0 ] 2>/dev/null || return 1
+# in_range -- true when the unsigned decimal $1 (already checked with is_integer) is <= $2.
+# Leading zeros are dropped and the digit COUNT is compared before the values are, so a
+# 30-digit input never reaches Bash arithmetic: `[ n -le m ]` on an oversized number prints a
+# raw shell diagnostic, and `$(( kb * 1024))` wraps silently — either way the user would have
+# seen a find failure ("could not be read", zero files, exit 0) instead of a usage error.
+in_range() {
+    local _v="$1"
+    _v="${_v#"${_v%%[!0]*}"}"
+    [ -n "$_v" ] || _v=0
+    [ "${#_v}" -lt "${#2}" ] && return 0
+    [ "${#_v}" -gt "${#2}" ] && return 1
+    [ "$_v" -le "$2" ]
 }
 
 detect_source_name() {
@@ -335,9 +588,16 @@ urlencode() {
 
 sanitize_filename_for_multipart() {
     local input="$1"
-    # Keep multipart header/form attribute values simple and safe.
+    # This value is attacker-influenced (it is the collected file's own path) and is spliced
+    # into a curl -F value and a Content-Disposition header, so every byte with meaning in
+    # either grammar must go. The comma is not cosmetic: curl splits an -F value on ',' into
+    # its documented MULTI-FILE list — even inside a filename= sub-parameter — so a path
+    # containing ",/etc/shadow" made curl open and upload that second file, past every policy
+    # gate, with the run still reporting success. ';' ends a sub-parameter, '"' and '\' break
+    # the quoted header, CR/LF inject header lines.
     input="${input//\"/_}"
     input="${input//;/_}"
+    input="${input//,/_}"
     input="${input//\\/_}"
     input="${input//$'\r'/_}"
     input="${input//$'\n'/_}"
@@ -345,36 +605,288 @@ sanitize_filename_for_multipart() {
     printf "%s" "$input"
 }
 
-file_size_kb() {
-    # Use wc for portability across GNU/BSD and older systems.
-    local bytes
-    bytes="$(wc -c < "$1" 2>/dev/null)"
-    # Intentionally split on whitespace to normalize wc output ("   123\n" -> "123").
-    # shellcheck disable=SC2086
-    set -- $bytes
-    bytes="$1"
-    case "$bytes" in
-        ''|*[!0-9]*) echo -1; return 1 ;;
-    esac
-    echo $(( (bytes + 1023) / 1024 ))
+# ensure_work_dir -- create the private work directory on first use (atomic mkdir under
+# umask 077 => mode 700; safe against symlink swaps in a shared /tmp). If a directory with
+# our name already exists (a crashed run's leftover with a recycled PID), reuse it only
+# when we own it and can write to it — never a directory someone else pre-created.
+ensure_work_dir() {
+    [ -n "$TS_WORK_DIR" ] && return 0
+    local _dir="${TMPDIR:-/tmp}/thunderstorm.work.$$"
+    # A TMPDIR spelled with a leading dash would make every scratch path an option to cat/grep/
+    # mktemp — in a real run upload_with_curl then reads no HTTP status and counts the upload as
+    # submitted whatever the server answered. './' keeps it a plain operand (same idiom as
+    # resolve_dir for the name '-').
+    case "$_dir" in -*) _dir="./$_dir" ;; esac
+    if ! ( umask 077 && mkdir -- "$_dir" ) 2>/dev/null; then
+        if [ ! -d "$_dir" ] || [ ! -O "$_dir" ] || [ ! -w "$_dir" ]; then
+            return 1
+        fi
+    fi
+    TS_WORK_DIR="$_dir"
 }
 
+# mktemp_portable -- create a temp file inside the private work directory and print its
+# path. mktemp(1) flags differ across GNU/BSD, so a template is used; when mktemp is
+# missing entirely, a predictable name is safe because the directory itself is mode 700.
 mktemp_portable() {
+    ensure_work_dir || return 1
     local t
-    t="$(mktemp "${TMPDIR:-/tmp}/thunderstorm.XXXXXX" 2>/dev/null)"
+    t="$(mktemp -- "$TS_WORK_DIR/f.XXXXXX" 2>/dev/null)"
     if [ -n "$t" ] && [ -f "$t" ]; then
-        echo "$t"
+        printf '%s\n' "$t"
         return 0
     fi
-    # Fallback: create a private directory first (mkdir is atomic), then a file inside it.
-    # This avoids the TOCTOU race of creating a predictable file in a shared /tmp.
-    local _dir="${TMPDIR:-/tmp}/thunderstorm.$$"
-    if [ ! -d "$_dir" ]; then
-        ( umask 077 && mkdir "$_dir" ) 2>/dev/null || return 1
-    fi
-    t="$_dir/${RANDOM:-0}.$(date +%N 2>/dev/null || echo 0)"
+    t="$TS_WORK_DIR/f.${RANDOM:-0}.$(date +%N 2>/dev/null || printf '%s\n' 0)"
     : > "$t" 2>/dev/null || return 1
-    echo "$t"
+    printf '%s\n' "$t"
+}
+
+# scratch_file -- print the path of the per-run scratch file named $1 inside the private work
+# directory, truncated. Uploads used to take three fresh temp files per attempt (four with
+# wget, one of them a complete multipart copy of the file being sent) and released none of them
+# until exit: a 16k-file collection left ~50k files behind in the work directory, and on the
+# wget path the directory grew by the size of the entire collection — on the host being
+# triaged. Fixed names bound that to a handful of files and the largest single upload, and save
+# three mktemp forks per file. The directory is mode 700, so the names carry no risk.
+scratch_file() {
+    ensure_work_dir || return 1
+    : > "$TS_WORK_DIR/$1" 2>/dev/null || return 1
+    printf '%s\n' "$TS_WORK_DIR/$1"
+}
+
+# resolve_dir -- canonicalize an existing, readable directory ($2) into RESOLVE_DIR_OUT.
+# $1 is the cd mode: -L keeps symlinks (default), -P resolves them (--follow-symlinks).
+# cd runs in a subshell so the caller's cwd is untouched; 'unset CDPATH' and discarding cd's
+# stdout keep a CDPATH echo out of the capture; 'cd --' makes a leading-dash name safe, except
+# the exact name '-', which cd reads as "previous directory" and is therefore spelled './-'.
+# The 'printf x' sentinel preserves a name ending in a newline, and the result travels in a
+# variable rather than on stdout so no caller can strip it again.
+# A leading '//' is collapsed to '/': POSIX leaves it implementation-defined and Bash keeps it,
+# but find prints the root as given, so a '//'-spelled root would defeat every absolute -path
+# prune and the mount lookup.
+# Returns non-zero with RESOLVE_DIR_OUT empty when cd or pwd fails, so the caller can keep the
+# original path instead of dropping the directory.
+resolve_dir() {
+    local _mode="$1" _dir="$2" _out
+    RESOLVE_DIR_OUT=""
+    case "$_dir" in -) _dir="./-" ;; esac
+    _out="$( unset CDPATH; cd "$_mode" -- "$_dir" >/dev/null 2>&1 && pwd && printf x )" || return 1
+    _out="${_out%x}"
+    _out="${_out%$'\n'}"
+    case "$_out" in //*) _out="/${_out#"${_out%%[!/]*}"}" ;; esac
+    [ -n "$_out" ] || return 1
+    RESOLVE_DIR_OUT="$_out"
+}
+
+# walk_reaches -- true when a walk rooted at the scanned directory $1 has reached the directory
+# $2 (which lies under $1): no exclusion anchor among $3.. covers $2 without also covering $1
+# (an anchor equal to the root is dropped), no proven cloud folder sits between them,
+# and $2 is not under a macOS CloudStorage location the root itself is outside of. Used by the
+# overlap rule: a child root the parent's walk already covered would be collected twice; a
+# child the parent's walk pruned is the explicit-into-excluded case and must be scanned.
+walk_reaches() {
+    local _parent="$1" _child="$2" _a _p
+    shift 2
+    for _a in "$@"; do
+        if path_covers "$_a" "$_child" && ! path_covers "$_a" "$_parent"; then
+            return 1
+        fi
+    done
+    case "$_parent" in
+        */Library/CloudStorage|*/Library/CloudStorage/*) ;;
+        *) case "$_child" in */Library/CloudStorage|*/Library/CloudStorage/*) return 1 ;; esac ;;
+    esac
+    _p="$_child"
+    while [ -n "$_p" ] && [ "$_p" != "$_parent" ]; do
+        cloud_dir_evidence "$_p" >/dev/null && return 1
+        _p="${_p%/*}"
+        [ -z "$_p" ] && _p="/"
+    done
+    return 0
+}
+
+# resolve_link_chain -- follow the symlink at $1 to its final path without letting a stat touch a
+# filesystem the collector refuses. Every hop BEYOND the link itself is passed through the
+# string-only filesystem-class gate before it is lstat'ed; because that lookup matches by longest
+# mount prefix, a refused ancestor mount refuses the whole path. This is what stops a chain whose
+# second hop lands on a dead NFS export or an autofs trigger from parking the run in D state.
+# The link's own path is not gated: it was already lstat'ed by the walk, and gating it would
+# refuse every link inside an explicitly named network root whatever its target.
+# Hops are followed WITHOUT lexical normalization so the kernel resolves a '..' beside a
+# symlinked component, while the gate sees the normalized form. 40-hop cap above the kernel's
+# ELOOP. The final path may be of any type; the caller classifies it.
+# Results (never on stdout, so nothing can strip a trailing newline):
+#   LINK_CHAIN_OUT   final path, on return 0
+#   LINK_CHAIN_ERR   on return 1: noreadlink | broken | toolong | refused
+#   LINK_CHAIN_PATH / LINK_CHAIN_TYPE / LINK_CHAIN_CLASS   detail for the refused case
+LINK_CHAIN_OUT=""
+LINK_CHAIN_ERR=""
+LINK_CHAIN_PATH=""
+LINK_CHAIN_TYPE=""
+LINK_CHAIN_CLASS=""
+resolve_link_chain() {
+    LINK_CHAIN_OUT=""
+    LINK_CHAIN_ERR=""
+    LINK_CHAIN_PATH=""
+    LINK_CHAIN_TYPE=""
+    LINK_CHAIN_CLASS=""
+    command -v readlink >/dev/null 2>&1 || { LINK_CHAIN_ERR="noreadlink"; return 1; }
+    local _cur="$1" _gate _tgt _hops=0
+    # Hop 0 is the link itself: the walk's find already lstat'ed it, so testing it here
+    # touches nothing new — and gating its OWN path would refuse every link inside an
+    # explicitly named network root (explicit scope wins) whatever the target.
+    while [ -h "$_cur" ]; do
+        _hops=$((_hops + 1))
+        [ "$_hops" -gt 40 ] && { LINK_CHAIN_ERR="toolong"; return 1; }
+        # Byte-exact capture: command substitution strips ALL trailing newlines, which would
+        # corrupt a target name ending in one. The guard 'x' preserves them; then only
+        # readlink's own single delimiter newline is stripped (as in resolve_dir).
+        _tgt="$(readlink "$_cur" 2>/dev/null && printf x)" || { LINK_CHAIN_ERR="broken"; return 1; }
+        _tgt="${_tgt%x}"
+        _tgt="${_tgt%$'\n'}"
+        [ -n "$_tgt" ] || { LINK_CHAIN_ERR="broken"; return 1; }
+        lexical_abs_path "$_cur" "$_tgt"
+        _gate="$LEXICAL_ABS_OUT"
+        if fs_class_of_path "$_gate"; then
+            LINK_CHAIN_ERR="refused"
+            LINK_CHAIN_PATH="$_gate"
+            LINK_CHAIN_TYPE="$FS_CLASS_TYPE_OUT"
+            LINK_CHAIN_CLASS="$FS_CLASS_OUT"
+            return 1
+        fi
+        case "$_tgt" in
+            /*) _cur="$_tgt" ;;
+            *)  _cur="${_cur%/*}/$_tgt" ;;
+        esac
+    done
+    LINK_CHAIN_OUT="$_cur"
+    return 0
+}
+
+# canonical_file_path -- canonical path of the regular file $1: its directory resolved
+# physically (resolve_dir -P) plus the original basename. Prints the result; callers capture
+# with the "$( … && printf x)" sentinel so a name ending in a newline survives.
+canonical_file_path() {
+    local _dir="${1%/*}"
+    [ -n "$_dir" ] || _dir="/"
+    resolve_dir -P "$_dir" || return 1
+    printf '%s' "${RESOLVE_DIR_OUT%/}/${1##*/}"
+}
+
+# path_covers -- true if $2 is $1 or lies underneath $1. Handles the root ("/") correctly,
+# where the naive "$1"/* pattern would become "//*" and match nothing.
+path_covers() {
+    [ "$1" = "$2" ] && return 0
+    case "$1" in
+        /) case "$2" in /?*) return 0 ;; esac ;;
+        *) case "$2" in "$1"/*) return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+# spell_under_root -- how the walk rooted at $1 (as spelled) prints the physical path $3,
+# given the root's physical location $2: '<root as spelled>/<tail of $3 below $2>'. find
+# prints every entry under the spelling of its starting point and a physical walk never
+# crosses a symlink, so this is the ONLY spelling an absolute -path prune can match — an
+# artifact reached through a symlinked TMPDIR, cwd or intermediate directory matches neither
+# its logical nor its physical spelling. Result in SPELL_UNDER_ROOT_OUT; returns 1 (result
+# empty) when $3 does not lie under $2 — the walk cannot reach it. String operations only (no
+# fork). Used for the collector's own artifacts, for child roots pruned from a parent's
+# walk and for the exclusion anchors.
+SPELL_UNDER_ROOT_OUT=""
+spell_under_root() {
+    SPELL_UNDER_ROOT_OUT=""
+    path_covers "$2" "$3" || return 1
+    if [ "$3" = "$2" ]; then
+        SPELL_UNDER_ROOT_OUT="$1"
+    else
+        SPELL_UNDER_ROOT_OUT="${1%/}/${3#"${2%/}/"}"
+    fi
+}
+
+# escape_find_glob -- make the literal path $1 safe as a find -path PATTERN. find matches -path
+# with fnmatch(3), so '*', '?', '[' and '\' inside a real path silently turn an exact-path prune
+# into a pattern: a log file named 'run[1].log' stopped excluding itself (the collector uploaded
+# its own live log) and started excluding a user's 'run1.log' instead, and a proven cloud folder
+# under such a path was announced as excluded and then walked. Pure string operations; result in
+# FIND_GLOB_OUT (no fork). ']' needs no escape — it is literal outside a bracket expression.
+FIND_GLOB_OUT=""
+escape_find_glob() {
+    local _s="$1"
+    _s="${_s//\\/\\\\}"
+    _s="${_s//\*/\\*}"
+    _s="${_s//\?/\\?}"
+    _s="${_s//\[/\\[}"
+    FIND_GLOB_OUT="$_s"
+}
+
+# lexical_abs_path -- absolutize a raw symlink target ($2) against the directory of the link
+# it was read from ($1, absolute) and collapse '.'/'..' segments with STRING OPERATIONS ONLY —
+# no filesystem access at all. The result is not canonical (a '..' beside a symlinked
+# component resolves differently in the kernel); it exists solely so the filesystem-class
+# gate can refuse a network / pseudo-fs target BEFORE the first stat touches it — a
+# stat on a dead NFS share or an autofs trigger can hang the collector in D state. Result in
+# LEXICAL_ABS_OUT (no subshell: nothing to fork, nothing to strip).
+LEXICAL_ABS_OUT=""
+lexical_abs_path() {
+    local _link="$1" _rest="$2" _out="" _seg
+    case "$_rest" in
+        /*) _rest="${_rest#/}" ;;
+        *)  _out="${_link%/*}" ;;
+    esac
+    while [ -n "$_rest" ]; do
+        case "$_rest" in
+            */*) _seg="${_rest%%/*}"; _rest="${_rest#*/}" ;;
+            *)   _seg="$_rest";       _rest="" ;;
+        esac
+        case "$_seg" in
+            ''|.) ;;
+            ..)   _out="${_out%/*}" ;;
+            *)    _out="$_out/$_seg" ;;
+        esac
+    done
+    LEXICAL_ABS_OUT="${_out:-/}"
+}
+
+# link_skip -- account one enumerated symlink that will not be collected: bump the umbrella
+# LINKS_SKIPPED and exactly one breakdown counter ($1 — a LINKS_* variable NAME written in
+# this script, never external input; the arithmetic expansion increments it by name), then
+# log the reason at level $2 with message $3.
+link_skip() {
+    LINKS_SKIPPED=$((LINKS_SKIPPED + 1))
+    : "$(( $1 += 1 ))"
+    log_msg "$2" "$3"
+}
+
+# link_fs_class_refused -- filesystem-class gate for a symlink target path ($2), accounting
+# the link ($1) as fs_refused with the note $3 appended to the reason. The path is used as a
+# STRING only (fs_class_of_path matches it against the mount snapshot and never touches it),
+# so this is safe to call before the target has been accessed. Returns 0 when the link was
+# refused and accounted, 1 when the target may proceed.
+link_fs_class_refused() {
+    fs_class_of_path "$2" || return 1
+    link_skip LINKS_FS_REFUSED info "Skipping symlink '$1' -> '$2' (target on ${FS_CLASS_TYPE_OUT} ${FS_CLASS_OUT}${3})"
+    return 0
+}
+
+# root_fs_class_refused -- the filesystem-class policy for a scan root whose location
+# fs_class_of_path has just classified (FS_CLASS_OUT / FS_CLASS_TYPE_OUT are set): a kernel
+# pseudo-filesystem is refused outright, a network filesystem is refused for built-in defaults
+# only (explicit scope wins). $1 is the root as the operator sees it, $2 a note prefixed to the
+# reason ("really '...'; " or empty). Returns 0 when the root was refused and reported, 1
+# when it may proceed. Mirrors link_fs_class_refused; both gates of the root loop — the
+# string-only one before any access and the physical one after resolution — go through here,
+# so the two refusal messages and the pseudo/network/default decision exist exactly once.
+root_fs_class_refused() {
+    if [ "$FS_CLASS_OUT" = "pseudo-filesystem" ]; then
+        report_unusable_dir "$1" "${2}on a ${FS_CLASS_TYPE_OUT} pseudo-filesystem (kernel data, not collectable)"
+        return 0
+    fi
+    if [ "$SCAN_FOLDERS_FROM_USER" -eq 0 ]; then
+        report_unusable_dir "$1" "${2}on a ${FS_CLASS_TYPE_OUT} network filesystem, excluded by default; name it with --dir to collect it"
+        return 0
+    fi
+    return 1
 }
 
 detect_upload_tool() {
@@ -401,24 +913,24 @@ upload_with_curl() {
 
     safe_filename="$(sanitize_filename_for_multipart "$filename")"
 
-    resp_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$resp_file")
-    header_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$header_file")
+    resp_file="$(scratch_file curl.resp)" || return 91
+    header_file="$(scratch_file curl.hdr)" || return 91
 
-    # Build form argument safely — curl handles @path internally
-    local form_arg="file=@${filepath};filename=${safe_filename}"
+    # The file is streamed from stdin ('@-'), never named to curl as '@path': curl splits an
+    # -F value on ';' and honours sub-parameters, so a collected file whose own name contains
+    # ';filename=' or ';type=' would rewrite the multipart metadata. The shell opens the path
+    # (no parsing), curl reads fd 0, and only the sanitized filename reaches the form.
+    local form_arg="file=@-;filename=${safe_filename}"
 
     local err_file
-    err_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$err_file")
+    err_file="$(scratch_file curl.err)" || return 91
 
     curl -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
         --max-time 300 \
         -D "$header_file" \
         "$endpoint" \
         -F "$form_arg" \
-        > "$resp_file" 2>"$err_file"
+        < "$filepath" > "$resp_file" 2>"$err_file"
     code=$?
 
     if [ $code -ne 0 ]; then
@@ -481,7 +993,7 @@ upload_with_wget() {
     # Generate a boundary that does not appear in the file content or metadata.
     # Retry with different random seeds to avoid multipart corruption.
     local _boundary_attempts=0
-    boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}$(date +%s%N 2>/dev/null || echo 0)"
+    boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}$(date +%s%N 2>/dev/null || printf '%s\n' 0)"
     while [ "$_boundary_attempts" -lt 10 ]; do
         if ! LC_ALL=C grep -qF "$boundary" "$filepath" 2>/dev/null; then
             # Also check it doesn't appear in metadata fields
@@ -491,17 +1003,14 @@ upload_with_wget() {
             esac
         fi
         _boundary_attempts=$((_boundary_attempts + 1))
-        boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}${_boundary_attempts}$(date +%s%N 2>/dev/null || echo 0)"
+        boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}${_boundary_attempts}$(date +%s%N 2>/dev/null || printf '%s\n' 0)"
     done
     if [ "$_boundary_attempts" -ge 10 ]; then
         log_msg warn "Could not find safe multipart boundary for '$filepath', upload may be malformed"
     fi
-    body_file="$(mktemp_portable)" || return 93
-    TMP_FILES_ARR+=("$body_file")
-    resp_file="$(mktemp_portable)" || return 94
-    TMP_FILES_ARR+=("$resp_file")
-    header_file="$(mktemp_portable)" || return 94
-    TMP_FILES_ARR+=("$header_file")
+    body_file="$(scratch_file wget.body)" || return 93
+    resp_file="$(scratch_file wget.resp)" || return 94
+    header_file="$(scratch_file wget.hdr)" || return 94
 
     {
         printf -- "--%s\r\n" "$boundary"
@@ -554,9 +1063,6 @@ upload_with_wget() {
     return 0
 }
 
-# collection_marker -- POST a begin/end marker to /api/collection
-# Args: $1=base_url  $2=type(begin|end)  $3=scan_id(optional)  $4=stats_json(optional)
-# Returns: scan_id extracted from response (empty if unsupported or failed)
 json_escape() {
     local s="$1"
     # Order matters: escape backslashes first, then other special chars
@@ -585,9 +1091,7 @@ collection_marker() {
     local body scan_id_out resp_file header_file
 
     resp_file="$(mktemp_portable)" || return 1
-    TMP_FILES_ARR+=("$resp_file")
     header_file="$(mktemp_portable)" || return 1
-    TMP_FILES_ARR+=("$header_file")
 
     # Build JSON body with proper escaping
     local safe_source safe_scan_id
@@ -753,16 +1257,31 @@ submit_file() {
     local filename
     local try=1
     local rc=1
-    local wait=2
+    local backoff=2
     local max_503_retries=5
     local _503_count=0
 
-    # Preserve client-side path in multipart filename for server-side audit logs.
+    # Preserve the client-side path in the multipart filename for server-side audit logs.
+    # For a file reached through a symlink the caller passes the RESOLVED path, which is
+    # both what gets opened and what the server is told.
     filename="$filepath"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         log_msg info "DRY-RUN: would submit '$filepath'"
         return 0
+    fi
+
+    # Last type check before the open. The upload opens the path through a shell redirect, so
+    # if it has become a FIFO or a device since the discovery-time check the process blocks in
+    # open(2) — where neither curl's --max-time nor an external timeout wrapper can reach it
+    # (the redirect happens in the forked child before the wrapper is exec'd; verified: curl
+    # --max-time 3 on a FIFO was still blocked after 20 s). Re-asserting the type here is what
+    # UAC's _remove_non_regular_files and tar's file_dumpable_p amount to; it narrows the
+    # window to the microseconds between this test and the redirect, which is the same residual
+    # every copy tool carries. 94 = "no longer a regular file": churn, not an upload error.
+    if [ ! -f "$filepath" ]; then
+        log_msg warn "'$filepath' is no longer a regular file; not uploaded"
+        return 94
     fi
 
     while [ "$try" -le "$RETRIES" ]; do
@@ -792,10 +1311,10 @@ submit_file() {
 
         log_msg warn "Upload failed for '$filepath' (attempt ${try}/${RETRIES}, code ${rc})"
         if [ "$try" -lt "$RETRIES" ]; then
-            sleep "$wait"
-            wait=$((wait * 2))
+            sleep "$backoff"
+            backoff=$((backoff * 2))
             # Cap backoff at 60 seconds
-            [ "$wait" -gt 60 ] && wait=60
+            [ "$backoff" -gt 60 ] && backoff=60
         fi
         try=$((try + 1))
     done
@@ -803,48 +1322,112 @@ submit_file() {
     return "$rc"
 }
 
+# add_scan_dir -- append one directory to the scan set. The first operator-supplied directory
+# replaces the built-in defaults and marks the set as operator-supplied (which drives the
+# explicit-vs-default failure handling in /). Shared by --dir, bare positional args, and
+# operands following '--', so the "replace defaults once" rule lives in exactly one place.
+add_scan_dir() {
+    if [ "$SCAN_FOLDERS_FROM_USER" -eq 0 ]; then
+        SCAN_FOLDERS=()
+        SCAN_FOLDERS_FROM_USER=1
+    fi
+    SCAN_FOLDERS+=("$1")
+}
+
+# report_unusable_dir -- log a scan target ($1) that cannot be scanned, with the reason ($2).
+# An explicitly named target is a collection failure (counted in UNUSABLE_DIRS, reported as
+# unusable_dirs= and driving the partial-failure exit); an unusable built-in default is
+# best-effort (warn only), preserving
+# graceful degradation. Shared by the (permission)  (missing/not-a-dir) checks.
+report_unusable_dir() {
+    if [ "$SCAN_FOLDERS_FROM_USER" -eq 1 ]; then
+        log_msg error "Cannot scan '$1' ($2); not collected"
+        UNUSABLE_DIRS=$((UNUSABLE_DIRS + 1))
+    else
+        log_msg warn "Skipping '$1' ($2)"
+    fi
+}
+
+# require_value -- validate the value of an option that requires one. $1 = option name (for
+# messages), $2 = number of args remaining at the option ($2 >= 2 means a value token
+# follows), $3 = the candidate value, $4 = 1 when the value came from the '--option=value'
+# form. Rejects a missing token, an empty string, an option-like '-...' token (a forgotten
+# value — so it can't silently eat the next flag; except in the '=' form, where a leading
+# dash is unambiguously a value), and a whitespace-only value. Dies with usage error (exit 2).
+require_value() {
+    if [ "$2" -lt 2 ]; then
+        die "Missing value for $1"
+    fi
+    case "$3" in
+        '') die "Empty value for $1" ;;
+        -*) [ "${4:-0}" -eq 1 ] || die "Missing value for $1 (got option-like token '$3')" ;;
+    esac
+    case "$3" in
+        *[![:space:]]*) ;;
+        *)              die "Whitespace-only value for $1" ;;
+    esac
+}
+
 parse_args() {
     local arg
-    local add_dir_mode=0
+    local _eq
+    local _val
 
     while [ $# -gt 0 ]; do
         arg="$1"
+        # accept the GNU '--option=value' form for value-taking long options by
+        # splitting it into '--option value'. _eq marks the split so require_value can
+        # accept a leading-dash value here ('--dir=-x' is unambiguously a value). A flag
+        # option given '=value' is a usage error; anything else (e.g. '--bogus=x', '-d=x')
+        # falls through unsplit to the normal unknown-option handling.
+        _eq=0
+        case "$arg" in
+            --?*=*)
+                _val="${arg#*=}"
+                case "${arg%%=*}" in
+                    --server|--port|--dir|--max-age|--max-size-kb|--source|--ca-cert|--retries|--log-file)
+                        arg="${arg%%=*}"
+                        set -- "$arg" "$_val" "${@:2}"
+                        _eq=1
+                        ;;
+                    --ssl|--insecure|--sync|--follow-symlinks|--dry-run|--debug|--no-log-file|--syslog|--quiet|--progress|--no-progress|--help)
+                        die "Option ${arg%%=*} does not take a value"
+                        ;;
+                esac
+                ;;
+        esac
         case "$arg" in
             -h|--help)
                 print_help
                 exit 0
                 ;;
             -s|--server)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 THUNDERSTORM_SERVER="$2"
                 shift
                 ;;
             -p|--port)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 THUNDERSTORM_PORT="$2"
                 shift
                 ;;
             -d|--dir)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
-                if [ "$add_dir_mode" -eq 0 ]; then
-                    SCAN_FOLDERS=()
-                    add_dir_mode=1
-                fi
-                SCAN_FOLDERS+=("$2")
+                require_value "$arg" "$#" "${2:-}" "$_eq"
+                add_scan_dir "$2"
                 shift
                 ;;
             --max-age)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 MAX_AGE="$2"
                 shift
                 ;;
             --max-size-kb)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 MAX_FILE_SIZE_KB="$2"
                 shift
                 ;;
             --source)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 SOURCE_NAME="$2"
                 shift
                 ;;
@@ -855,7 +1438,7 @@ parse_args() {
                 INSECURE=1
                 ;;
             --ca-cert)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 CA_CERT="$2"
                 USE_SSL=1
                 shift
@@ -863,8 +1446,11 @@ parse_args() {
             --sync)
                 ASYNC_MODE=0
                 ;;
+            --follow-symlinks)
+                FOLLOW_SYMLINKS=1
+                ;;
             --retries)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 RETRIES="$2"
                 shift
                 ;;
@@ -875,7 +1461,7 @@ parse_args() {
                 DEBUG=1
                 ;;
             --log-file)
-                [ -n "${2:-}" ] || die "Missing value for $arg"
+                require_value "$arg" "$#" "${2:-}" "$_eq"
                 LOGFILE="$2"
                 shift
                 ;;
@@ -895,19 +1481,21 @@ parse_args() {
                 PROGRESS_MODE="off"
                 ;;
             --)
+                # End of options: every remaining argument is a scan directory (operand),
+                # including names that begin with '-'. Consume them all, then stop parsing.
                 shift
+                while [ $# -gt 0 ]; do
+                    add_scan_dir "$1"
+                    shift
+                done
                 break
                 ;;
             -*)
                 die "Unknown option: $arg (use --help)"
                 ;;
             *)
-                # Positional args are treated as additional directories.
-                if [ "$add_dir_mode" -eq 0 ]; then
-                    SCAN_FOLDERS=()
-                    add_dir_mode=1
-                fi
-                SCAN_FOLDERS+=("$arg")
+                # Bare positional args are treated as scan directories.
+                add_scan_dir "$arg"
                 ;;
         esac
         shift
@@ -920,15 +1508,19 @@ validate_config() {
     is_integer "$MAX_FILE_SIZE_KB" || die "max-size-kb must be numeric: '$MAX_FILE_SIZE_KB'"
     is_integer "$RETRIES" || die "retries must be numeric: '$RETRIES'"
 
+    # Upper bounds first: the numeric tests below would print raw shell errors on a value that
+    # does not fit in 64 bits, and MAX_FILE_SIZE_KB is multiplied by 1024 for find.
+    in_range "$THUNDERSTORM_PORT" 65535 || die "Port must be <= 65535: '$THUNDERSTORM_PORT'"
+    in_range "$MAX_AGE" 36500 || die "max-age must be <= 36500 days: '$MAX_AGE'"
+    in_range "$MAX_FILE_SIZE_KB" 1073741824 || die "max-size-kb must be <= 1073741824 (1 TiB): '$MAX_FILE_SIZE_KB'"
+    in_range "$RETRIES" 100 || die "retries must be <= 100: '$RETRIES'"
+
     [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0"
     [ "$MAX_AGE" -ge 0 ] || die "max-age must be >= 0"
     [ "$MAX_FILE_SIZE_KB" -gt 0 ] || die "max-size-kb must be > 0"
     [ "$RETRIES" -ge 1 ] || die "retries must be >= 1"
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Server must not be empty"
-    if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
-        die "At least one directory is required"
-    fi
     if [ -n "$CA_CERT" ] && [ ! -f "$CA_CERT" ]; then
         die "CA certificate file not found: '$CA_CERT'"
     fi
@@ -937,25 +1529,799 @@ validate_config() {
     fi
 }
 
-main() {
-    local scheme="http"
-    local endpoint_name="check"
-    local query_source=""
-    local api_endpoint=""
-    local base_url=""
-    local scandir
-    local file_path
-    local size_kb
-    local elapsed=0
-    local find_mtime
-    local find_results_file
+# collect_symlink_entry -- account, and with --follow-symlinks collect, ONE symlink entry
+# ($1 = its path from the physical walk, $2 = API endpoint). Never traverses the link.
+# Reads main's arrays: _seen_dirs, _self_paths, link_stat_test, _link_targets_done (appended).
+# Every path bumps LINKS_SEEN and then exactly one of LINKS_COLLECTED, LINKS_FAILED, or a
+# breakdown counter via link_skip.
+#
+# Order, and why it is this order:
+#   1. resolve first, gating every hop as a STRING before it is lstat'ed, so a chain landing on
+#      a dead NFS export or autofs trigger is refused instead of parking the run in D state.
+#      Classifying through the link ([ -d "$link" ]) would make the kernel walk the whole chain;
+#   2. classify the RESOLVED path: directory -> surfaced, non-regular -> dangling, file -> on;
+#   3. one policy pass on the canonical path: own artifacts, scope, duplicate, filesystem class,
+#      size/age, readable;
+#   4. one open, of the RESOLVED path. Opening through the link would let anyone who can write
+#      the link's directory swap the content after validation. What remains is the ordinary
+#      regular-file residual; no extra re-stat is added, since each would open a new window.
+collect_symlink_entry() {
+    local link="$1" endpoint="$2"
+    local _resolved _target _dtgt _known _done _out _rc
 
-    parse_args "$@"
+    LINKS_SEEN=$((LINKS_SEEN + 1))
+    if [ "$FOLLOW_SYMLINKS" -eq 0 ]; then
+        link_skip LINKS_NOT_FOLLOWED debug "Symlink not followed: '$link'"
+        return 0
+    fi
+
+    # 1. Resolve the chain with a filesystem-class gate in front of every hop.
+    if ! resolve_link_chain "$link"; then
+        case "$LINK_CHAIN_ERR" in
+            refused)
+                link_skip LINKS_FS_REFUSED info "Skipping symlink '$link' -> '$LINK_CHAIN_PATH' (target on ${LINK_CHAIN_TYPE} ${LINK_CHAIN_CLASS}; refused before access)"
+                ;;
+            noreadlink)
+                link_skip LINKS_UNRESOLVABLE debug "Skipping symlink '$link' (readlink is not available; link targets cannot be resolved)"
+                ;;
+            toolong)
+                link_skip LINKS_UNRESOLVABLE debug "Skipping symlink '$link' (link chain longer than 40 hops)"
+                ;;
+            *)
+                link_skip LINKS_UNRESOLVABLE debug "Skipping symlink '$link' (cannot read link target)"
+                ;;
+        esac
+        return 0
+    fi
+    _resolved="$LINK_CHAIN_OUT"
+
+    # 2. Classify the resolved path — never through the link.
+    if [ -d "$_resolved" ]; then
+        # A directory link is SURFACED, never followed (owner decision): a file link
+        # extends scope by one bounded file, a directory link by an unbounded subtree
+        # (KAPE / ClamAV / rsync --safe-links norm). The operator opts in per directory —
+        # unless the target already lies inside a scan root, which is only debug-worthy.
+        if resolve_dir -P "$_resolved"; then _dtgt="$RESOLVE_DIR_OUT"; else _dtgt="$_resolved"; fi
+        for _known in "${_seen_dirs[@]+"${_seen_dirs[@]}"}"; do
+            if path_covers "$_known" "$_dtgt"; then
+                link_skip LINKS_DIR_SURFACED debug "Symlinked directory '$link' -> '$_dtgt' is already inside a scan root; not followed"
+                return 0
+            fi
+        done
+        link_skip LINKS_DIR_SURFACED info "Symlinked directory '$link' not followed (add it with --dir to scan it)"
+        return 0
+    fi
+    if [ ! -f "$_resolved" ]; then
+        link_skip LINKS_DANGLING debug "Skipping symlink '$link' (dangling or special target)"
+        return 0
+    fi
+    # Sentinel capture keeps a resolved name ending in a newline byte-exact.
+    if ! _target="$(canonical_file_path "$_resolved" && printf x)"; then
+        link_skip LINKS_UNRESOLVABLE debug "Skipping symlink '$link' (target unresolvable)"
+        return 0
+    fi
+    _target="${_target%x}"
+
+    # 3. One policy pass on the resolved path.
+    for _known in "${_self_paths[@]+"${_self_paths[@]}"}"; do
+        if path_covers "$_known" "$_target"; then
+            link_skip LINKS_SELF_EXCLUDED info "Skipping symlink '$link' -> '$_target' (the collector's own work directory or log file)"
+            return 0
+        fi
+    done
+    for _known in "${_seen_dirs[@]+"${_seen_dirs[@]}"}"; do
+        if path_covers "$_known" "$_target"; then
+            # The walk already made the policy decision for that path (collected, or
+            # excluded by cloud/self/size policy) — collecting it via the link would either
+            # duplicate or bypass policy.
+            link_skip LINKS_IN_SCOPE debug "Skipping symlink '$link' (target '$_target' is in scope)"
+            return 0
+        fi
+    done
+    for _done in "${_link_targets_done[@]+"${_link_targets_done[@]}"}"; do
+        if [ "$_done" = "$_target" ]; then
+            link_skip LINKS_DUP debug "Skipping symlink '$link' (target '$_target' already delivered via another link)"
+            return 0
+        fi
+    done
+    link_fs_class_refused "$link" "$_target" "" && return 0
+    # Exit status first: find fails when the target cannot be examined at all (gone between
+    # resolution and this test) — the link dangles now; only a clean empty result is policy.
+    _out="$(find "$_target" "${link_stat_test[@]}" -print 2>/dev/null)"
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        link_skip LINKS_DANGLING debug "Skipping symlink '$link' (target '$_target' vanished or could not be examined)"
+        return 0
+    fi
+    if [ -z "$_out" ]; then
+        link_skip LINKS_FILTERED debug "Skipping symlink '$link' (target '$_target' filtered by size/age policy)"
+        return 0
+    fi
+    # Readability is checked here, as the regular-file path does: without it an
+    # unreadable target would be reported as collected in --dry-run and would burn the whole
+    # upload retry loop in a real run — the two modes must agree. Discovered (through the
+    # link) and not collected: failed, not skipped — same reason, same end-of-run error and
+    # same exit 4 as an unreadable regular file (, CLAUDE.md §3).
+    if [ ! -r "$_target" ]; then
+        LINKS_FAILED=$((LINKS_FAILED + 1))
+        FILES_FAILED=$((FILES_FAILED + 1))
+        FILES_UNREADABLE=$((FILES_UNREADABLE + 1))
+        [ -n "$FIRST_UNREADABLE" ] || FIRST_UNREADABLE="$_target"
+        log_msg debug "Unreadable symlink target (counted as failed): '$link' -> '$_target'"
+        return 0
+    fi
+
+    # 4. One open — of the resolved path. Recorded first, so a second link to the same
+    # target is a duplicate whether or not this upload succeeds.
+    _link_targets_done+=("$_target")
+    submit_file "$endpoint" "$_target"
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        LINKS_COLLECTED=$((LINKS_COLLECTED + 1))
+        log_msg info "Collected via symlink: '$link' -> '$_target'"
+    elif [ "$_rc" -eq 94 ]; then
+        # The target stopped being a regular file before the open: churn, counted as vanished.
+        LINKS_FAILED=$((LINKS_FAILED + 1))
+        FILES_FAILED=$((FILES_FAILED + 1))
+        FILES_VANISHED=$((FILES_VANISHED + 1))
+    else
+        LINKS_FAILED=$((LINKS_FAILED + 1))
+        FILES_FAILED=$((FILES_FAILED + 1))
+        FILES_UPLOAD_FAILED=$((FILES_UPLOAD_FAILED + 1))
+        log_msg error "Could not upload symlink target '$link' -> '$_target'"
+    fi
+    return 0
+}
+
+# compose_root_excludes -- build this root's complete find prune set in walk_excludes, and warn
+# once when the operator named a location that is excluded by default.
+# Every prune is spelled the way THIS root's walk prints paths: find prints each entry under the
+# spelling of its start point and a physical walk never crosses a symlink, so that is the only
+# spelling an absolute -path can match. spell_under_root produces it; escape_find_glob keeps a
+# literal path from acting as an fnmatch pattern.
+# Four sources: the exclusion anchors (built-ins plus network / pseudo-fs mount points; the anchor
+# that IS this root is dropped, since a walk cannot start inside its own prune, and for a named
+# root that drop is announced); the macOS CloudStorage location; this run's own artifacts; and
+# roots already scanned that lie under this one.
+# Reads: scandir, _physdir, _fstype, exclude_path_list, cloudstorage_prune, _self_paths,
+# _child_prunes, SCAN_FOLDERS_FROM_USER.  Writes: walk_excludes, _excluded_note.
+compose_root_excludes() {
+    local _ep _p _known _keep_cloudstorage
+
+    walk_excludes=()
+    _excluded_note=""
+    for _ep in "${exclude_path_list[@]+"${exclude_path_list[@]}"}"; do
+        # The anchor equal to this root (by either spelling — an aliased path is under the
+        # anchor in reality even when its spelling is not) is mechanics, not policy.
+        if [ "$_ep" = "$scandir" ] || [ "$_ep" = "$_physdir" ]; then
+            [ "$SCAN_FOLDERS_FROM_USER" -eq 1 ] && _excluded_note="$_ep"
+            continue
+        fi
+        if [ "$SCAN_FOLDERS_FROM_USER" -eq 1 ]; then
+            case "$scandir" in "$_ep"/*) _excluded_note="$_ep" ;; esac
+            case "$_physdir" in "$_ep"/*) _excluded_note="$_ep" ;; esac
+        fi
+        # An anchor outside this root's physical subtree keeps its own spelling: the walk can
+        # never reach it, so the prune is harmless either way.
+        if spell_under_root "$scandir" "$_physdir" "$_ep"; then
+            escape_find_glob "$SPELL_UNDER_ROOT_OUT"
+        else
+            escape_find_glob "$_ep"
+        fi
+        walk_excludes+=(-path "$FIND_GLOB_OUT" -prune -o)
+    done
+
+    _keep_cloudstorage=1
+    for _p in "$scandir" "$_physdir"; do
+        case "$_p" in
+            */Library/CloudStorage|*/Library/CloudStorage/*) _keep_cloudstorage=0 ;;
+        esac
+    done
+    [ "$_keep_cloudstorage" -eq 1 ] && walk_excludes+=("${cloudstorage_prune[@]}")
+
+    for _known in "${_self_paths[@]+"${_self_paths[@]}"}"; do
+        if spell_under_root "$scandir" "$_physdir" "$_known"; then
+            escape_find_glob "$SPELL_UNDER_ROOT_OUT"
+            walk_excludes+=(-path "$FIND_GLOB_OUT" -prune -o)
+        fi
+    done
+    walk_excludes+=("${_child_prunes[@]+"${_child_prunes[@]}"}")
+
+    if [ -n "$_excluded_note" ]; then
+        log_msg warn "'$scandir' is excluded by default (under '$_excluded_note'${_fstype:+, filesystem: $_fstype}); collecting as requested"
+    fi
+    return 0
+}
+
+# collect_entries -- the upload pass: walk every classified list produced by the discovery pass
+# and deliver each entry. Routing is by the class recorded AT DISCOVERY (first byte: f regular
+# file, l symlink), never by what the path is now: an entry whose type changed since is not the
+# object find checked, so it is counted as vanished rather than uploaded unchecked or fed to the
+# link policy under a false identity. $1 is the upload endpoint.
+# Reads: all_find_files, TOTAL_FILES, SHOW_PROGRESS, INTERRUPTED.  Writes: the FILES_*/LINKS_*
+# counters and FIRST_UNREADABLE.
+collect_entries() {
+    local api_endpoint="$1"
+    local find_results_file file_path _kind _sub_rc
+    local _processed=0
+    local _sub_rc
+    for find_results_file in "${all_find_files[@]}"; do
+        while IFS= read -r -d '' file_path; do
+            # Check for interruption between files
+            [ "$INTERRUPTED" -eq 1 ] && break 2
+
+            _processed=$((_processed + 1))
+
+            # Show progress
+            if [ "$SHOW_PROGRESS" -eq 1 ] && [ "$TOTAL_FILES" -gt 0 ]; then
+                printf '\r[%d/%d] %d%%' "$_processed" "$TOTAL_FILES" "$(( _processed * 100 / TOTAL_FILES ))" >&2
+            fi
+
+            # route by the class recorded at discovery (first byte: f file, l symlink).
+            # A symlink entry is accounted and — with --follow-symlinks — collected in
+            # collect_symlink_entry, never traversed here. An entry whose type changed since
+            # discovery is not the object find checked: failed (vanished) — the rsync code-24
+            # convention for a mid-run change — never uploaded unchecked and never fed to the
+            # link policy under a false identity. Every l entry bumps LINKS_SEEN, so
+            # LINKS_SEEN == TOTAL_LINKS holds by construction (checked at reconciliation).
+            _kind="${file_path:0:1}"
+            file_path="${file_path#?}"
+            case "$_kind" in
+                l)
+                    if [ ! -h "$file_path" ]; then
+                        LINKS_SEEN=$((LINKS_SEEN + 1))
+                        LINKS_FAILED=$((LINKS_FAILED + 1))
+                        FILES_FAILED=$((FILES_FAILED + 1))
+                        FILES_VANISHED=$((FILES_VANISHED + 1))
+                        if [ -e "$file_path" ]; then
+                            log_msg warn "Symbolic link '$file_path' was replaced by a non-link after discovery; not collected, counted as failed"
+                        else
+                            log_msg debug "Vanished before collection: '$file_path'"
+                        fi
+                        continue
+                    fi
+                    collect_symlink_entry "$file_path" "$api_endpoint"
+                    continue
+                    ;;
+                *)
+                    if [ -h "$file_path" ]; then
+                        FILES_FAILED=$((FILES_FAILED + 1))
+                        FILES_VANISHED=$((FILES_VANISHED + 1))
+                        log_msg warn "File '$file_path' became a symbolic link after discovery; not collected, counted as failed"
+                        continue
+                    fi
+                    ;;
+            esac
+
+            # Discovered, then gone before it could be read (renamed or removed mid-run): failed,
+            # with its own reason — rsync reports vanished files the same way (code 24) — so the
+            # reconciliation holds by construction instead of inferring the loss afterwards.
+            if [ ! -f "$file_path" ]; then
+                FILES_FAILED=$((FILES_FAILED + 1))
+                FILES_VANISHED=$((FILES_VANISHED + 1))
+                log_msg debug "Vanished before collection: '$file_path'"
+                continue
+            fi
+
+            FILES_SCANNED=$((FILES_SCANNED + 1))
+
+            # size is filtered by find at discovery; only a fork-free readability check
+            # remains here, keeping unreadable files away from the upload retry loop. A discovered
+            # file that cannot be read was NOT collected: failed, not skipped (CLAUDE.md §3; tar
+            # and rsync treat it as an error and finish with a partial status).
+            if [ ! -r "$file_path" ]; then
+                FILES_FAILED=$((FILES_FAILED + 1))
+                FILES_UNREADABLE=$((FILES_UNREADABLE + 1))
+                [ -n "$FIRST_UNREADABLE" ] || FIRST_UNREADABLE="$file_path"
+                log_msg debug "Unreadable file (counted as failed): '$file_path'"
+                continue
+            fi
+
+            log_msg debug "Submitting '$file_path'"
+            submit_file "$api_endpoint" "$file_path"
+            _sub_rc=$?
+            if [ "$_sub_rc" -eq 0 ]; then
+                FILES_SUBMITTED=$((FILES_SUBMITTED + 1))
+            elif [ "$_sub_rc" -eq 94 ]; then
+                # Type changed between the discovery-time check and the open: the same class as
+                # a vanished file, so it is counted as one (and reaches exit 5, not 4).
+                FILES_FAILED=$((FILES_FAILED + 1))
+                FILES_VANISHED=$((FILES_VANISHED + 1))
+            else
+                FILES_FAILED=$((FILES_FAILED + 1))
+                FILES_UPLOAD_FAILED=$((FILES_UPLOAD_FAILED + 1))
+                log_msg error "Could not upload '$file_path'"
+            fi
+        done < "$find_results_file"
+    done
+    return 0
+}
+
+# report_run -- close the run out: elapsed time, the summary line, the failure and symlink
+# breakdowns, the reconciliation identities and the end marker. $1 is the server base URL.
+# Returns the run exit code (0, 4 or 5) so main can hand it straight to the caller.
+# Reads every counter; writes elapsed and reconcile_failed.
+report_run() {
+    local base_url="$1"
+    if [ "$START_TS" -gt 0 ] 2>/dev/null; then
+        elapsed=$(( $(date +%s 2>/dev/null || printf '%s\n' "$START_TS") - START_TS ))
+        [ "$elapsed" -lt 0 ] && elapsed=0
+    fi
+
+    # Clear progress line if we were showing progress
+    if [ "$SHOW_PROGRESS" -eq 1 ]; then
+        printf '\r\033[K' >&2
+    fi
+
+    log_msg info "Run completed: discovered=$TOTAL_FILES scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED links_seen=$LINKS_SEEN links_collected=$LINKS_COLLECTED links_skipped=$LINKS_SKIPPED unreadable_dirs=$UNREADABLE_DIRS unusable_dirs=$UNUSABLE_DIRS seconds=$elapsed"
+
+    # name the reasons behind failed= once (same shape as the symlink breakdown), and
+    # say plainly what could not be read — the summary is often the only artifact kept.
+    if [ "$FILES_FAILED" -gt 0 ]; then
+        log_msg info "File breakdown: unreadable=$FILES_UNREADABLE vanished=$FILES_VANISHED upload=$FILES_UPLOAD_FAILED"
+    fi
+    if [ "$FILES_UNREADABLE" -gt 0 ]; then
+        log_msg error "$FILES_UNREADABLE file(s) could not be read (first: '$FIRST_UNREADABLE'); counted as failed"
+    fi
+
+    # in default mode a narrow, operator-scoped scan may hide a payload behind an
+    # unfollowed link — say so once. (Suppressed for default broad scans, where thousands of
+    # benign system symlinks would make this pure noise.)
+    if [ "$FOLLOW_SYMLINKS" -eq 0 ] && [ "$LINKS_SEEN" -gt 0 ] && [ "$SCAN_FOLDERS_FROM_USER" -eq 1 ]; then
+        log_msg info "$LINKS_SEEN symbolic link(s) were not followed (use --follow-symlinks to collect the files they point to; symlinked directories must be named with --dir)"
+    fi
+    # name the reasons behind links_skipped once, when following was on (in default
+    # mode every link is simply not followed).
+    if [ "$FOLLOW_SYMLINKS" -eq 1 ] && [ "$LINKS_SEEN" -gt 0 ]; then
+        log_msg info "Symlink breakdown: dir_surfaced=$LINKS_DIR_SURFACED in_scope=$LINKS_IN_SCOPE dup=$LINKS_DUP fs_refused=$LINKS_FS_REFUSED self_excluded=$LINKS_SELF_EXCLUDED filtered=$LINKS_FILTERED dangling=$LINKS_DANGLING unresolvable=$LINKS_UNRESOLVABLE links_failed=$LINKS_FAILED"
+    fi
+
+    # (Layer 2): reconcile the discovered count against what we accounted for. Every
+    # discovered file must end up submitted, skipped, or failed. Since round 3 a file that
+    # vanished mid-run is counted (failed/vanished), so this holds by construction and the check
+    # is a bookkeeping guard: a mismatch is a bug, surfaced like any shortfall. Skipped when
+    # interrupted (a partial run is expected then).
+    _accounted=$(( FILES_SUBMITTED + FILES_SKIPPED + FILES_FAILED + LINKS_COLLECTED + LINKS_SKIPPED ))
+    if [ "$INTERRUPTED" -eq 0 ] && [ "$_accounted" -ne "$TOTAL_FILES" ]; then
+        log_msg error "Reconciliation failed: discovered $TOTAL_FILES file(s) but accounted for $_accounted; $(( TOTAL_FILES - _accounted )) discovered file(s) were not collected"
+        reconcile_failed=1
+    fi
+    # The failure reasons must add up to failed= (link failures — upload error, unreadable
+    # target — are counted in both). Prose, not key=value, below: the summary's keys must not
+    # recur after the summary line, or a scraper taking the last match reads the wrong number.
+    if [ "$INTERRUPTED" -eq 0 ] && [ "$FILES_FAILED" -ne $(( FILES_UNREADABLE + FILES_VANISHED + FILES_UPLOAD_FAILED )) ]; then
+        log_msg error "Reconciliation failed: $FILES_FAILED failed file(s) but the reasons sum to $(( FILES_UNREADABLE + FILES_VANISHED + FILES_UPLOAD_FAILED )) ($FILES_UNREADABLE unreadable, $FILES_VANISHED vanished, $FILES_UPLOAD_FAILED upload)"
+        reconcile_failed=1
+    fi
+    # the link counters must close too — every seen link is collected, failed, or in
+    # exactly one skip class. A mismatch is a bookkeeping bug, surfaced like any shortfall.
+    _link_breakdown=$(( LINKS_NOT_FOLLOWED + LINKS_DIR_SURFACED + LINKS_FS_REFUSED + LINKS_SELF_EXCLUDED + LINKS_IN_SCOPE + LINKS_DUP + LINKS_FILTERED + LINKS_DANGLING + LINKS_UNRESOLVABLE ))
+    if [ "$INTERRUPTED" -eq 0 ] && { [ "$LINKS_SEEN" -ne $(( LINKS_COLLECTED + LINKS_SKIPPED + LINKS_FAILED )) ] || [ "$LINKS_SKIPPED" -ne "$_link_breakdown" ]; }; then
+        log_msg error "Reconciliation failed: $LINKS_SEEN symlink(s) seen but $LINKS_COLLECTED collected, $LINKS_SKIPPED skipped (breakdown sums to $_link_breakdown) and $LINKS_FAILED failed"
+        reconcile_failed=1
+    fi
+    # Every discovered symlink went through the link path (typed lists), so the discovery count
+    # and links_seen must agree.
+    if [ "$INTERRUPTED" -eq 0 ] && [ "$LINKS_SEEN" -ne "$TOTAL_LINKS" ]; then
+        log_msg error "Reconciliation failed: $TOTAL_LINKS symlink(s) discovered but $LINKS_SEEN accounted as seen"
+        reconcile_failed=1
+    fi
+
+    # Send collection end marker with run statistics
+    if [ "$DRY_RUN" -eq 0 ]; then
+        # Link uploads are real POSTs: without these fields the server's record of the run
+        # would undercount what it received while the local summary reported it honestly.
+        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${elapsed}}"
+        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null
+    fi
+
+    # Exit 4 vs 5: rsync splits "partial transfer due to error" (23) from "partial transfer due
+    # to vanished source files" (24) because they ask different things of the operator — one is
+    # a problem to investigate, the other is a live host changing under the walk. A full-host
+    # run on a busy machine always loses a few cache and log files this way, so collapsing both
+    # into 4 made 4 the normal outcome and stripped it of meaning. Vanished losses alone -> 5;
+    # anything else -> 4, which wins when both occurred (rsync lets 23 override 24). An
+    # explicitly named target that was unusable is UNUSABLE_DIRS, so it stays 4 even if the
+    # only file losses were vanished ones (tar treats a named-but-missing operand the same way).
+    if [ "$FILES_UNREADABLE" -gt 0 ] || [ "$FILES_UPLOAD_FAILED" -gt 0 ] \
+        || [ "$UNREADABLE_DIRS" -gt 0 ] || [ "$UNUSABLE_DIRS" -gt 0 ] || [ "$reconcile_failed" -eq 1 ]; then
+        return 4
+    fi
+    if [ "$FILES_VANISHED" -gt 0 ]; then
+        return 5
+    fi
+    return 0
+}
+# root_already_covered -- duplicate and overlap rules, judged on the PHYSICAL location so two
+# spellings of one directory are collected once. Returns 0 to skip this root, 1 to scan it.
+# A child inside an already-scanned parent is redundant only if the parent's walk actually
+# reached it; an exclusion anchor or a proven cloud folder in between means it did not, and
+# skipping it would drop what the operator asked for. A parent named after its child prunes
+# that child instead.
+# Reads: scandir, _physdir, _cmpdir, _seen_dirs, _seen_phys, exclude_path_list.
+# Writes: _child_prunes.
+root_already_covered() {
+    local _i _dup _covered
+
+    # skip a directory already queued for scanning (exact physical duplicate).
+    # Comparing the physical location collapses a repeated --dir, '/x' vs '/x/', and
+    # symlink-equivalent aliases, so nothing is scanned or submitted twice. Overlapping
+    # parent/child paths are intentionally not deduped here (that interacts with the
+    # explicit-into-excluded policy).
+    _dup=0
+    _i=0
+    while [ "$_i" -lt "${#_seen_phys[@]}" ]; do
+        [ "${_seen_phys[$_i]}" = "$_cmpdir" ] && { _dup=1; break; }
+        _i=$((_i + 1))
+    done
+    if [ "$_dup" -eq 1 ]; then
+        log_msg info "Skipping duplicate directory '$scandir' (already scanned)"
+        return 0
+    fi
+
+    # overlapping roots — each file once, the first root wins (rsync sorts and
+    # de-duplicates its transfer list; Velociraptor merges hits per file; KAPE: "the first
+    # file found wins"). A root inside an already-scanned root is skipped — unless the
+    # parent's walk never reached it (an exclusion anchor, a proven cloud folder or the
+    # CloudStorage location in between): that is the explicit-into-excluded case, scanned as
+    # before. A parent named AFTER one of its children prunes that child from its own walk,
+    # spelled the way THIS walk prints it (spell_under_root).
+    _covered=""
+    _child_prunes=()
+    _i=0
+    while [ "$_i" -lt "${#_seen_phys[@]}" ]; do
+        if path_covers "${_seen_phys[$_i]}" "$_cmpdir"; then
+            if walk_reaches "${_seen_phys[$_i]}" "$_cmpdir" "${exclude_path_list[@]+"${exclude_path_list[@]}"}"; then
+                _covered="${_seen_dirs[$_i]}"
+                break
+            fi
+        elif spell_under_root "$scandir" "$_physdir" "${_seen_phys[$_i]}"; then
+            escape_find_glob "$SPELL_UNDER_ROOT_OUT"
+            _child_prunes+=(-path "$FIND_GLOB_OUT" -prune -o)
+            log_msg info "'${_seen_dirs[$_i]}' was already scanned; not walked again under '$scandir'"
+        fi
+        _i=$((_i + 1))
+    done
+    if [ -n "$_covered" ]; then
+        log_msg info "Skipping '$scandir' (inside '$_covered', already scanned)"
+        return 0
+    fi
+    return 1
+}
+# classify_root -- decide whether the current scan root can be walked, and how. Returns 1 when it
+# must be skipped (already reported, duplicate, or inside a scanned root), 0 when it is ready.
+# Order is deliberate: nothing touches the path before the string-only filesystem-class gate, or a
+# dead NFS export parks the run in D state; existence, type and permission are separated so each
+# gets its own message; the root is canonicalised logically (what the walk prints) and resolved
+# physically (where it is), and every SAFETY decision uses the physical path.
+# Operates on the loop variable scandir, which it rewrites to the canonical spelling.
+# Writes: scandir, _physdir, _physnote, _cmpdir, _fstype, _root_is_link, _child_prunes.
+classify_root() {
+        # Classify the root by its mount BEFORE anything touches it (the rule, applied to
+        # roots): '[ -d ]' on a dead NFS/CIFS export or an autofs trigger parks the collector
+        # in uninterruptible D state, and the built-in defaults (/home on NFS is the common
+        # shape) are exactly the paths nobody named. String operations only: the operand is
+        # absolutized against $PWD and normalized lexically — '//', '.', '..' (a cwd or an
+        # operand spelled '//x' would otherwise match no mount point) — then matched against
+        # the mount snapshot. The physical (-P) gate further below stays: only it sees an
+        # alias through a symlinked intermediate component. A default that is absent
+        # AND lies under a refused mount is reported here instead of skipped quietly:
+        # telling the two apart would take the very stat this gate exists to avoid.
+        _p="$scandir"
+        case "$_p" in /*) ;; *) _p="$PWD/$_p" ;; esac
+        lexical_abs_path / "$_p"
+        if fs_class_of_path "$LEXICAL_ABS_OUT"; then
+            root_fs_class_refused "$LEXICAL_ABS_OUT" "" && return 1
+            # Explicit scope wins: proceed, but say so BEFORE the first stat — on a dead
+            # share this line is the last thing the operator sees. The policy warning
+            # ("excluded by default... collecting as requested") still follows where it applies.
+            log_msg info "'$LEXICAL_ABS_OUT' lies on a ${FS_CLASS_TYPE_OUT} network filesystem; proceeding as requested (a dead or unresponsive share can stall the collector from here on)"
+        fi
+
+        if [ ! -d "$scandir" ]; then
+            # '[ -e ]' tells "exists but not a directory" apart from "absent or
+            # unreachable" (a real directory behind an unreadable parent reports as the
+            # latter; ENOENT vs EACCES is deliberately not split).
+            if [ -e "$scandir" ]; then
+                report_unusable_dir "$scandir" "not a directory"
+            elif [ -h "$scandir" ]; then
+                # [ -e ] followed the link and found nothing (ENOENT) or could not finish
+                # following it (ELOOP): a broken or looping symlink named as a root.
+                report_unusable_dir "$scandir" "dangling or looping symbolic link (target missing or unresolvable)"
+            elif [ "$SCAN_FOLDERS_FROM_USER" -eq 0 ]; then
+                # a built-in default that does not exist on this platform is a platform
+                # difference, not an incident (/dev/shm and /run are Linux-only; /root is
+                # absent on macOS). Stay quiet — an unreadable default still warns via,
+                # and an explicitly named target is still an error.
+                log_msg debug "Default scan directory '$scandir' does not exist here; skipping"
+            else
+                report_unusable_dir "$scandir" "does not exist or is not accessible"
+            fi
+            return 1
+        fi
+
+        # a 000 / no-read / no-execute directory passes the [ -d ] test above, yet find
+        # cannot read it and (below) its error is silenced. Listing entries and stat-ing
+        # their types needs both read AND execute on the directory.
+        if [ ! -r "$scandir" ] || [ ! -x "$scandir" ]; then
+            report_unusable_dir "$scandir" "permission denied"
+            return 1
+        fi
+
+        # resolve the validated scan root to an absolute path before find runs, so
+        # a relative or leading-dash path can't be misparsed by find, the absolute
+        # exclusion prunes match, and the server receives an absolute filename.
+        # -P follows symlinks (--follow-symlinks); -L (default) absolutizes without
+        # dereferencing the final symlink. On any failure keep the original path so an
+        # explicitly-named directory is never dropped, and note it for debugging.
+        # a symlinked root is not followed by default — say so, or "Found 0" would be
+        # indistinguishable from an empty directory.
+        # whether a symlinked scan root is dereferenced depends on WHO chose it.
+        # A path the operator named is not dereferenced by default — that is the
+        # --follow-symlinks contract. The built-in defaults are the collector's own configuration, and on
+        # macOS/BSD two of them are platform aliases (/tmp -> /private/tmp,
+        # /var -> /private/var): resolving those extends scope by nothing (it is the same
+        # directory under its canonical name), while refusing them silently skips two of the
+        # highest-value forensic locations. So defaults resolve physically, operator input
+        # stays logical. A resolved default still passes every check below (gate,
+        # exclusions, cloud proof).
+        _canon_mode="-L"
+        if [ "$FOLLOW_SYMLINKS" -eq 1 ] || [ "$SCAN_FOLDERS_FROM_USER" -eq 0 ]; then
+            _canon_mode="-P"
+        fi
+
+        # "not following it" is only true for a root the operator named; saying it about a
+        # resolved default would be a lie.
+        # Strip trailing '/' and '/.' spellings first ('link//', 'link/.'): [ -h ] would resolve
+        # through them, and the hint must not depend on how the root was typed.
+        _p="$scandir"
+        while :; do
+            case "$_p" in
+                */.)  _p="${_p%/.}" ;;
+                ?*/)  _p="${_p%/}" ;;
+                *)    break ;;
+            esac
+        done
+        _root_is_link=0
+        if [ "$_canon_mode" = "-L" ] && [ -h "$_p" ]; then
+            _root_is_link=1
+            log_msg warn "'$scandir' is a symbolic link; not following it (use --follow-symlinks to scan its target)"
+        fi
+
+        if resolve_dir "$_canon_mode" "$scandir"; then
+            _resolved="$RESOLVE_DIR_OUT"
+            if [ "$_resolved" != "$scandir" ] && [ "$SCAN_FOLDERS_FROM_USER" -eq 0 ]; then
+                log_msg debug "Default scan directory '$scandir' resolves to '$_resolved'"
+            fi
+            scandir="$_resolved"
+        else
+            log_msg debug "Could not canonicalize '$scandir'; scanning as given"
+        fi
+
+        # every safety decision below is made about where the root REALLY is, not about
+        # how it was spelled. In default mode the root is canonicalized logically (cd -L, the
+        # same choice the Go collector makes with filepath.Abs), so a symlinked INTERMEDIATE
+        # component would otherwise hide the true location: `--dir /alias/sub` with
+        # `/alias -> /proc` was walked as `/alias/sub`, which no absolute prune and no
+        # fstype lookup could recognise — 1867 /proc pseudo-files were accepted as evidence,
+        # silently, exit 0. The kernel resolves the alias regardless, so the checks must too.
+        # This mirrors the Go collector, which asks the kernel directly (syscall.Statfs).
+        # The checks, the duplicate/overlap comparison and the spelling of every prune use the
+        # physical path; the walk and the reported filenames stay on the operator's logical path.
+        _physdir="$scandir"
+        if [ "$_canon_mode" = "-L" ]; then
+            if resolve_dir -P "$scandir"; then
+                _physdir="$RESOLVE_DIR_OUT"
+            else
+                log_msg debug "Could not resolve the physical location of '$scandir'; checking it as given"
+            fi
+        fi
+        # Name the real location in messages when it differs, so a refusal is explainable.
+        _physnote=""
+        [ "$_physdir" != "$scandir" ] && _physnote="really '$_physdir'; "
+
+        # Roots are compared by WHERE they are, not by how they were spelled: the walk is
+        # physical (find never follows a link), so two spellings of one directory would collect
+        # everything twice, and a spelling that leaves the tree through a symlinked component
+        # is NOT inside the parent's walk. One exception: a root whose final component is
+        # itself a symlink (default mode) is walked as a single link entry and covers nothing,
+        # so it is keyed by its own spelling and never mistaken for its target. _seen_dirs
+        # keeps the logical spelling for messages and for collect_symlink_entry (which only
+        # consults it with --follow-symlinks, where the two spellings coincide).
+        _cmpdir="$_physdir"
+        [ "$_root_is_link" -eq 1 ] && _cmpdir="$scandir"
+
+        root_already_covered && return 1
+
+        # classify the target by the filesystem type of its mount — path spelling must
+        # not decide collection. Kernel pseudo-filesystems hold no disk evidence and can
+        # hang collection (measuring /proc/kcore reads terabytes), so they are refused
+        # whole, regardless of how the path was written or reached. (The string pre-gate at
+        # the loop head already refused plainly spelled roots; this one sees the alias.)
+        _fstype=""
+        fs_type_lookup "$_physdir" && _fstype="$FS_TYPE_OUT"
+        if fs_class_of_path "$_physdir"; then
+            root_fs_class_refused "$scandir" "$_physnote" && return 1
+        fi
+
+        # compose this root's prune set from the base path list. For an explicitly
+        # requested root the anchor equal to the root is dropped (find could never start
+        # otherwise) and an excluded-by-default location is announced instead of silently
+        # emptied — explicit scope wins,. Default roots keep every prune
+        # (default-scan behavior unchanged).
+    # Reaching here means the root is ready to walk; say so explicitly, because the caller
+    # tests this status and the last statement above is a conditional.
+    return 0
+}
+# enumerate_root -- verify the cloud-named folders under this root, walk it, and record what was
+# found. Returns 1 when the root produced no usable list (it was reported by report_unusable_dir).
+#
+# The walk is PHYSICAL in every mode: find never follows a symlink, so one planted link cannot
+# bypass a path-anchored exclusion or drag an unbounded subtree in. Symlinks are enumerated as
+# entries so they can be counted and — with --follow-symlinks — collected without traversal.
+# Each entry is then re-listed with a one-byte class prefix (f regular file, l symlink) because
+# every root is enumerated before any upload: the upload pass must route by what an entry WAS at
+# discovery, not by what it has become since.
+# Reads: scandir, walk_excludes, _in_cloud_scope, MAX_AGE, _max_size_c.
+# Writes: cloud_prunes, all_find_files, TOTAL_FILES, TOTAL_LINKS, UNREADABLE_DIRS.
+enumerate_root() {
+    local _cand_file _cand _cloud_ev _find_err _entry _count _lcount _k _typed _typed_ok
+    local find_results_file find_rc _find_msg _dir_errs _word
+        # Verify cloud-named folders before excluding them: enumerate the directories under this
+        # root whose NAME matches a known cloud service (outermost matches only), then prune just
+        # the ones with positive sync evidence — visibly. A folder that merely shares the name is
+        # scanned. The walk starts at the root itself so every absolute prune in walk_excludes can
+        # match: a "$scandir/." start point made find print "/root/./sub", which no absolute -path
+        # matches, so that pass once walked /proc, /sys, the work directory and every network mount
+        # under the root. '! -path' keeps the root out of the match, so a root named like a cloud
+        # service is still descended. A root inside proven cloud storage prunes nothing as cloud —
+        # the operator chose that scope. If the temp file cannot be made, scan cloud-named folders
+        # rather than skip them.
+        cloud_prunes=()
+        if [ "$_in_cloud_scope" -eq 1 ]; then
+            log_msg debug "Cloud-folder pruning is off under '$scandir' (inside the requested cloud scope)"
+        elif _cand_file="$(mktemp_portable)"; then
+            escape_find_glob "$scandir"
+            LC_ALL=C find "$scandir" "${walk_excludes[@]}" -type d ! -path "$FIND_GLOB_OUT" \( "${cloud_name_tests[@]}" \) -prune -print0 \
+                > "$_cand_file" 2>/dev/null \
+                || log_msg debug "Cloud-folder candidate pass under '$scandir' ended with errors (a predicate this find lacks, or an unreadable subtree); cloud-named folders it did not verify are scanned, not excluded"
+            while IFS= read -r -d '' _cand; do
+                if _cloud_ev="$(cloud_dir_evidence "$_cand")"; then
+                    escape_find_glob "$_cand"
+                    cloud_prunes+=(-path "$FIND_GLOB_OUT" -prune -o)
+                    log_msg info "Excluding cloud storage folder '$_cand' ($_cloud_ev)"
+                else
+                    log_msg info "Scanning '$_cand' despite cloud-like name (no cloud sync evidence)"
+                fi
+            done < "$_cand_file"
+        else
+            log_msg warn "Could not create temp file for cloud-folder checks under '$scandir'; cloud-named folders will be scanned"
+        fi
+
+        log_msg info "Scanning '$scandir'"
+        find_results_file="$(mktemp_portable)" || {
+            log_msg error "Could not create temporary file list for '$scandir'"
+            return 1
+        }
+        # the walk is PHYSICAL in every mode (never find -L over a tree — that would let
+        # one planted link bypass every path-anchored exclusion and drag in unbounded
+        # content). Symlinks are enumerated as entries (-type l) so they can be counted,
+        # policy-checked, and — with --follow-symlinks — collected without traversal.
+        _find_err="$(scratch_file find.err)" || _find_err=/dev/null
+        if [ "$MAX_AGE" -gt 0 ]; then
+            find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \( -type f -size "-${_max_size_c}c" -mtime "-${MAX_AGE}" -o -type l \) -print0 > "$find_results_file" 2>"$_find_err"
+        else
+            # MAX_AGE=0 means no age filter — collect all files regardless of modification time
+            find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \( -type f -size "-${_max_size_c}c" -o -type l \) -print0 > "$find_results_file" 2>"$_find_err"
+        fi
+        find_rc=$?
+        # find exits non-zero when a subtree under this (readable) dir could not
+        # be read, writing one diagnostic per directory (GNU, BSD, busybox). A directory is not
+        # an artifact: what it held is unknown, so the DIRECTORIES are counted
+        # (UNREADABLE_DIRS) and the run is partial — as rsync (code 23), tar and find report it.
+        # Keep the files find DID return. When find failed and returned NOTHING, the target was
+        # not enumerated at all — a rejected predicate, a path that vanished, find itself
+        # failing — an unusable target under the rules (explicit -> error and exit 4,
+        # default -> warn), not a silent "Found 0".
+        if [ "$find_rc" -ne 0 ]; then
+            _find_msg="$(head -1 "$_find_err" 2>/dev/null)"
+            _find_msg="${_find_msg//$'\n'/ }"
+            if [ ! -s "$find_results_file" ]; then
+                report_unusable_dir "$scandir" "file enumeration failed${_find_msg:+: $_find_msg}"
+                return 1
+            fi
+            _dir_errs=0
+            while IFS= read -r _entry || [ -n "$_entry" ]; do
+                _dir_errs=$((_dir_errs + 1))
+            done < "$_find_err"
+            [ "$_dir_errs" -gt 0 ] || _dir_errs=1
+            UNREADABLE_DIRS=$((UNREADABLE_DIRS + _dir_errs))
+            _word="directories"
+            [ "$_dir_errs" -eq 1 ] && _word="directory"
+            log_msg error "$_dir_errs $_word under '$scandir' could not be read (first: ${_find_msg:-no diagnostic}); their files are unknown and were not collected"
+        fi
+        # Count entries (each is null-terminated by -print0; fork-free) and RECORD each one's
+        # class as a one-byte prefix in a rewritten list: f regular file, l symlink (one lstat
+        # each — the lstat the summary already needed). find's -size/-mtime apply to
+        # -type f only and every root is enumerated before any upload, so the upload loop must
+        # route each entry by what it WAS at discovery: a link swapped for a regular file must
+        # never become an unchecked upload, a file swapped for a link must never enter the link
+        # policy. A list that cannot be written makes the root unusable, as a failed mktemp
+        # does above (the same work directory would fail every real upload of this root anyway).
+        local _count=0 _lcount=0 _k
+        _typed="$find_results_file.typed"
+        if ! { : > "$_typed"; } 2>/dev/null; then
+            report_unusable_dir "$scandir" "could not write the classified file list under '$TS_WORK_DIR'"
+            return 1
+        fi
+        _typed_ok=1
+        while IFS= read -r -d '' _entry; do
+            _count=$((_count + 1))
+            _k=f
+            if [ -h "$_entry" ]; then _lcount=$((_lcount + 1)); _k=l; fi
+            printf '%s%s\0' "$_k" "$_entry" 2>/dev/null >&3 || _typed_ok=0
+        done < "$find_results_file" 3> "$_typed"
+        if [ "$_typed_ok" -eq 0 ]; then
+            report_unusable_dir "$scandir" "could not write the classified file list under '$TS_WORK_DIR'"
+            return 1
+        fi
+        # Recorded only now, with the list that will actually be processed: a root that was
+        # not scanned must not "cover" a later child, must not make a link target look
+        # like the walk's business (in_scope), and must not turn a repeated spelling of
+        # itself into "already scanned". The filesystem gate above was already excluded this
+        # way; the three failures that abandon a root AFTER it (enumeration returning nothing,
+        # and either write of the classified list) were not, so an explicitly named child was
+        # dropped with "inside '<parent>', already scanned" and a link into the parent was
+        # booked in_scope, while the parent had collected nothing. Nothing between the
+        # duplicate/overlap loops and here reads these arrays for the CURRENT root, and the
+        # upload pass runs after every root is enumerated, so recording late is equivalent for
+        # every path that succeeds.
+        _seen_dirs+=("$scandir")
+        _seen_phys+=("$_cmpdir")
+        TOTAL_FILES=$((TOTAL_FILES + _count))
+        TOTAL_LINKS=$((TOTAL_LINKS + _lcount))
+        all_find_files+=("$_typed")
+        : > "$find_results_file"   # the untyped list is now redundant; free its space
+    return 0
+}
+# root_cloud_scope -- decide whether this root lies inside PROVEN cloud storage, walking the
+# PHYSICAL ancestry so an aliased path is judged by where it really is. When it does, the root is
+# still collected — explicit scope overrides a default exclusion, which is what the operator asked
+# for — but the run says so, and cloud pruning is switched off for this root: pruning inside a
+# scope the operator deliberately chose would empty it silently.
+# Reads: scandir, _physdir.  Writes: _in_cloud_scope.
+root_cloud_scope() {
+    local _p _cloud_ev
+    _in_cloud_scope=0
+    _p="$_physdir"
+    while [ -n "$_p" ]; do
+        if _cloud_ev="$(cloud_dir_evidence "$_p")"; then
+            # $_p is the physical ancestor, so it names the real location itself.
+            log_msg warn "'$scandir' is inside cloud storage '$_p' ($_cloud_ev); collecting as requested"
+            _in_cloud_scope=1
+            return 0
+        fi
+        [ "$_p" = "/" ] && return 0
+        _p="${_p%/*}"
+        [ -z "$_p" ] && _p="/"
+    done
+    return 0
+}
+
+# prepare_run -- everything that must be true before the first directory is touched: open the log
+# file sink, validate the configuration, announce the run, build the endpoint URLs, create the
+# private work directory, send the begin marker and settle the progress display. Exits the script
+# on a condition that makes collecting pointless (missing upload tool, unusable work directory,
+# unreachable server) — those are runtime errors, not partial results.
+# Writes: scheme, endpoint_name, query_source, base_url, api_endpoint, CURL/WGET_EXTRA_OPTS,
+# SHOW_PROGRESS, SCAN_ID, LOG_FILE_READY, TS_WORK_DIR.
+prepare_run() {
+    LOG_FILE_READY=1
     detect_source_name
     validate_config
     print_banner
 
-    if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
+    if [ "$(id -u 2>/dev/null || printf '%s\n' 1)" != "0" ]; then
         log_msg warn "Running without root privileges; some files may be inaccessible"
     fi
 
@@ -993,26 +2359,52 @@ main() {
     log_msg info "Max age (days): $MAX_AGE"
     log_msg info "Max size (KB): $MAX_FILE_SIZE_KB"
     log_msg info "Source: $SOURCE_NAME"
-    log_msg info "Folders: ${SCAN_FOLDERS[*]}"
+    # Each folder quoted: an unquoted, space-joined list is ambiguous once a name has a space.
+    _folders=""
+    for _f in "${SCAN_FOLDERS[@]}"; do _folders="$_folders '$_f'"; done
+    log_msg info "Folders:$_folders"
     [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
+
+    # Every run needs a private work directory, and Bash has no builtin that creates one, so
+    # 'mkdir' is a hard dependency (POSIX-mandatory, but still detected rather than assumed —
+    # otherwise its absence surfaces as a generic "cannot create temp file" runtime error
+    # instead of a named missing dependency).
+    if ! command -v mkdir >/dev/null 2>&1; then
+        log_msg error "'mkdir' is not available; cannot create the private work directory"
+        exit 3
+    fi
+    # find does the entire discovery; without it every root would fail the same way and be
+    # reported as "could not be read" — a named missing dependency (exit 3) instead.
+    if ! command -v find >/dev/null 2>&1; then
+        log_msg error "'find' is not available; cannot enumerate files"
+        exit 3
+    fi
+    # Create the work directory HERE, in the main shell. mktemp_portable runs inside "$(...)"
+    # subshells, so a directory first created there was never recorded in the parent's
+    # TS_WORK_DIR: a run that ended before the scan phase (begin marker failed -> exit 1, the
+    # most common failure) left /tmp/thunderstorm.work.<pid> behind on the host, and a
+    # --dry-run on an unusable TMPDIR reported "Found 0 candidates" with exit 0.
+    if ! ensure_work_dir; then
+        log_msg error "Cannot create the private work directory under '${TMPDIR:-/tmp}' (not writable, or a directory of that name exists and is not ours)"
+        exit 1
+    fi
 
     # Send collection begin marker; capture scan_id if server returns one
     if [ "$DRY_RUN" -eq 0 ]; then
         if ! detect_upload_tool; then
             log_msg error "Neither 'curl' nor 'wget' is installed; unable to upload samples"
-            exit 2
+            exit 3
         fi
         local _begin_resp_file
         local _begin_rc=0
-        _begin_resp_file="$(mktemp_portable)" || { log_msg error "Cannot create temp file"; exit 2; }
-        TMP_FILES_ARR+=("$_begin_resp_file")
+        _begin_resp_file="$(mktemp_portable)" || { log_msg error "Cannot create temp file"; exit 1; }
         collection_marker "$base_url" "begin" "" "" > "$_begin_resp_file"
         _begin_rc=$?
         SCAN_ID="$(cat "$_begin_resp_file" 2>/dev/null)"
         # If the begin marker failed after retry, the server is unreachable — fatal error
         if [ "$_begin_rc" -ne 0 ]; then
             log_msg error "Cannot connect to Thunderstorm server at ${base_url} (begin marker failed after retry)"
-            exit 2
+            exit 1
         fi
         if [ -n "$SCAN_ID" ]; then
             log_msg info "Collection scan_id: $SCAN_ID"
@@ -1035,144 +2427,178 @@ main() {
     else
         SHOW_PROGRESS=0
     fi
+    return 0
+}
 
-    # Build find exclusions once (shared across all scan dirs)
-    local find_excludes=()
-    local _ep
+# build_exclusion_base -- assemble the run-wide inputs the per-root exclusion machinery consumes:
+# the anchor list (built-ins plus every network / pseudo-filesystem mount point), the cloud-name
+# tests, the CloudStorage prune, the byte bound derived from --max-size-kb, this run\'s own
+# artifacts, and the predicates used to judge a symlink target. Per-root spelling happens later in
+# compose_root_excludes; this function only decides WHAT is excluded, never HOW it is spelled.
+# Writes: exclude_path_list, cloud_name_tests, cloudstorage_prune, _max_size_c, _self_paths,
+# link_stat_test, _link_targets_done.
+build_exclusion_base() {
+    # Base exclusions, kept as a plain path list so each scan root composes its own prune
+    # set: an explicitly requested root must not be blocked by its own anchor, while
+    # everything else stays pruned.
+    exclude_path_list=()
+    local _ep _cloud_name _old_ifs _selfp _logdir _logbase
     for _ep in "${EXCLUDE_PATHS[@]}"; do
-        [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
+        [ -d "$_ep" ] && exclude_path_list+=("$_ep")
     done
-    local _mount_list
-    _mount_list="$(get_excluded_mounts)"
-    if [ -n "$_mount_list" ]; then
-        while IFS= read -r _ep; do
-            [ -n "$_ep" ] && [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
-        done <<< "$_mount_list"
+    # Never stat a network or pseudo-filesystem mount point — not even '[ -d ]'. A dead NFS
+    # or CIFS export, or an autofs trigger, answers stat with an uninterruptible hang, and
+    # this list is built before any scanning on EVERY run. The type is already known from
+    # the mount table; a -path prune on a path that turns out not to exist is harmless. The
+    # points arrive as an array (excluded_mounts_lookup), so one containing a newline stays
+    # one prune.
+    excluded_mounts_lookup
+    exclude_path_list+=("${EXCLUDED_MOUNTS_OUT[@]+"${EXCLUDED_MOUNTS_OUT[@]}"}")
+    # With no mount table the two filesystem-class gates (roots and every link hop) can refuse
+    # nothing — say so once per run, here, before any scanning. Dry-run is the mode operators
+    # use to check exactly this.
+    load_mount_table   # idempotent; guarantees the table is in THIS process, not a subshell
+    if [ "${#MOUNT_POINTS[@]}" -eq 0 ]; then
+        log_msg warn "Mount table unavailable (/proc/mounts unreadable and no usable mount(8) output): network and kernel pseudo-filesystems cannot be recognised; only the built-in path exclusions apply"
     fi
 
-    # Prune known cloud storage directory names at the find level so they are
-    # excluded from both the file count and processing (keeps progress accurate).
-    local _cloud_name
+    # Cloud storage exclusion: a folder NAME like "Dropbox" is only a candidate — real
+    # cloud storage is excluded only with positive evidence (cloud_dir_evidence). Build the
+    # name tests once here; each scan root then runs a candidate pass that verifies matches
+    # and prunes only proven sync folders. The macOS CloudStorage location is proof by
+    # itself, so it stays a direct prune in the base excludes.
+    cloud_name_tests=()
     for _cloud_name in $CLOUD_DIR_NAMES; do
-        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
+        [ "${#cloud_name_tests[@]}" -gt 0 ] && cloud_name_tests+=(-o)
+        cloud_name_tests+=(-iname "$_cloud_name")
     done
-    local _old_ifs="$IFS"
+    _old_ifs="$IFS"
     IFS='|'
     for _cloud_name in $CLOUD_DIR_NAMES_SPACED; do
-        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
+        cloud_name_tests+=(-o -iname "$_cloud_name")
     done
     for _cloud_name in $CLOUD_DIR_PATTERNS; do
-        find_excludes+=(\( -iname "${_cloud_name}*" -type d -prune \) -o)
+        cloud_name_tests+=(-o -iname "${_cloud_name}*")
     done
     IFS="$_old_ifs"
-    # Also prune macOS CloudStorage
-    find_excludes+=(\( -iname "CloudStorage" -path "*/Library/CloudStorage" -type d -prune \) -o)
+    # The macOS CloudStorage location is positive evidence by itself — always pruned. -path
+    # alone pins the exact, case-sensitive final component; the former -iname test was
+    # redundant and non-POSIX, and a find without -iname made EVERY root fail enumeration.
+    cloudstorage_prune=(\( -path "*/Library/CloudStorage" -type d -prune \) -o)
+
+    # the size limit is enforced by find during discovery. '-size -Nc' (bytes) is the
+    # one POSIX size unit — identical on GNU/BSD/macOS/busybox — and find reads the size
+    # from the stat it already performs, so the check is free (no per-file fork later).
+    # Keeping bytes makes the boundary bit-identical to the former KB rule:
+    # ceil(bytes/1024) <= MAX  <=>  bytes <= MAX*1024  <=>  -size -"(MAX*1024+1)"c.
+    _max_size_c=$(( MAX_FILE_SIZE_KB * 1024 + 1 ))
+
+    # never collect our own artifacts. The private work directory and the log file are
+    # excluded from every walk by EXACT path — never by name pattern (a pattern would
+    # over-exclude user files and hand attackers a camouflage name, the same hole closed
+    # for cloud folders). Stale work dirs from crashed runs are collected on purpose:
+    # over-collection is the safe forensic direction.
+    # Both are kept as PHYSICAL (-P) paths (logical only if -P fails): the symlink-target
+    # check judges a link by its fully resolved target, and the walk prune is spelled
+    # PER ROOT from the physical relationship (spell_under_root, at prune composition) —
+    # find prints '<root as spelled>/<physical tail>', which matches neither the logical nor
+    # the physical spelling of an artifact reached through a symlinked TMPDIR or cwd (macOS:
+    # /var -> /private/var, /tmp -> /private/tmp), so the collector uploaded its own
+    # find.err, result lists and live log.
+    _self_paths=()
+    if ensure_work_dir && { resolve_dir -P "$TS_WORK_DIR" || resolve_dir -L "$TS_WORK_DIR"; }; then
+        _self_paths+=("$RESOLVE_DIR_OUT")
+        log_msg debug "Excluding own work directory '$RESOLVE_DIR_OUT'"
+    fi
+    if [ "$LOG_TO_FILE" -eq 1 ]; then
+        _logdir _logbase
+        case "$LOGFILE" in
+            */*) _logdir="${LOGFILE%/*}"; _logbase="${LOGFILE##*/}" ;;
+            *)   _logdir=".";             _logbase="$LOGFILE" ;;
+        esac
+        if resolve_dir -P "${_logdir:-/}" || resolve_dir -L "${_logdir:-/}"; then
+            _self_paths+=("${RESOLVE_DIR_OUT%/}/$_logbase")
+            log_msg debug "Excluding own log file '${RESOLVE_DIR_OUT%/}/$_logbase'"
+        fi
+    fi
+
+    # predicates for testing a symlink's DEREFERENCED target (single path, -prune, no
+    # traversal) — the same size/age policy the walk applies to regular files.
+    link_stat_test=(-prune -type f -size "-${_max_size_c}c")
+    [ "$MAX_AGE" -gt 0 ] && link_stat_test+=(-mtime "-${MAX_AGE}")
+    # resolved targets already delivered through a link this run — a second link to
+    # the same file is accounted as a duplicate, not uploaded again.
+    _link_targets_done=()
+    return 0
+}
+main() {
+    local scheme="http"
+    local endpoint_name="check"
+    local query_source=""
+    local api_endpoint=""
+    local base_url=""
+    local scandir
+    local file_path
+    local elapsed=0
+    local find_results_file
+    local find_rc=0
+    local _canon_mode
+    local _resolved
+    local _accounted=0
+    local _link_breakdown=0
+    local reconcile_failed=0
+    local _i
+    local _dup
+    local _cmpdir
+    local _root_is_link
+    local cloud_prunes
+    local _cand_file
+    local _cand
+    local _cloud_ev
+    local _p
+    local walk_excludes
+    local _fstype
+    local _excluded_note
+    local _physdir
+    local _physnote
+    local _entry
+    local _known
+    local _in_cloud_scope
+    local _keep_cloudstorage_prune
+    local _find_err
+    local _find_msg
+    local _covered
+    local _child_prunes
+    local _dir_errs
+    local _word
+    local _folders _f
+    local _typed _typed_ok _kind
+
+    parse_args "$@"
+    # Options are known: open the file sink. validate_config's usage errors and every runtime
+    # error from here on are logged to the configured file (or nowhere, with --no-log-file).
+    prepare_run
+
+    build_exclusion_base
 
     # First pass: collect all file lists and count total files for progress
     local all_find_files=()
+    local _seen_dirs=()
+    local _seen_phys=()
     for scandir in "${SCAN_FOLDERS[@]}"; do
-        if [ ! -d "$scandir" ]; then
-            log_msg warn "Skipping non-directory path '$scandir'"
-            continue
-        fi
+        classify_root || continue
+        compose_root_excludes
 
-        log_msg info "Scanning '$scandir'"
-        find_results_file="$(mktemp_portable)" || {
-            log_msg error "Could not create temporary file list for '$scandir'"
-            continue
-        }
-        TMP_FILES_ARR+=("$find_results_file")
-        if [ "$MAX_AGE" -gt 0 ]; then
-            find "$scandir" "${find_excludes[@]}" -type f -mtime "-${MAX_AGE}" -print0 > "$find_results_file" 2>/dev/null || true
-        else
-            # MAX_AGE=0 means no age filter — collect all files regardless of modification time
-            find "$scandir" "${find_excludes[@]}" -type f -print0 > "$find_results_file" 2>/dev/null || true
-        fi
-        all_find_files+=("$find_results_file")
-
-        # Count files in this result set (each entry is null-terminated by -print0)
-        local _count=0
-        if [ -s "$find_results_file" ]; then
-            # Count null bytes = number of file entries from -print0
-            _count="$(tr -cd '\0' < "$find_results_file" 2>/dev/null | wc -c)"
-            # Normalize whitespace from wc output
-            _count="${_count//[[:space:]]/}"
-            _count="${_count:-0}"
-        fi
-        TOTAL_FILES=$((TOTAL_FILES + _count))
+        root_cloud_scope
+        enumerate_root || continue
     done
 
-    log_msg info "Found $TOTAL_FILES candidate files"
+    log_msg info "Found $TOTAL_FILES candidates ($((TOTAL_FILES - TOTAL_LINKS)) files, $TOTAL_LINKS symlinks)"
 
-    local _processed=0
-    for find_results_file in "${all_find_files[@]}"; do
-        while IFS= read -r -d '' file_path; do
-            # Check for interruption between files
-            [ "$INTERRUPTED" -eq 1 ] && break 2
+    collect_entries "$api_endpoint"
 
-            _processed=$((_processed + 1))
-
-            # Show progress
-            if [ "$SHOW_PROGRESS" -eq 1 ] && [ "$TOTAL_FILES" -gt 0 ]; then
-                printf '\r[%d/%d] %d%%' "$_processed" "$TOTAL_FILES" "$(( _processed * 100 / TOTAL_FILES ))" >&2
-            fi
-
-            [ -f "$file_path" ] || continue
-
-            FILES_SCANNED=$((FILES_SCANNED + 1))
-
-            # Skip files inside cloud storage folders
-            if is_cloud_path "$file_path"; then
-                FILES_SKIPPED=$((FILES_SKIPPED + 1))
-                log_msg debug "Skipping cloud storage path '$file_path'"
-                continue
-            fi
-
-            size_kb="$(file_size_kb "$file_path")"
-            if [ "$size_kb" -lt 0 ]; then
-                FILES_SKIPPED=$((FILES_SKIPPED + 1))
-                log_msg debug "Skipping unreadable file '$file_path'"
-                continue
-            fi
-
-            if [ "$size_kb" -gt "$MAX_FILE_SIZE_KB" ]; then
-                FILES_SKIPPED=$((FILES_SKIPPED + 1))
-                log_msg debug "Skipping '$file_path' due to size (${size_kb}KB)"
-                continue
-            fi
-
-            log_msg debug "Submitting '$file_path'"
-            if submit_file "$api_endpoint" "$file_path"; then
-                FILES_SUBMITTED=$((FILES_SUBMITTED + 1))
-            else
-                FILES_FAILED=$((FILES_FAILED + 1))
-                log_msg error "Could not upload '$file_path'"
-            fi
-        done < "$find_results_file"
-    done
-
-    if [ "$START_TS" -gt 0 ] 2>/dev/null; then
-        elapsed=$(( $(date +%s 2>/dev/null || echo "$START_TS") - START_TS ))
-        [ "$elapsed" -lt 0 ] && elapsed=0
-    fi
-
-    # Clear progress line if we were showing progress
-    if [ "$SHOW_PROGRESS" -eq 1 ]; then
-        printf '\r\033[K' >&2
-    fi
-
-    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$elapsed"
-
-    # Send collection end marker with run statistics
-    if [ "$DRY_RUN" -eq 0 ]; then
-        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${elapsed}}"
-        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null
-    fi
-
-    if [ "$FILES_FAILED" -gt 0 ]; then
-        return 1
-    fi
-    return 0
+    report_run "$base_url"
+    return $?
 }
 
 main "$@"

@@ -200,7 +200,10 @@ upload_count() {
 # Extract stat from collector output: "scanned=4 submitted=3 ..."
 parse_collector_stat() {
     local output="$1" key="$2"
-    echo "$output" | grep -oE "${key}=[0-9]+" | tail -1 | cut -d= -f2
+    # Anchor on the field separator: the summary line also carries links_seen/
+    # links_collected/links_skipped, and an unanchored "skipped=" matches inside
+    # "links_skipped=" — with tail -1 that returned the link count for key=skipped.
+    printf '%s\n' "$output" | grep -oE "(^|[[:space:]])${key}=[0-9]+" | tail -1 | cut -d= -f2
 }
 
 # ── Test result helpers ──────────────────────────────────────────────────────
@@ -288,7 +291,10 @@ create_fake_tool_path() {
     local dir="$TEST_TMP/fake-tools-$1"
     mkdir -p "$dir"
     local cmd path
-    for cmd in bash awk cat date find grep head hostname id mktemp od rm sed sleep tail tr uname wc; do
+    # Mirror the real environment: the collector needs mkdir for its private work directory
+    # and readlink to resolve symlink targets. Omitting them made these fake-PATH tests abort
+    # before the scan, so their assertions never exercised what they were written for.
+    for cmd in bash awk cat date find grep head hostname id mkdir mktemp od readlink rm sed sleep tail tr uname wc; do
         path="$(command -v "$cmd" 2>/dev/null || true)"
         [ -n "$path" ] && ln -sf "$path" "$dir/$cmd"
     done
@@ -373,13 +379,14 @@ test_max_file_size_filter() {
     create_file "$d/small.bin" "small"                    # ~5 bytes
     create_file_bytes "$d/big.bin" 60000                  # ~59 KB
 
-    # Set max size to 50 KB
+    # Set max size to 50 KB. F19: the limit is applied by find at discovery (like
+    # --max-age), so the oversize file is never discovered — not counted as skipped.
     local out; out="$(run_collector --dir "$d" --max-size-kb 50 --max-age 30 --debug)"
     local submitted; submitted="$(parse_collector_stat "$out" submitted)"
     local skipped; skipped="$(parse_collector_stat "$out" skipped)"
 
     assert_eq "submitted" "1" "$submitted" || return 1
-    assert_eq "skipped" "1" "$skipped" || return 1
+    assert_eq "skipped (oversize filtered at discovery)" "0" "$skipped" || return 1
 }
 
 # ── 5. Max age filter ───────────────────────────────────────────────────────
@@ -418,19 +425,43 @@ test_multiple_directories() {
 
 # ── 7. Non-existent directory warning ────────────────────────────────────────
 
-test_nonexistent_directory_warning() {
+test_nonexistent_directory_fails() {
     restart_stub
     local d; d="$(create_sample_dir exists)"
     create_file "$d/a.txt"
 
-    # Also pass a non-existent dir — collector should warn but continue
-    local out; out="$(bash "$COLLECTOR" \
+    # F2: an explicitly named missing dir is a collection failure — the collector reports an
+    # error, still scans the other (good) dir, and exits non-zero (interim: existing return 1).
+    local out rc
+    out="$(bash "$COLLECTOR" \
         --server "$(server_host)" --port "$STUB_PORT" --no-log-file \
         --dir /nonexistent_path_$RANDOM --dir "$d" --max-age 30 2>&1)"
+    rc=$?
 
-    assert_contains "warn about missing dir" "non-directory" "$out" || return 1
+    assert_contains "error about missing dir" "does not exist or is not accessible" "$out" || return 1
     local submitted; submitted="$(parse_collector_stat "$out" submitted)"
-    assert_eq "submitted" "1" "$submitted" || return 1
+    assert_eq "submitted (good dir still scanned)" "1" "$submitted" || return 1
+    assert_eq "exit 4 (partial failure) on bad explicit dir" "4" "$rc" || return 1
+}
+
+test_cloud_exclusion_by_proof() {
+    restart_stub
+    local d; d="$(create_sample_dir cloudproof)"
+    # (a) PROVEN real cloud: contains markers only the Dropbox client creates -> excluded
+    mkdir -p "$d/Dropbox/.dropbox.cache"
+    create_file "$d/Dropbox/synced.txt"
+    # (b) merely NAMED like cloud (no markers) -> must be collected (F13 headline case)
+    mkdir -p "$d/cases/Dropbox"
+    create_file "$d/cases/Dropbox/evidence.txt"
+    create_file "$d/plain.txt"
+
+    local out rc
+    out="$(run_collector --dir "$d" --max-age 30)"; rc=$?
+    assert_contains "proven cloud excluded visibly" "Excluding cloud storage folder" "$out" || return 1
+    assert_contains "name-only folder scanned with note" "despite cloud-like name" "$out" || return 1
+    local submitted; submitted="$(parse_collector_stat "$out" submitted)"
+    assert_eq "submitted (plain.txt + name-only Dropbox file)" "2" "$submitted" || return 1
+    assert_eq "clean exit" "0" "$rc" || return 1
 }
 
 # ── 8. Source parameter arrives at server ────────────────────────────────────
@@ -593,8 +624,8 @@ test_missing_server_rejected() {
         --server "" --port 8080 --no-log-file \
         --dir /tmp 2>&1)" || true
 
-    # Empty string is caught as "Missing value" by the arg parser
-    assert_contains "server validation" "Missing value" "$out" || return 1
+    # An empty value is reported distinctly from a forgotten one (require_value)
+    assert_contains "server validation" "Empty value for --server" "$out" || return 1
 }
 
 # ── 19. Unknown option rejected ──────────────────────────────────────────────
@@ -695,7 +726,9 @@ EOF
     set -e
 
     local failed; failed="$(parse_collector_stat "$out" failed)"
-    assert_eq "exit code" "1" "$rc" || return 1
+    # Exit-code taxonomy: the run completed but a file could not be collected => 4 (partial
+    # failure). 1 is reserved for "could not run at all".
+    assert_eq "exit code" "4" "$rc" || return 1
     assert_eq "failed" "1" "$failed" || return 1
     assert_contains "retry message" "attempt" "$out" || return 1
 }
@@ -808,7 +841,8 @@ EOF
     rc=$?
     set -e
 
-    assert_eq "exit code" "2" "$rc" || return 1
+    # Server unreachable is a RUNTIME error => 1; 2 is reserved for usage/config errors.
+    assert_eq "exit code" "1" "$rc" || return 1
     assert_contains "begin marker failure message" "begin marker failed after retry" "$out" || return 1
 }
 
@@ -890,7 +924,8 @@ EOF
     local submitted; submitted="$(parse_collector_stat "$out" submitted)"
     local failed; failed="$(parse_collector_stat "$out" failed)"
 
-    assert_eq "exit code" "1" "$rc" || return 1
+    # Partial failure (the run happened, one file could not be collected) => exit 4
+    assert_eq "exit code" "4" "$rc" || return 1
     assert_eq "submitted" "0" "$submitted" || return 1
     assert_eq "failed" "1" "$failed" || return 1
     assert_contains "redirect status logged" "HTTP 302" "$out" || return 1
@@ -926,7 +961,8 @@ run_test test_dry_run_no_uploads
 run_test test_max_file_size_filter
 run_test test_max_age_filter
 run_test test_multiple_directories
-run_test test_nonexistent_directory_warning
+run_test test_nonexistent_directory_fails
+run_test test_cloud_exclusion_by_proof
 run_test test_source_parameter_received
 run_test test_file_content_integrity
 run_test test_filename_with_spaces

@@ -5,3 +5,5 @@ settings.json
 go/dist/
 .DS_Store
 CLAUDE.md
+.claude/
+.devcontainer/
