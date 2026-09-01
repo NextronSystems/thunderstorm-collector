@@ -44,10 +44,45 @@ CA_CERT=""
 ASYNC_MODE=1
 
 MAX_AGE=14
+# Which timestamp --max-age measures: "mtime", "ctime" or "any" (both). Default "any": touch -d
+# backdates mtime freely but necessarily updates ctime, which no userspace call can set; ctime
+# alone would miss a forward stomp — the one case where mtime > ctime.
+AGE_TIMESTAMP="any"
 MAX_FILE_SIZE_KB=2000
+# Which spelling of the size flag the operator used, so validate_config's errors name the flag
+# they actually typed. require_value already interpolates "$arg"; without this the two halves of
+# the diagnostic path disagreed and '--max-size-kb xyz' was answered with "max-size must be
+# numeric" — a flag that never appeared on the command line.
+MAX_SIZE_FLAG="--max-size"
+# Count what the size/age gates removed: up to five extra find walks per root (~135 ms -> 240 ms
+# on /usr, 9080 files). --no-count-filtered skips them, and the run says so rather than print zeros.
+COUNT_FILTERED=1
 DEBUG=0
 DRY_RUN=0
 RETRIES=3
+
+# The age half of the discovery policy, built once per run by build_age_tests and used by BOTH
+# the walk and the symlink-target test, so the two can never drift apart. Empty when the age
+# filter is off (--max-age 0).
+declare -a AGE_TESTS=()
+# The two arms of AGE_TESTS kept separately, so the counting pass can ask "which arm matched
+# this file" without re-deriving the window.
+declare -a AGE_MTIME_TEST=()
+declare -a AGE_CTIME_TEST=()
+# The size half of the same policy: six call sites consume it, and a bound that drifted between
+# them would silently mean two different policies in one run.
+declare -a SIZE_TEST=()
+# The POSITIVE spelling of "over the limit", used by the counting walk. It is not merely the
+# negation of SIZE_TEST: '! -size -Nc' is also true for a file whose size cannot be READ, and
+# find answers '-type f' from the directory entry without a stat, so under a directory that is
+# readable but not searchable (mode 0444 — an ordinary non-root situation) every file in it was
+# reported as "over the size limit". Reproduced as an unprivileged user: four 100-byte files
+# counted as oversize. '-size +Mc' is false when the stat fails, so it counts only files
+# actually measured to be too big.
+declare -a OVERSIZE_TEST=()
+AGE_PRECISION=""       # "minute" or "day" — which predicate family the local find supports
+AGE_CUTOFF_TEXT=""     # human-readable absolute cutoff, for the run log ("" if date cannot help)
+AGE_FUTURE_REF=""      # file stamped at run start, for the POSIX -newer future-timestamp test
 
 UPLOAD_TOOL=""
 # every temp file the collector makes lives in ONE private work directory (created on
@@ -74,7 +109,29 @@ FOLLOW_SYMLINKS=0
 
 FILES_SCANNED=0
 FILES_SUBMITTED=0
-FILES_SKIPPED=0        # reserved for policy skips; size/age are applied at discovery, so 0
+FILES_SKIPPED=0        # discovered, then skipped by policy. Structurally 0: the size and age
+# gates live inside find, so an excluded file is never discovered in the first place. It is kept
+# in the summary for compatibility with existing scrapers; the files those gates removed are
+# counted below instead. Retiring the key entirely is a breaking change to the summary contract.
+# What the size and age gates removed at DISCOVERY, disjoint by construction — a file that is
+# both oversize and too old counts once, as size:
+#   size_filtered = regular files failing the size gate
+#   age_filtered  = regular files passing size but failing the age gate
+FILES_AGE_FILTERED=0
+FILES_SIZE_FILTERED=0
+# Files the ctime arm ALONE brought in under "any". ctime moves on chmod/chown/hardlink/package
+# upgrades and can multiply the collection; the size of that trade is reported, not left to be
+# inferred from the server's sample count.
+FILES_AGE_CTIME_ONLY=0
+# Set when the policy counts do not reconcile with the tree: they are measured after the discovery
+# walk, so a directory changing in between makes them a snapshot. Reported, never silently corrected.
+COUNT_CHURNED=0
+# Set when no forward-stamped reference could be made, so future= was never measured for a root.
+FUTURE_UNMEASURED=0
+# Collected files whose mtime is ahead of the host clock. Collected, never excluded — a forward
+# stomp must not hide a file any more than a backward one — but counted and warned, because a
+# future timestamp is itself an indicator and how clock skew becomes visible on a fleet.
+FILES_FUTURE=0
 # A discovered file that was not collected is FAILED, whatever the reason — the convention of
 # rsync ("partial transfer", code 23; "vanished", code 24) and of tar/find on unreadable input.
 # The breakdown names the reason. Identity, checked at reconciliation:
@@ -111,7 +168,12 @@ LINKS_FS_REFUSED=0     # target on a network or kernel pseudo-filesystem (refuse
 LINKS_SELF_EXCLUDED=0  # target is the collector's own work directory or log file
 LINKS_IN_SCOPE=0       # target inside a scan root: the walk already decided about it
 LINKS_DUP=0            # another link already delivered this resolved target
-LINKS_FILTERED=0       # target outside the size/age policy
+# Which gate removed a link target, split so size_filtered= is not silently incomplete under
+# --follow-symlinks. Reported as filtered_size=/filtered_age=, deliberately NOT as
+# size_filtered=/age_filtered=: those keys already appear on the summary line, and a scraper
+# taking the last match would read a link count where it wanted a file count.
+LINKS_SIZE_FILTERED=0  # target over the size limit
+LINKS_AGE_FILTERED=0   # target inside the size limit but outside the age window
 LINKS_DANGLING=0       # dangling, or target is not a regular file (FIFO, device, socket)
 LINKS_UNRESOLVABLE=0   # readlink unavailable, chain too long, or broken mid-chain
 TOTAL_LINKS=0          # symlinks among the discovered entries (for the discovery summary)
@@ -356,6 +418,26 @@ cleanup_tmp_files() {
 
 INTERRUPTED=0
 
+# build_stats_json -- the run's counters as the marker payload's "stats" object, in
+# STATS_JSON_OUT. $1 is the elapsed seconds to report.
+#
+# ONE spelling of this 19-field object, because there are two markers that carry it (the end
+# marker and the interrupted marker) and they were written out twice, verbatim. That
+# duplication is not hypothetical drift: max_size_kb was added to the end marker's copy and
+# not to the interrupted one, so a run that was interrupted reported size_filtered= with no
+# way to know which limit produced it. A shared builder makes that class of divergence
+# unrepresentable rather than merely fixed once.
+#
+# size_bound_bytes accompanies max_size_kb because the wire format is the one place the KB/KiB
+# ambiguity still bit: "kb" in a field name is exactly what the run log was rewritten to stop
+# relying on, and a disabled size gate had to be INFERRED from max_size_kb:0 where the age gate
+# states it outright with age_precision:"none". Derived from MAX_FILE_SIZE_KB, not from
+# SIZE_TEST, so it is correct even when an interrupt fires before the policy arrays are built.
+STATS_JSON_OUT=""
+build_stats_json() {
+    STATS_JSON_OUT="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"age_filtered\":${FILES_AGE_FILTERED},\"size_filtered\":${FILES_SIZE_FILTERED},\"age_ctime_only\":${FILES_AGE_CTIME_ONLY},\"future\":${FILES_FUTURE},\"max_size_kb\":${MAX_FILE_SIZE_KB},\"size_bound_bytes\":$(( MAX_FILE_SIZE_KB * 1024 )),\"max_age\":${MAX_AGE},\"age_timestamp\":\"${AGE_TIMESTAMP}\",\"age_precision\":\"${AGE_PRECISION:-none}\",\"counts_measured\":${COUNT_FILTERED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${1:-0}}"
+}
+
 send_interrupted_marker() {
     if [ "$DRY_RUN" -eq 0 ] && [ -n "$THUNDERSTORM_SERVER" ]; then
         local _elapsed=0
@@ -365,7 +447,9 @@ send_interrupted_marker() {
             _elapsed=$(( _now - START_TS ))
             [ "$_elapsed" -lt 0 ] && _elapsed=0
         fi
-        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${_elapsed}}"
+        local _stats
+        build_stats_json "$_elapsed"
+        _stats="$STATS_JSON_OUT"
         local _scheme="http"
         [ "$USE_SSL" -eq 1 ] && _scheme="https"
         local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
@@ -444,10 +528,13 @@ log_msg() {
 }
 
 die() {
-    # A usage error thrown while options are still being parsed cannot reach the log file yet
-    # (LOG_FILE_READY); make sure it reaches the terminal even under --quiet rather than
-    # exiting 2 without a word. die exits, so forcing the sink here changes nothing else.
-    [ "$LOG_FILE_READY" -eq 1 ] || LOG_TO_CMDLINE=1
+    # A usage error must never exit without reaching some sink: force the terminal while the log
+    # file is not ready, and whenever every sink is disabled (--quiet --no-log-file, no --syslog).
+    # die exits, so forcing the sink here changes nothing else.
+    if [ "$LOG_FILE_READY" -ne 1 ] || { [ "$LOG_TO_CMDLINE" -eq 0 ] \
+        && [ "$LOG_TO_FILE" -eq 0 ] && [ "$LOG_TO_SYSLOG" -eq 0 ]; }; then
+        LOG_TO_CMDLINE=1
+    fi
     log_msg error "$*"
     exit 2
 }
@@ -475,8 +562,14 @@ Options:
   -s, --server <host>        Thunderstorm server hostname or IP
   -p, --port <port>          Thunderstorm port (default: 8080)
   -d, --dir <path>           Directory to scan (repeatable; replaces the defaults)
-  --max-age <days>           Max file age in days (default: 14)
-  --max-size-kb <kb>         Max file size in KB (default: 2000)
+  --max-age <days>           Collect files younger than <days>; 0 = no age filter (default: 14)
+  --age-timestamp <which>    File clock --max-age is measured on: mtime, ctime, or any
+                             of the two (default: any - a backdated mtime cannot hide a file)
+  --max-size <kb>            Collect files up to <kb> KiB (1 KiB = 1024 bytes);
+                             0 = no size filter (default: 2000 KiB = 2048000 bytes)
+                             (--max-size-kb is the former name and still works)
+  --no-count-filtered        Skip the counting walks; age_filtered=, size_filtered=,
+                             age_ctime_only= and future= then read 0, unmeasured
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
@@ -506,6 +599,30 @@ Notes:
   Symbolic links are never followed by default. With --follow-symlinks a link to a FILE is
   collected under its real path; a link to a DIRECTORY is listed and scanned only if you
   name it with --dir.
+  --max-age counts 24-hour periods measured when each directory is reached, not calendar days:
+  --max-age 14 keeps files strictly younger than 14x24h, so a file aged exactly 14x24h is left
+  out. The window is evaluated to the minute; where find has no -mmin it falls back to whole
+  days and the exact boundary becomes that find's own rounding: GNU keeps the exactly-14x24h
+  file, busybox drops it, and BSD/macOS rounds the age UP, which makes the window up to a day
+  TIGHTER there (--max-age 1 collects nothing). Prefer a find with -mmin when the edge matters.
+  --max-age 0 turns the age filter OFF and collects every file whatever its timestamp. The
+  window is measured against the modification time OR the inode change time (ctime), because
+  anyone who can write a file can backdate its mtime with touch while ctime cannot be set that
+  way; --age-timestamp mtime narrows it to mtime alone, ctime to ctime alone. A file whose
+  timestamp lies in the future is always collected, and counted in future=. The run summary
+  reports age_filtered= and size_filtered= for what the two gates removed at discovery, and
+  age_ctime_only= for the files the ctime arm alone brought in.
+  --max-size is measured in KiB (1024 bytes), as in the Go collector, and the bound is
+  INCLUSIVE: --max-size 2000 collects a file of exactly 2048000 bytes and leaves out one of
+  2048001. It is measured on the file's apparent size — the bytes that would go on the wire —
+  so a sparse file counts as its full logical length. A zero-byte file is inside every bound.
+  --max-size 0 turns the size filter OFF, the way --max-age 0 turns the age filter off.
+  With --follow-symlinks the same bound is applied to a link's resolved TARGET, not to the
+  link; a target the gate removes is counted in the symlink breakdown's filtered=, which does
+  not split size from age, rather than in size_filtered=.
+  The size limit bounds DISCOVERY only. It is not a promise about what the server will accept:
+  a Thunderstorm behind a reverse proxy may cap how long one upload request may take, which
+  makes the largest deliverable file a function of your bandwidth rather than of this flag.
   Never collected: kernel pseudo-filesystems, network filesystems unless you name them, and
   cloud-sync folders excluded on positive evidence (their client's marker files).
   scripts/bash/README.md documents the exclusion, accounting and exit-code rules in full.
@@ -901,6 +1018,27 @@ detect_upload_tool() {
     return 1
 }
 
+# http_status_is_terminal -- true ONLY for a 4xx the server means as a verdict about THIS
+# request, which re-sending the same body cannot change: 413 Payload Too Large above all, since
+# retrying it re-uploads the whole file for a guaranteed second refusal (CLAUDE.md §2: "retry
+# only failures the protocol classifies as transient ... not most 4xx"). 408 and 429 are the two
+# 4xx the protocol documents as retryable and are excluded.
+#
+# The default is RETRY, and the direction of that default is the whole point. Written the other
+# way round -- "retryable unless in a known-good set" -- the status seen when a transfer dies
+# partway is often not a verdict at all, and the collector silently stops retrying real transient
+# failures. Measured: a peer that answers "100 Continue" and then drops the connection leaves
+# HTTP/1.1 100 Continue as the ONLY status line in curl's -D file, so the parser yields 100;
+# under the inverted spelling that ordinary network failure was classified non-retryable and the
+# file was abandoned after one attempt instead of the configured --retries.
+http_status_is_terminal() {
+    case "$1" in
+        408|429)     return 1 ;;
+        4[0-9][0-9]) return 0 ;;
+        *)           return 1 ;;
+    esac
+}
+
 upload_with_curl() {
     local endpoint="$1"
     local filepath="$2"
@@ -925,7 +1063,13 @@ upload_with_curl() {
     local err_file
     err_file="$(scratch_file curl.err)" || return 91
 
+    # A total timeout alone leaves a black-holed SYN eating the whole budget per file
+    # (CLAUDE.md §2 asks for connect AND total). --max-time bounds the transfer; note it is a
+    # CLIENT bound only — a reverse proxy in front of Thunderstorm may enforce a much shorter
+    # per-request window, in which case it, not this value, decides the largest file that can
+    # actually be delivered. See the note in submit_file.
     curl -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
+        --connect-timeout 10 \
         --max-time 300 \
         -D "$header_file" \
         "$endpoint" \
@@ -955,6 +1099,21 @@ upload_with_curl() {
     fi
 
     if [ $code -ne 0 ]; then
+        # The server's verdict must not be thrown away just because the transfer also failed.
+        # curl exits 18 (partial transfer) / 28 (timeout) when a proxy closes the request
+        # mid-body, and the status line it already sent was being discarded here: the operator
+        # saw only "code 18" for what was in fact a reported HTTP 502. Observed against a live
+        # Thunderstorm behind a proxy with a ~60 s per-request window: a 450 MB upload was cut
+        # at 60 s with 502, three times over, and nothing in the log named the status.
+        if [ -n "$http_code" ]; then
+            log_msg error "Upload of '$filepath' failed after the server returned HTTP $http_code (curl exit $code, transfer incomplete)"
+            http_status_is_terminal "$http_code" && return 97
+        fi
+        # A transfer that dies partway through a large body is usually the peer's per-request
+        # window, not a flaky link — and every retry re-sends the whole file. Name the knob.
+        case "$code" in
+            18|28) log_msg warn "'$filepath' was cut off mid-transfer; if this repeats for large files the server or a proxy in front of it is enforcing a shorter per-request window than this client — lower --max-size so files stay inside it" ;;
+        esac
         return $code
     fi
 
@@ -968,6 +1127,7 @@ upload_with_curl() {
                 body="${body//$'\r'/ }"
                 body="${body//$'\n'/ }"
                 log_msg error "Server returned HTTP $http_code for '$filepath': $body"
+                http_status_is_terminal "$http_code" && return 97
                 return 92
                 ;;
         esac
@@ -995,7 +1155,12 @@ upload_with_wget() {
     local _boundary_attempts=0
     boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}$(date +%s%N 2>/dev/null || printf '%s\n' 0)"
     while [ "$_boundary_attempts" -lt 10 ]; do
-        if ! LC_ALL=C grep -qF "$boundary" "$filepath" 2>/dev/null; then
+        # '-e' is not optional: the boundary begins with '----', so without it grep parses the
+        # pattern as an option bundle, exits 2 WITHOUT READING A BYTE, 2>/dev/null hides the
+        # diagnostic and the leading '!' turns that error into "no collision found". The guard
+        # was inert for every file; a file containing the boundary would have silently produced
+        # a corrupt multipart body.
+        if ! LC_ALL=C grep -qF -e "$boundary" "$filepath" 2>/dev/null; then
             # Also check it doesn't appear in metadata fields
             case "${SOURCE_NAME}${filepath}" in
                 *"$boundary"*) ;;
@@ -1008,19 +1173,47 @@ upload_with_wget() {
     if [ "$_boundary_attempts" -ge 10 ]; then
         log_msg warn "Could not find safe multipart boundary for '$filepath', upload may be malformed"
     fi
-    body_file="$(scratch_file wget.body)" || return 93
-    resp_file="$(scratch_file wget.resp)" || return 94
-    header_file="$(scratch_file wget.hdr)" || return 94
+    body_file="$(scratch_file wget.body)" || return 91
+    resp_file="$(scratch_file wget.resp)" || return 91
+    header_file="$(scratch_file wget.hdr)" || return 91
 
+    # _body_rc, not the compound's own status: a brace group reports the exit status of its LAST
+    # command, so a 'cat' that failed (the file vanished or became unreadable between the
+    # pre-open check and here) was masked by the trailing printf. The group then succeeded, the
+    # body went out with an EMPTY file part, the server answered 200 and the run reported the
+    # file as submitted — a collector claiming to have collected bytes it never sent. Braces do
+    # not fork, so the assignment inside is visible here.
+    local _body_rc=0
     {
         printf -- "--%s\r\n" "$boundary"
         printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' "$safe_filename"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
-        cat "$filepath"
+        cat "$filepath" || _body_rc=1
         printf '\r\n--%s--\r\n' "$boundary"
-    } > "$body_file" 2>/dev/null || return 95
+    # 91, like every other local failure in this function. These used to return 93, 94 and 95 —
+    # the codes submit_file reads as "503 back-pressure", "no longer a regular file" and (since
+    # the terminal-verdict sentinel was added) "the server refused it". A full disk here was
+    # therefore reported as a server verdict and the file was dropped without a retry.
+    } > "$body_file" 2>/dev/null || _body_rc=1
+    if [ "$_body_rc" -ne 0 ]; then
+        # Classify honestly: gone or no longer a regular file is churn (94 -> vanished=, exit 5);
+        # anything else is a local failure (91), never a silent success.
+        if [ ! -f "$filepath" ]; then
+            log_msg warn "'$filepath' disappeared while its upload body was being built; not uploaded"
+            return 94
+        fi
+        log_msg error "Could not build the upload body for '$filepath'"
+        return 91
+    fi
 
+    # --tries=1: wget retries network-level failures 20 times by default (measured: one
+    # collector attempt opened 20 connections when the peer reset mid-upload), which silently
+    # multiplied RETRIES=3 into up to 60 full-body uploads of the same file. Retry policy
+    # belongs to submit_file, which counts and logs its attempts; the tool must not add its own
+    # (CLAUDE.md §2, "bound total attempts including any tool's own retry policy").
+    # --timeout is wget's dns/connect/read timeout, not a total, so it is not a transfer bound.
     wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
+        --tries=1 \
         --timeout=300 \
         --header="Content-Type: multipart/form-data; boundary=${boundary}" \
         --post-file="$body_file" \
@@ -1044,6 +1237,13 @@ upload_with_wget() {
     fi
 
     if [ $code -ne 0 ]; then
+        # wget exits 8 for EVERY HTTP error response, so returning here unconditionally made the
+        # status classification below unreachable on this path: a 413 was retried --retries times
+        # exactly as before. The server's verdict is honoured first, as on the curl path.
+        if [ -n "$http_code" ]; then
+            log_msg error "Upload of '$filepath' failed after the server returned HTTP $http_code (wget exit $code)"
+            http_status_is_terminal "$http_code" && return 97
+        fi
         return $code
     fi
 
@@ -1055,6 +1255,7 @@ upload_with_wget() {
                 local body
                 body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
                 log_msg error "Server returned HTTP $http_code for '$filepath': $body"
+                http_status_is_terminal "$http_code" && return 97
                 return 96
                 ;;
         esac
@@ -1121,6 +1322,7 @@ collection_marker() {
         # Attempt POST — capture HTTP status to detect server-side errors
         if command -v curl >/dev/null 2>&1; then
             curl -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
+                --connect-timeout 10 \
                 -H "Content-Type: application/json" \
                 -d "$body" \
                 --max-time 10 \
@@ -1128,6 +1330,7 @@ collection_marker() {
             _marker_rc=$?
         elif command -v wget >/dev/null 2>&1; then
             wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
+                --tries=1 \
                 --header "Content-Type: application/json" \
                 --post-data "$body" \
                 --timeout=10 \
@@ -1279,6 +1482,11 @@ submit_file() {
     # UAC's _remove_non_regular_files and tar's file_dumpable_p amount to; it narrows the
     # window to the microseconds between this test and the redirect, which is the same residual
     # every copy tool carries. 94 = "no longer a regular file": churn, not an upload error.
+    # Type only, deliberately not size. The size gate is a DISCOVERY filter: a file that grew
+    # past --max-size since the walk is uploaded in full. Re-checking it here would cost a
+    # fork per file (Bash has no stat builtin), undoing the measured 6851 ms -> 391 ms win from
+    # moving the limit into find. Documented as an accepted residual in README.md rather than
+    # paid for in the hot loop.
     if [ ! -f "$filepath" ]; then
         log_msg warn "'$filepath' is no longer a regular file; not uploaded"
         return 94
@@ -1295,6 +1503,14 @@ submit_file() {
 
         if [ "$rc" -eq 0 ]; then
             return 0
+        fi
+
+        # 95 = the server gave a verdict about THIS request that re-sending cannot change
+        # (413 Payload Too Large above all). Retrying would re-upload the whole body for a
+        # guaranteed second refusal, so the attempt budget is not spent on it.
+        if [ "$rc" -eq 97 ]; then
+            log_msg error "Server rejected '$filepath' with a non-retryable status; not retrying"
+            return "$rc"
         fi
 
         # 503 back-pressure: sleep already happened in upload function,
@@ -1360,7 +1576,16 @@ require_value() {
     fi
     case "$3" in
         '') die "Empty value for $1" ;;
-        -*) [ "${4:-0}" -eq 1 ] || die "Missing value for $1 (got option-like token '$3')" ;;
+        -*)
+            if [ "${4:-0}" -ne 1 ]; then
+                # A negative number is a value the user meant, not a forgotten one: say so,
+                # instead of reporting it as a missing value the way any other -token is.
+                case "$3" in
+                    -[0-9]*) die "$1 does not take a negative value: '$3'" ;;
+                    *)       die "Missing value for $1 (got option-like token '$3')" ;;
+                esac
+            fi
+            ;;
     esac
     case "$3" in
         *[![:space:]]*) ;;
@@ -1385,12 +1610,12 @@ parse_args() {
             --?*=*)
                 _val="${arg#*=}"
                 case "${arg%%=*}" in
-                    --server|--port|--dir|--max-age|--max-size-kb|--source|--ca-cert|--retries|--log-file)
+                    --server|--port|--dir|--max-age|--age-timestamp|--max-size|--max-size-kb|--source|--ca-cert|--retries|--log-file)
                         arg="${arg%%=*}"
                         set -- "$arg" "$_val" "${@:2}"
                         _eq=1
                         ;;
-                    --ssl|--insecure|--sync|--follow-symlinks|--dry-run|--debug|--no-log-file|--syslog|--quiet|--progress|--no-progress|--help)
+                    --ssl|--insecure|--sync|--follow-symlinks|--dry-run|--debug|--no-log-file|--syslog|--quiet|--progress|--no-progress|--no-count-filtered|--help)
                         die "Option ${arg%%=*} does not take a value"
                         ;;
                 esac
@@ -1421,9 +1646,25 @@ parse_args() {
                 MAX_AGE="$2"
                 shift
                 ;;
-            --max-size-kb)
+            --age-timestamp)
+                require_value "$arg" "$#" "${2:-}" "$_eq"
+                # Validated here rather than in validate_config so the message can name the
+                # accepted set; is_integer-style checks would not.
+                case "$2" in
+                    mtime|ctime|any) AGE_TIMESTAMP="$2" ;;
+                    *) die "--age-timestamp must be 'mtime', 'ctime' or 'any': '$2'" ;;
+                esac
+                shift
+                ;;
+            # --max-size is the canonical spelling: --max-age does not carry "days" in its
+            # name either, and the unit belongs in the documentation and the run log (see
+            # log_size_policy), not in the flag. --max-size-kb is the original spelling and
+            # keeps working unchanged — it is in deployed runbooks and CI, and breaking a
+            # documented flag of a forensic collector is not worth the tidiness.
+            --max-size|--max-size-kb)
                 require_value "$arg" "$#" "${2:-}" "$_eq"
                 MAX_FILE_SIZE_KB="$2"
+                MAX_SIZE_FLAG="$arg"
                 shift
                 ;;
             --source)
@@ -1453,6 +1694,9 @@ parse_args() {
                 require_value "$arg" "$#" "${2:-}" "$_eq"
                 RETRIES="$2"
                 shift
+                ;;
+            --no-count-filtered)
+                COUNT_FILTERED=0
                 ;;
             --dry-run)
                 DRY_RUN=1
@@ -1505,19 +1749,29 @@ parse_args() {
 validate_config() {
     is_integer "$THUNDERSTORM_PORT" || die "Port must be numeric: '$THUNDERSTORM_PORT'"
     is_integer "$MAX_AGE" || die "max-age must be numeric: '$MAX_AGE'"
-    is_integer "$MAX_FILE_SIZE_KB" || die "max-size-kb must be numeric: '$MAX_FILE_SIZE_KB'"
+    is_integer "$MAX_FILE_SIZE_KB" || die "${MAX_SIZE_FLAG#--} must be numeric: '$MAX_FILE_SIZE_KB'"
     is_integer "$RETRIES" || die "retries must be numeric: '$RETRIES'"
 
     # Upper bounds first: the numeric tests below would print raw shell errors on a value that
     # does not fit in 64 bits, and MAX_FILE_SIZE_KB is multiplied by 1024 for find.
     in_range "$THUNDERSTORM_PORT" 65535 || die "Port must be <= 65535: '$THUNDERSTORM_PORT'"
     in_range "$MAX_AGE" 36500 || die "max-age must be <= 36500 days: '$MAX_AGE'"
-    in_range "$MAX_FILE_SIZE_KB" 1073741824 || die "max-size-kb must be <= 1073741824 (1 TiB): '$MAX_FILE_SIZE_KB'"
+    in_range "$MAX_FILE_SIZE_KB" 1073741824 || die "${MAX_SIZE_FLAG#--} must be <= 1073741824 KiB (1 TiB): '$MAX_FILE_SIZE_KB'"
     in_range "$RETRIES" 100 || die "retries must be <= 100: '$RETRIES'"
 
+    # Canonical decimal, AFTER the range checks (they compare by string length so an over-64-bit
+    # value never reaches arithmetic). Bash reads a leading zero as octal: without 10#,
+    # '--max-age 010' means 8 days and '08' is a raw arithmetic error.
+    THUNDERSTORM_PORT=$(( 10#$THUNDERSTORM_PORT ))
+    MAX_AGE=$(( 10#$MAX_AGE ))
+    MAX_FILE_SIZE_KB=$(( 10#$MAX_FILE_SIZE_KB ))
+    RETRIES=$(( 10#$RETRIES ))
+
     [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0"
-    [ "$MAX_AGE" -ge 0 ] || die "max-age must be >= 0"
-    [ "$MAX_FILE_SIZE_KB" -gt 0 ] || die "max-size-kb must be > 0"
+    # No ">= 1" check for max-size: 0 turns the size filter OFF, exactly as --max-age 0 turns
+    # the age filter off, so the two policy gates are spelled the same way on the command line.
+    # (The Go collector's engine already reads 0 as unlimited -- collector.go's
+    # "c.MaxFileSize > 0 && c.MaxFileSize < info.Size()" -- though its CLI still refuses it.)
     [ "$RETRIES" -ge 1 ] || die "retries must be >= 1"
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Server must not be empty"
@@ -1634,7 +1888,20 @@ collect_symlink_entry() {
         return 0
     fi
     if [ -z "$_out" ]; then
-        link_skip LINKS_FILTERED debug "Skipping symlink '$link' (target '$_target' filtered by size/age policy)"
+        # Name the gate that removed it. The combined test above already failed, so at most one
+        # extra find is needed, and only when BOTH gates are active — with one gate off the
+        # reason is the other gate by elimination, and no second walk is spelled at all. The
+        # probe is the same single-path, -prune form, so it costs one stat on a link the run
+        # was already discarding.
+        if [ "${#SIZE_TEST[@]}" -eq 0 ]; then
+            link_skip LINKS_AGE_FILTERED debug "Skipping symlink '$link' (target '$_target' outside the age window)"
+        elif [ "${#AGE_TESTS[@]}" -eq 0 ]; then
+            link_skip LINKS_SIZE_FILTERED debug "Skipping symlink '$link' (target '$_target' over the size limit)"
+        elif [ -n "$(find "$_target" -prune -type f "${SIZE_TEST[@]}" -print 2>/dev/null)" ]; then
+            link_skip LINKS_AGE_FILTERED debug "Skipping symlink '$link' (target '$_target' outside the age window)"
+        else
+            link_skip LINKS_SIZE_FILTERED debug "Skipping symlink '$link' (target '$_target' over the size limit)"
+        fi
         return 0
     fi
     # Readability is checked here, as the regular-file path does: without it an
@@ -1843,6 +2110,7 @@ collect_entries() {
 # Reads every counter; writes elapsed and reconcile_failed.
 report_run() {
     local base_url="$1"
+    local _excluded_by
     if [ "$START_TS" -gt 0 ] 2>/dev/null; then
         elapsed=$(( $(date +%s 2>/dev/null || printf '%s\n' "$START_TS") - START_TS ))
         [ "$elapsed" -lt 0 ] && elapsed=0
@@ -1853,7 +2121,50 @@ report_run() {
         printf '\r\033[K' >&2
     fi
 
-    log_msg info "Run completed: discovered=$TOTAL_FILES scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED links_seen=$LINKS_SEEN links_collected=$LINKS_COLLECTED links_skipped=$LINKS_SKIPPED unreadable_dirs=$UNREADABLE_DIRS unusable_dirs=$UNUSABLE_DIRS seconds=$elapsed"
+    log_msg info "Run completed: discovered=$TOTAL_FILES scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED age_filtered=$FILES_AGE_FILTERED size_filtered=$FILES_SIZE_FILTERED age_ctime_only=$FILES_AGE_CTIME_ONLY future=$FILES_FUTURE failed=$FILES_FAILED links_seen=$LINKS_SEEN links_collected=$LINKS_COLLECTED links_skipped=$LINKS_SKIPPED unreadable_dirs=$UNREADABLE_DIRS unusable_dirs=$UNUSABLE_DIRS seconds=$elapsed"
+
+    # Each caveat below is reported unconditionally — never gated on a count being > 0, or an
+    # all-zero failed run says nothing. Counter names appear without "=": the summary's keys must
+    # not recur after the summary line (see the reconciliation comment below).
+    if [ "$COUNT_FILTERED" -eq 0 ]; then
+        # "not because nothing was excluded" is only true while a gate is actually ON. With both
+        # gates disabled nothing COULD have been excluded, so the zeros are the truth and saying
+        # they are unmeasured is the collector contradicting the policy lines it just printed.
+        if [ "${#AGE_TESTS[@]}" -eq 0 ] && [ "${#SIZE_TEST[@]}" -eq 0 ]; then
+            log_msg info "Not measured this run (--no-count-filtered): age_filtered and size_filtered read zero, which is also what they would be — both discovery gates are disabled. future= and age_ctime_only= are unmeasured."
+        else
+            log_msg info "Not measured this run (--no-count-filtered): the age_filtered, size_filtered, age_ctime_only and future counters read zero because the counting walks were skipped, not because nothing was excluded"
+        fi
+    else
+        if [ "$COUNT_MATCHING_PARTIAL" -eq 1 ]; then
+            log_msg info "Policy-exclusion counts are a lower bound: a counting walk could not finish (an unreadable directory, or no room for the scratch list)"
+        elif [ "$COUNT_CHURNED" -eq 1 ]; then
+            log_msg info "Policy-exclusion counts are a snapshot: they are measured after the walk, and this tree gained or lost files in between"
+        fi
+        if [ "$FILES_AGE_FILTERED" -gt 0 ] || [ "$FILES_SIZE_FILTERED" -gt 0 ]; then
+            # Name only the gates that are actually ON. Printing "0 file(s) over the size
+            # limit" in a run whose own policy line said "Size filter: disabled" asserts a
+            # limit that does not exist — the counter is right, the sentence is not.
+            _excluded_by=""
+            if [ "${#AGE_TESTS[@]}" -gt 0 ]; then
+                _excluded_by="$FILES_AGE_FILTERED file(s) outside the age window"
+            fi
+            if [ "${#SIZE_TEST[@]}" -gt 0 ]; then
+                [ -n "$_excluded_by" ] && _excluded_by="$_excluded_by, "
+                _excluded_by="$_excluded_by$FILES_SIZE_FILTERED file(s) over the size limit"
+            fi
+            log_msg info "Excluded at discovery by policy: $_excluded_by"
+        fi
+        if [ "$FUTURE_UNMEASURED" -eq 1 ]; then
+            log_msg info "The future-timestamp check did not run: no forward-stamped reference could be created, so the future counter reads zero unmeasured"
+        fi
+    fi
+    if [ "$FILES_AGE_CTIME_ONLY" -gt 0 ]; then
+        log_msg info "$FILES_AGE_CTIME_ONLY file(s) matched at discovery by ctime only; --age-timestamp mtime would have left them out"
+    fi
+    if [ "$FILES_FUTURE" -gt 0 ]; then
+        log_msg warn "$FILES_FUTURE collected file(s) have modification times more than a minute ahead of this host's clock (skew or tampering); a future timestamp is never a reason to exclude a file"
+    fi
 
     # name the reasons behind failed= once (same shape as the symlink breakdown), and
     # say plainly what could not be read — the summary is often the only artifact kept.
@@ -1873,7 +2184,7 @@ report_run() {
     # name the reasons behind links_skipped once, when following was on (in default
     # mode every link is simply not followed).
     if [ "$FOLLOW_SYMLINKS" -eq 1 ] && [ "$LINKS_SEEN" -gt 0 ]; then
-        log_msg info "Symlink breakdown: dir_surfaced=$LINKS_DIR_SURFACED in_scope=$LINKS_IN_SCOPE dup=$LINKS_DUP fs_refused=$LINKS_FS_REFUSED self_excluded=$LINKS_SELF_EXCLUDED filtered=$LINKS_FILTERED dangling=$LINKS_DANGLING unresolvable=$LINKS_UNRESOLVABLE links_failed=$LINKS_FAILED"
+        log_msg info "Symlink breakdown: dir_surfaced=$LINKS_DIR_SURFACED in_scope=$LINKS_IN_SCOPE dup=$LINKS_DUP fs_refused=$LINKS_FS_REFUSED self_excluded=$LINKS_SELF_EXCLUDED filtered_size=$LINKS_SIZE_FILTERED filtered_age=$LINKS_AGE_FILTERED dangling=$LINKS_DANGLING unresolvable=$LINKS_UNRESOLVABLE links_failed=$LINKS_FAILED"
     fi
 
     # (Layer 2): reconcile the discovered count against what we accounted for. Every
@@ -1895,7 +2206,7 @@ report_run() {
     fi
     # the link counters must close too — every seen link is collected, failed, or in
     # exactly one skip class. A mismatch is a bookkeeping bug, surfaced like any shortfall.
-    _link_breakdown=$(( LINKS_NOT_FOLLOWED + LINKS_DIR_SURFACED + LINKS_FS_REFUSED + LINKS_SELF_EXCLUDED + LINKS_IN_SCOPE + LINKS_DUP + LINKS_FILTERED + LINKS_DANGLING + LINKS_UNRESOLVABLE ))
+    _link_breakdown=$(( LINKS_NOT_FOLLOWED + LINKS_DIR_SURFACED + LINKS_FS_REFUSED + LINKS_SELF_EXCLUDED + LINKS_IN_SCOPE + LINKS_DUP + LINKS_SIZE_FILTERED + LINKS_AGE_FILTERED + LINKS_DANGLING + LINKS_UNRESOLVABLE ))
     if [ "$INTERRUPTED" -eq 0 ] && { [ "$LINKS_SEEN" -ne $(( LINKS_COLLECTED + LINKS_SKIPPED + LINKS_FAILED )) ] || [ "$LINKS_SKIPPED" -ne "$_link_breakdown" ]; }; then
         log_msg error "Reconciliation failed: $LINKS_SEEN symlink(s) seen but $LINKS_COLLECTED collected, $LINKS_SKIPPED skipped (breakdown sums to $_link_breakdown) and $LINKS_FAILED failed"
         reconcile_failed=1
@@ -1911,7 +2222,9 @@ report_run() {
     if [ "$DRY_RUN" -eq 0 ]; then
         # Link uploads are real POSTs: without these fields the server's record of the run
         # would undercount what it received while the local summary reported it honestly.
-        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${elapsed}}"
+        local stats_json
+        build_stats_json "$elapsed"
+        stats_json="$STATS_JSON_OUT"
         collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null
     fi
 
@@ -2162,7 +2475,7 @@ classify_root() {
 # Each entry is then re-listed with a one-byte class prefix (f regular file, l symlink) because
 # every root is enumerated before any upload: the upload pass must route by what an entry WAS at
 # discovery, not by what it has become since.
-# Reads: scandir, walk_excludes, _in_cloud_scope, MAX_AGE, _max_size_c.
+# Reads: scandir, walk_excludes, _in_cloud_scope, SIZE_TEST, AGE_TESTS.
 # Writes: cloud_prunes, all_find_files, TOTAL_FILES, TOTAL_LINKS, UNREADABLE_DIRS.
 enumerate_root() {
     local _cand_file _cand _cloud_ev _find_err _entry _count _lcount _k _typed _typed_ok
@@ -2208,12 +2521,13 @@ enumerate_root() {
         # content). Symlinks are enumerated as entries (-type l) so they can be counted,
         # policy-checked, and — with --follow-symlinks — collected without traversal.
         _find_err="$(scratch_file find.err)" || _find_err=/dev/null
-        if [ "$MAX_AGE" -gt 0 ]; then
-            find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \( -type f -size "-${_max_size_c}c" -mtime "-${MAX_AGE}" -o -type l \) -print0 > "$find_results_file" 2>"$_find_err"
-        else
-            # MAX_AGE=0 means no age filter — collect all files regardless of modification time
-            find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \( -type f -size "-${_max_size_c}c" -o -type l \) -print0 > "$find_results_file" 2>"$_find_err"
-        fi
+        # ONE spelling of the discovery expression for every configuration: AGE_TESTS is empty
+        # when --max-age is 0, so the age arm disappears instead of needing a second,
+        # near-identical find command that has to be kept in sync by hand. The size and age
+        # predicates read the stat find already performed, so both gates are free here.
+        find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \
+            \( -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" "${AGE_TESTS[@]+"${AGE_TESTS[@]}"}" -o -type l \) \
+            -print0 > "$find_results_file" 2>"$_find_err"
         find_rc=$?
         # find exits non-zero when a subtree under this (readable) dir could not
         # be read, writing one diagnostic per directory (GNU, BSD, busybox). A directory is not
@@ -2276,6 +2590,7 @@ enumerate_root() {
         # duplicate/overlap loops and here reads these arrays for the CURRENT root, and the
         # upload pass runs after every root is enumerated, so recording late is equivalent for
         # every path that succeeds.
+        count_filtered_under "$(( _count - _lcount ))"
         _seen_dirs+=("$scandir")
         _seen_phys+=("$_cmpdir")
         TOTAL_FILES=$((TOTAL_FILES + _count))
@@ -2356,8 +2671,6 @@ prepare_run() {
     log_msg info "Server: $THUNDERSTORM_SERVER"
     log_msg info "Port: $THUNDERSTORM_PORT"
     log_msg info "API endpoint: $api_endpoint"
-    log_msg info "Max age (days): $MAX_AGE"
-    log_msg info "Max size (KB): $MAX_FILE_SIZE_KB"
     log_msg info "Source: $SOURCE_NAME"
     # Each folder quoted: an unquoted, space-joined list is ambiguous once a name has a space.
     _folders=""
@@ -2378,6 +2691,16 @@ prepare_run() {
     if ! command -v find >/dev/null 2>&1; then
         log_msg error "'find' is not available; cannot enumerate files"
         exit 3
+    fi
+    # Fast policy counting: counting NUL separators with tr|wc beats a per-record read loop by
+    # several times, stays NUL-exact (a newline in a filename cannot inflate it), and is not a new
+    # hard dependency — 'tr' is already used unguarded here, and without 'wc' the read loop runs
+    # instead with identical counts.
+    if command -v tr >/dev/null 2>&1 && command -v wc >/dev/null 2>&1; then
+        COUNT_FAST=1
+        log_msg debug "Policy counts use the tr/wc path"
+    else
+        log_msg debug "Policy counts use the read-loop path ('tr' or 'wc' unavailable)"
     fi
     # Create the work directory HERE, in the main shell. mktemp_portable runs inside "$(...)"
     # subshells, so a directory first created there was never recorded in the parent's
@@ -2430,12 +2753,249 @@ prepare_run() {
     return 0
 }
 
+# count_matching -- how many entries a find expression matches under the root $1. Counted with a
+# NUL-delimited read so a name containing a newline counts once, not twice. find's own errors are
+# discarded: the discovery walk already reported unreadable directories through UNREADABLE_DIRS,
+# and a short count is better than none. Result in COUNT_MATCHING_OUT (no subshell for the value,
+# so nothing can strip it).
+COUNT_MATCHING_OUT=0
+COUNT_MATCHING_PARTIAL=0   # 1 when find could not finish, so the count is a lower bound
+COUNT_FAST=0               # 1 when tr+wc are present, so counting need not loop per record
+count_matching() {
+    local _root="$1"
+    shift
+    local _n=0 _e _list _rc
+    COUNT_MATCHING_OUT=0
+    # A scratch file rather than '< <(find ...)': process substitution hides the producer's exit
+    # status, and a counting walk that died partway would then publish a silently short number as
+    # if it were the truth. scratch_file reuses a fixed name, so this costs no temp-file growth.
+    _list="$(scratch_file count.lst)" || { COUNT_MATCHING_PARTIAL=1; return 0; }
+    find "$_root" "$@" -print0 > "$_list" 2>/dev/null
+    _rc=$?
+    if [ "$COUNT_FAST" -eq 1 ]; then
+        # One NUL per record; everything else is deleted, so the byte count IS the record count.
+        # wc pads its output on some implementations, hence the digit strip.
+        _n="$(tr -d -c '\000' < "$_list" 2>/dev/null | wc -c 2>/dev/null)" || _n=""
+        _n="${_n//[^0-9]/}"
+        [ -n "$_n" ] || { _n=0; COUNT_MATCHING_PARTIAL=1; }
+    else
+        while IFS= read -r -d '' _e; do
+            _n=$(( _n + 1 ))
+        done < "$_list"
+    fi
+    [ "$_rc" -eq 0 ] || COUNT_MATCHING_PARTIAL=1
+    COUNT_MATCHING_OUT="$_n"
+    : > "$_list" 2>/dev/null || :
+}
+
+# stamp_future_ref -- stamp AGE_FUTURE_REF one minute AHEAD of the host clock: a file written
+# during the walk cannot reach it, while clock skew and a forward stomp both clear it. There is
+# deliberately no fallback to "now" — that would count ordinary scan-time writes as future and
+# make the warning false. Failing means the future count is skipped, and the run says so.
+stamp_future_ref() {
+    [ -n "$AGE_FUTURE_REF" ] || return 1
+    local _now _when _stamp
+    # date output is external input: unguarded, junk here is a raw shell arithmetic error
+    _now="$(date +%s 2>/dev/null)" || return 1
+    is_integer "$_now" || return 1
+    _when=$(( _now + 60 ))
+    # date's epoch flag is not POSIX; touch -t is, so try both date spellings for the stamp
+    _stamp="$(date -d "@$_when" '+%Y%m%d%H%M.%S' 2>/dev/null \
+           || date -r "$_when" '+%Y%m%d%H%M.%S' 2>/dev/null)" || _stamp=""
+    [ -n "$_stamp" ] || return 1
+    touch -t "$_stamp" "$AGE_FUTURE_REF" 2>/dev/null || return 1
+    return 0
+}
+# count_filtered_under -- attribute the regular files this root's policy removed to the two
+# disjoint reasons; $1 = regular files the discovery walk emitted. Every walk reuses the discovery
+# walk's prune set, built once into _base, so all counts describe one tree.
+# Each category is MEASURED by matching it, never derived by subtracting one walk from another:
+# the walks are not simultaneous, and a derived count publishes churn as a policy exclusion.
+# They do run after discovery, so a changing tree still makes the counts a snapshot — detected
+# (discovered + age + size must equal a bare -type f total) and labelled, never printed as fact.
+# Reads: scandir, walk_excludes, cloud_prunes, SIZE_TEST, AGE_TESTS, AGE_MTIME_TEST,
+#        AGE_CTIME_TEST, AGE_TIMESTAMP, AGE_FUTURE_REF, MAX_AGE, COUNT_FILTERED.
+# Writes: FILES_SIZE_FILTERED, FILES_AGE_FILTERED, FILES_AGE_CTIME_ONLY, FILES_FUTURE,
+#         FUTURE_UNMEASURED, COUNT_CHURNED, COUNT_MATCHING_PARTIAL.
+count_filtered_under() {
+    [ "$COUNT_FILTERED" -eq 1 ] || return 0
+    local _discovered="${1:-0}" _size=0 _age=0 _count_start
+    local -a _base
+    _base=("$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}")
+    _count_start="$(date +%s 2>/dev/null)" || _count_start=0
+    is_integer "$_count_start" || _count_start=0
+    # Only when a bound exists. A bare "! " with SIZE_TEST empty is not a no-op: find reads it
+    # as "! -print0", which matches every regular file and would publish the whole tree as
+    # size_filtered — the same silent-inflation class the derived counts were removed to avoid.
+    _size=0
+    if [ "${#OVERSIZE_TEST[@]}" -gt 0 ]; then
+        count_matching "${_base[@]}" -type f "${OVERSIZE_TEST[@]}"
+        _size="$COUNT_MATCHING_OUT"
+        FILES_SIZE_FILTERED=$(( FILES_SIZE_FILTERED + _size ))
+    fi
+    # The size test keeps the two categories disjoint: oversize-and-too-old counts once, as size.
+    if [ "${#AGE_TESTS[@]}" -gt 0 ]; then
+        count_matching "${_base[@]}" -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" ! "${AGE_TESTS[@]}"
+        _age="$COUNT_MATCHING_OUT"
+        FILES_AGE_FILTERED=$(( FILES_AGE_FILTERED + _age ))
+        # What the ctime arm alone contributed: in the window, but only because ctime moved.
+        if [ "$AGE_TIMESTAMP" = "any" ]; then
+            # Length-checked, not merely "[@]+"-guarded: the guard prevents an unset-variable
+            # error, it does NOT prevent the degeneracy. An empty arm here leaves a bare "!"
+            # in front of the appended -print0, which find reads as "! -print0" — matching the
+            # whole tree and inflating age_ctime_only exactly as an empty SIZE_TEST once
+            # inflated size_filtered. Only a length check rules that out, and it rules it out
+            # LOCALLY instead of relying on build_age_tests keeping the two arms in lockstep
+            # with AGE_TESTS.
+            if [ "${#AGE_MTIME_TEST[@]}" -gt 0 ] && [ "${#AGE_CTIME_TEST[@]}" -gt 0 ]; then
+                count_matching "${_base[@]}" -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" \
+                    ! "${AGE_MTIME_TEST[@]}" "${AGE_CTIME_TEST[@]}"
+                FILES_AGE_CTIME_ONLY=$(( FILES_AGE_CTIME_ONLY + COUNT_MATCHING_OUT ))
+            fi
+        fi
+    fi
+    # The future count carries the whole discovery policy, not just -newer: otherwise it counts
+    # files the run dropped and the "collected" warning would be false.
+    if stamp_future_ref; then
+        count_matching "${_base[@]}" -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" \
+            "${AGE_TESTS[@]+"${AGE_TESTS[@]}"}" -newer "$AGE_FUTURE_REF"
+        FILES_FUTURE=$(( FILES_FUTURE + COUNT_MATCHING_OUT ))
+    else
+        # future=0 must not mean three different things (none found / not counted / no reference).
+        FUTURE_UNMEASURED=1
+    fi
+    # Reconciliation walk: discovered + age + size must exhaust a bare -type f total, or the tree
+    # changed. Skipped when a counting walk already failed (all-zero counts would be blamed on the
+    # host), and the drift gets an allowance: the age predicates are relative and re-evaluated per
+    # walk, so files crossing the window mid-walk (~ total x span / window) are arithmetic, not churn.
+    [ "$COUNT_MATCHING_PARTIAL" -eq 0 ] || return 0
+    local _total _accounted _drift _allow=1 _span=0 _now
+    count_matching "${_base[@]}" -type f
+    [ "$COUNT_MATCHING_PARTIAL" -eq 0 ] || return 0
+    _total="$COUNT_MATCHING_OUT"
+    _accounted=$(( _discovered + _age + _size ))
+    _drift=$(( _total - _accounted ))
+    # A file whose size cannot be read (its directory is readable but not searchable) fails the
+    # keep test and the over test alike, so it lands in no category. It needs no accounting of
+    # its own here: find cannot stat it either, so every counting walk over that subtree exits
+    # non-zero, COUNT_MATCHING_PARTIAL is already set, and this reconciliation was skipped above
+    # with the run saying the counts are a lower bound. (Verified as an unprivileged user: a
+    # 0444 directory makes find exit non-zero and the "lower bound" line is what gets printed.)
+    [ "$_drift" -lt 0 ] && _drift=$(( - _drift ))
+    _now="$(date +%s 2>/dev/null)" || _now=""
+    if is_integer "$_now" && [ "$_count_start" -gt 0 ] 2>/dev/null; then
+        _span=$(( _now - _count_start ))
+        [ "$_span" -lt 0 ] && _span=0
+    fi
+    if [ "$MAX_AGE" -gt 0 ] && [ "$_span" -gt 0 ]; then
+        _allow=$(( 1 + (_total * _span) / (MAX_AGE * 86400) ))
+    fi
+    if [ "$_drift" -gt "$_allow" ]; then
+        COUNT_CHURNED=1
+        log_msg debug "Filter accounting for '$scandir' drifted by $_drift file(s) (allowance $_allow over ${_span}s): $_total regular file(s) now, $_discovered discovered + $_age outside the age window + $_size over the size limit = $_accounted"
+    fi
+    return 0
+}
+
+# build_age_tests -- build the age half of the discovery policy ONCE per run into AGE_TESTS, used
+# by the walk, the counting walks and the symlink-target test. Empty when --max-age is 0.
+# Timestamp (AGE_TIMESTAMP): mtime is freely forgeable (touch -d), while writing or backdating a
+# file always updates ctime, which no userspace call can set. The default ORs both because a
+# FORWARD stomp is the one case where mtime > ctime, so ctime alone would miss it. Birth time is
+# not exposed by any Linux find; atime is meaningless under relatime/noatime.
+# Predicate: -mmin/-cmin (minutes) are preferred — the -mtime day buckets make the exact boundary
+# implementation-defined (GNU keeps a file aged exactly N days, busybox drops it, BSD/macOS
+# rounds the age up). They are not POSIX, so support is probed once; -mtime/-ctime stay as the
+# Solaris/AIX fallback.
+build_age_tests() {
+    AGE_TESTS=()
+    AGE_MTIME_TEST=()
+    AGE_CTIME_TEST=()
+    AGE_PRECISION=""
+    AGE_CUTOFF_TEXT=""
+
+    local _probe="${TS_WORK_DIR:-.}" _mpred _cpred _v _cut
+    # Reference file for the POSIX '-newer' future check, re-stamped a minute ahead by
+    # stamp_future_ref at counting time. It lives in the work directory, which every walk prunes.
+    if [ -n "$TS_WORK_DIR" ] && : > "$TS_WORK_DIR/runstart.ref" 2>/dev/null; then
+        AGE_FUTURE_REF="$TS_WORK_DIR/runstart.ref"
+    fi
+    # -prune keeps each probe to one directory: just "does this find accept the predicate", both
+    # arms. The reference above exists even at --max-age 0, so future= still reports there.
+    [ "$MAX_AGE" -gt 0 ] || return 0
+    if find "$_probe" -prune -mmin -1 >/dev/null 2>&1 && find "$_probe" -prune -cmin -1 >/dev/null 2>&1; then
+        AGE_PRECISION="minute"
+        _v=$(( MAX_AGE * 1440 ))
+        _mpred="-mmin"
+        _cpred="-cmin"
+    else
+        AGE_PRECISION="day"
+        _v="$MAX_AGE"
+        _mpred="-mtime"
+        _cpred="-ctime"
+    fi
+    AGE_MTIME_TEST=("$_mpred" "-$_v")
+    AGE_CTIME_TEST=("$_cpred" "-$_v")
+    case "$AGE_TIMESTAMP" in
+        mtime) AGE_TESTS=("${AGE_MTIME_TEST[@]}") ;;
+        ctime) AGE_TESTS=("${AGE_CTIME_TEST[@]}") ;;
+        # Parenthesised so that a later "! ${AGE_TESTS[@]}" negates the whole disjunction and not
+        # just its first arm.
+        *)     AGE_TESTS=(\( "${AGE_MTIME_TEST[@]}" -o "${AGE_CTIME_TEST[@]}" \)) ;;
+    esac
+
+    # Absolute cutoff for the log only, and AT RUN START (the line says so): each root's find
+    # re-evaluates the window when reached, so a later root's cutoff is marginally newer/tighter.
+    # date's epoch form differs across implementations; when neither works the line omits it.
+    if [ "$START_TS" -gt 0 ] 2>/dev/null; then
+        _cut=$(( START_TS - MAX_AGE * 86400 ))
+        AGE_CUTOFF_TEXT="$(date -d "@$_cut" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+                        || date -r "$_cut" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" || AGE_CUTOFF_TEXT=""
+    fi
+    return 0
+}
+
+# log_age_policy -- state the age policy once, in terms an operator can reconcile against the
+# filesystem later. "Max age (days): 0" used to be printed for the unlimited case, which reads as
+# its exact opposite.
+log_age_policy() {
+    local _which _msg
+    if [ "$MAX_AGE" -le 0 ] 2>/dev/null; then
+        log_msg info "Age filter: disabled (--max-age 0); files are collected regardless of age (--age-timestamp has no effect)"
+        return 0
+    fi
+    case "$AGE_TIMESTAMP" in
+        mtime) _which="mtime" ;;
+        ctime) _which="ctime" ;;
+        *)     _which="mtime or ctime" ;;
+    esac
+    _msg="Age filter: $_which within $MAX_AGE day(s), ${AGE_PRECISION:-day} precision"
+    [ -n "$AGE_CUTOFF_TEXT" ] && _msg="$_msg; at run start that is files newer than $AGE_CUTOFF_TEXT"
+    log_msg info "$_msg"
+    return 0
+}
+
+# log_size_policy -- state the size policy once, in the same reconcilable terms as
+# log_age_policy. The old line was a bare "Max size (KB): 2000", which says neither that KB
+# means KiB (1024, as in the Go collector, not 1000) nor which side of the boundary is kept —
+# the two questions an analyst asks when a file is missing from the collection.
+log_size_policy() {
+    if [ "${#SIZE_TEST[@]}" -eq 0 ]; then
+        log_msg info "Size filter: disabled (--max-size 0); files are collected whatever their size"
+        return 0
+    fi
+    local _bytes
+    _bytes=$(( MAX_FILE_SIZE_KB * 1024 ))
+    log_msg info "Size filter: regular files up to $MAX_FILE_SIZE_KB KiB ($_bytes bytes) are collected; a file of exactly $_bytes bytes is kept, one of $(( _bytes + 1 )) is not"
+    return 0
+}
+
 # build_exclusion_base -- assemble the run-wide inputs the per-root exclusion machinery consumes:
 # the anchor list (built-ins plus every network / pseudo-filesystem mount point), the cloud-name
-# tests, the CloudStorage prune, the byte bound derived from --max-size-kb, this run\'s own
+# tests, the CloudStorage prune, the byte bound derived from --max-size, this run\'s own
 # artifacts, and the predicates used to judge a symlink target. Per-root spelling happens later in
 # compose_root_excludes; this function only decides WHAT is excluded, never HOW it is spelled.
-# Writes: exclude_path_list, cloud_name_tests, cloudstorage_prune, _max_size_c, _self_paths,
+# Writes: exclude_path_list, cloud_name_tests, cloudstorage_prune, _self_paths,
 # link_stat_test, _link_targets_done.
 build_exclusion_base() {
     # Base exclusions, kept as a plain path list so each scan root composes its own prune
@@ -2491,7 +3051,28 @@ build_exclusion_base() {
     # from the stat it already performs, so the check is free (no per-file fork later).
     # Keeping bytes makes the boundary bit-identical to the former KB rule:
     # ceil(bytes/1024) <= MAX  <=>  bytes <= MAX*1024  <=>  -size -"(MAX*1024+1)"c.
-    _max_size_c=$(( MAX_FILE_SIZE_KB * 1024 + 1 ))
+    # Empty at --max-size 0, so the size arm disappears from every expression the way the
+    # age arm does at --max-age 0 — one spelling of the walk for every configuration. Every
+    # consumer must therefore expand it with the "[@]+" guard and must not build a predicate
+    # around it unguarded: '-type f ! ${SIZE_TEST[@]}' with SIZE_TEST empty is not an empty
+    # test, it is '-type f ! -print0', which matches EVERY regular file (measured: 3 of 3
+    # instead of 1) and would report the whole tree as size_filtered.
+    if [ "$MAX_FILE_SIZE_KB" -gt 0 ]; then
+        # keep: bytes <= MAX*1024   ->  -size -(MAX*1024+1)c
+        # over: bytes >  MAX*1024   ->  -size +(MAX*1024)c
+        # Exact complements over files that can be stat'ed, and both false when the stat fails.
+        SIZE_TEST=(-size "-$(( MAX_FILE_SIZE_KB * 1024 + 1 ))c")
+        OVERSIZE_TEST=(-size "+$(( MAX_FILE_SIZE_KB * 1024 ))c")
+    else
+        SIZE_TEST=()
+        OVERSIZE_TEST=()
+    fi
+
+    # the age half of the policy, built once and shared by the walk and the symlink-target
+    # test, then stated in terms the operator can reconcile against the filesystem afterwards.
+    build_age_tests
+    log_age_policy
+    log_size_policy
 
     # never collect our own artifacts. The private work directory and the log file are
     # excluded from every walk by EXACT path — never by name pattern (a pattern would
@@ -2511,7 +3092,6 @@ build_exclusion_base() {
         log_msg debug "Excluding own work directory '$RESOLVE_DIR_OUT'"
     fi
     if [ "$LOG_TO_FILE" -eq 1 ]; then
-        _logdir _logbase
         case "$LOGFILE" in
             */*) _logdir="${LOGFILE%/*}"; _logbase="${LOGFILE##*/}" ;;
             *)   _logdir=".";             _logbase="$LOGFILE" ;;
@@ -2524,8 +3104,7 @@ build_exclusion_base() {
 
     # predicates for testing a symlink's DEREFERENCED target (single path, -prune, no
     # traversal) — the same size/age policy the walk applies to regular files.
-    link_stat_test=(-prune -type f -size "-${_max_size_c}c")
-    [ "$MAX_AGE" -gt 0 ] && link_stat_test+=(-mtime "-${MAX_AGE}")
+    link_stat_test=(-prune -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" "${AGE_TESTS[@]+"${AGE_TESTS[@]}"}")
     # resolved targets already delivered through a link this run — a second link to
     # the same file is accounted as a duplicate, not uploaded again.
     _link_targets_done=()

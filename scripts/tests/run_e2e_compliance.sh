@@ -126,7 +126,7 @@ collector_supports_shared_harness() {
 
     case "$current" in
         bash|ash)
-            collector_has_flags "$script_path" --server --port --dir --max-age --source --dry-run
+            collector_has_flags "$script_path" --server --port --dir --max-age --max-size --source --dry-run
             ;;
         python3|python2)
             collector_has_flags "$script_path" --server --port --dirs --max-age --source --dry-run
