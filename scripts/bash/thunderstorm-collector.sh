@@ -20,7 +20,10 @@
 # between discovery and collection, i.e. ordinary churn on a live host and nothing
 # the collector or the operator did wrong (rsync's exit 24, "vanished source
 # files"). 4 wins when both happened, as rsync lets 23 override 24.
-# 130/143  interrupted by SIGINT / SIGTERM (128 + signal number)
+# 129/130/131/143  interrupted by SIGHUP / SIGINT / SIGQUIT / SIGTERM (128 + signal number).
+# Each sends an interrupted marker naming the signal and removes the work directory.
+# Under nohup, HUP is ignored on entry and cannot be trapped — the run simply
+# continues and ends normally.
 
 VERSION="0.5.0"
 
@@ -80,6 +83,12 @@ declare -a SIZE_TEST=()
 # counted as oversize. '-size +Mc' is false when the stat fails, so it counts only files
 # actually measured to be too big.
 declare -a OVERSIZE_TEST=()
+# "this entry's size could be READ": every statable file satisfies exactly one of "zero bytes" and
+# "non-zero", so matching neither means the stat failed. It qualifies any counting walk whose
+# category is matched by NEGATION — '! <age test>' is true both for a file outside the window and
+# for one whose stat was refused, which reported every file hidden by an unsearchable directory as
+# "outside the age window". The size category sidesteps this by matching positively.
+declare -a STATABLE_TEST=(\( -size -1c -o -size +0c \))
 AGE_PRECISION=""       # "minute" or "day" — which predicate family the local find supports
 AGE_CUTOFF_TEXT=""     # human-readable absolute cutoff, for the run log ("" if date cannot help)
 AGE_FUTURE_REF=""      # file stamped at run start, for the POSIX -newer future-timestamp test
@@ -145,6 +154,31 @@ FILES_UPLOAD_FAILED=0  # readable, but every upload attempt failed (regular file
 # the files missed cannot be counted — only the directories can (one find diagnostic each on
 # GNU, BSD and busybox). Any such directory makes the run partial (exit 4).
 UNREADABLE_DIRS=0
+# The two classes behind UNREADABLE_DIRS, because they are different forensic facts: a directory
+# that cannot be LISTED hides even the names of what it held, while one that can be listed but
+# not SEARCHED yields its names and nothing else. UNREADABLE_DIRS is their sum.
+UNLISTABLE_DIRS=0
+UNSEARCHABLE_DIRS=0
+FIRST_UNREADABLE_DIR=""
+# Entries that are KNOWN to exist — the walk listed their names — whose stat failed, so no size
+# or age predicate could be evaluated and discovery dropped them without a word. They never
+# entered the collection pipeline, so like UNREADABLE_DIRS they are in no reconciliation
+# identity; they are a coverage gap, reported and made to change the exit code.
+UNSTATABLE_ENTRIES=0
+FIRST_UNSTATABLE=""
+# 1 when a directory was found unsearchable but the probe listed none of its entries. busybox
+# find stats unconditionally and so cannot see them at all, and an empty directory looks the
+# same — say "not measured here" rather than print a bare 0 (as future= already does).
+UNSTATABLE_UNMEASURED=0
+# Same "unstatable= is not a measured zero", different reason: both discovery gates are off, so
+# the probe stands down by configuration. Kept apart because the two sentences are not
+# interchangeable, and printing the platform one here was false on a find that CAN list them.
+UNSTATABLE_UNMEASURED_GATES=0
+# 1 when a discovery walk reported an error that neither probe could attribute to a directory or
+# an entry. A FLAG, not a count: the number of diagnostics is precisely the quantity that cannot
+# be measured, and inventing one is the defect this replaces (the old code answered "I do not
+# know" with "1 directory").
+WALK_ERRORS_UNEXPLAINED=0
 TOTAL_FILES=0
 # Explicitly named scan targets that could not be scanned at all (missing, not a
 # directory, unreadable, on a refused filesystem, or whose enumeration could not be completed).
@@ -410,6 +444,7 @@ timestamp() {
     date "+%Y-%m-%d_%H:%M:%S" 2>/dev/null || date
 }
 
+# shellcheck disable=SC2317  # trap-invoked only; ShellCheck cannot see the trap as a caller
 cleanup_tmp_files() {
     if [ -n "$TS_WORK_DIR" ] && [ -d "$TS_WORK_DIR" ]; then
         rm -rf -- "$TS_WORK_DIR" 2>/dev/null || :
@@ -417,11 +452,18 @@ cleanup_tmp_files() {
 }
 
 INTERRUPTED=0
+# Which signal ended the run, for the interrupted marker. The server could not previously tell an
+# operator stopping a scan (INT/QUIT) from infrastructure cutting it off (HUP/TERM) — the one
+# distinction that decides whether a gap in the collection needs investigating.
+INTERRUPTED_BY=""
+# The backstop's two facts: we announced the scan to the server, and we never announced its end.
+BEGIN_MARKER_SENT=0
+RUN_FINISHED=0
 
 # build_stats_json -- the run's counters as the marker payload's "stats" object, in
 # STATS_JSON_OUT. $1 is the elapsed seconds to report.
 #
-# ONE spelling of this 19-field object, because there are two markers that carry it (the end
+# ONE spelling of this object, because there are two markers that carry it (the end
 # marker and the interrupted marker) and they were written out twice, verbatim. That
 # duplication is not hypothetical drift: max_size_kb was added to the end marker's copy and
 # not to the interrupted one, so a run that was interrupted reported size_filtered= with no
@@ -435,9 +477,14 @@ INTERRUPTED=0
 # SIZE_TEST, so it is correct even when an interrupt fires before the policy arrays are built.
 STATS_JSON_OUT=""
 build_stats_json() {
-    STATS_JSON_OUT="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"age_filtered\":${FILES_AGE_FILTERED},\"size_filtered\":${FILES_SIZE_FILTERED},\"age_ctime_only\":${FILES_AGE_CTIME_ONLY},\"future\":${FILES_FUTURE},\"max_size_kb\":${MAX_FILE_SIZE_KB},\"size_bound_bytes\":$(( MAX_FILE_SIZE_KB * 1024 )),\"max_age\":${MAX_AGE},\"age_timestamp\":\"${AGE_TIMESTAMP}\",\"age_precision\":\"${AGE_PRECISION:-none}\",\"counts_measured\":${COUNT_FILTERED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${1:-0}}"
+    # interrupted_by only when a signal ended the run, so the end marker's JSON is unchanged
+    # byte for byte and no existing consumer sees a new field on a normal run.
+    local _by=""
+    [ -n "$INTERRUPTED_BY" ] && _by="\"interrupted_by\":\"${INTERRUPTED_BY}\","
+    STATS_JSON_OUT="\"stats\":{${_by}\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"age_filtered\":${FILES_AGE_FILTERED},\"size_filtered\":${FILES_SIZE_FILTERED},\"age_ctime_only\":${FILES_AGE_CTIME_ONLY},\"future\":${FILES_FUTURE},\"max_size_kb\":${MAX_FILE_SIZE_KB},\"size_bound_bytes\":$(( MAX_FILE_SIZE_KB * 1024 )),\"max_age\":${MAX_AGE},\"age_timestamp\":\"${AGE_TIMESTAMP}\",\"age_precision\":\"${AGE_PRECISION:-none}\",\"counts_measured\":${COUNT_FILTERED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unstatable\":${UNSTATABLE_ENTRIES},\"walk_errors_unexplained\":${WALK_ERRORS_UNEXPLAINED},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${1:-0}}"
 }
 
+# shellcheck disable=SC2317  # trap-invoked only; ShellCheck cannot see the trap as a caller
 send_interrupted_marker() {
     if [ "$DRY_RUN" -eq 0 ] && [ -n "$THUNDERSTORM_SERVER" ]; then
         local _elapsed=0
@@ -458,24 +505,77 @@ send_interrupted_marker() {
     fi
 }
 
+# on_signal -- end the run deliberately on a signal: tell the server, remove the work directory,
+# and exit 128+signum. $1 is that exit code, $2 the signal name for the log and the marker.
+# shellcheck disable=SC2317  # trap-invoked only; ShellCheck cannot see the trap as a caller
 on_signal() {
-    # Prevent recursive signal handling
-    trap '' INT TERM
+    # Prevent recursive signal handling. QUIT is ignored here with the rest: 'trap - QUIT' was
+    # tried, to let a second Ctrl-\ escalate past a slow handler, and it DOES NOT WORK — bash
+    # defers a disposition change requested from inside a running trap until that trap returns,
+    # and this one exits instead. Measured: the process survived the second QUIT. The handler is
+    # therefore uninterruptible, which is acceptable only because it is bounded — the marker POST
+    # carries a connect timeout and a total timeout — and SIGKILL is always left.
+    trap '' HUP INT QUIT TERM
     INTERRUPTED=1
-    log_msg warn "Received signal, sending interrupted marker and exiting..."
+    INTERRUPTED_BY="${2:-}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log_msg warn "Received SIG${2:-NAL}, exiting (dry-run: no interrupted marker is sent)"
+    else
+        log_msg warn "Received SIG${2:-NAL}, sending interrupted marker and exiting..."
+    fi
     send_interrupted_marker
     cleanup_tmp_files
-    # Exit 128+signum (130 SIGINT / 143 SIGTERM); the trap passes the code.
+    # Exit 128+signum (129 HUP / 130 INT / 131 QUIT / 143 TERM); the trap passes the code.
     exit "${1:-130}"
 }
 
+# on_exit -- last rites, and the backstop for a run that dies without on_signal having run.
+#
+# $? is captured first (CLAUDE.md §1) but is NOT the trigger: measured on bash 5.2.15, a shell
+# killed by an untrapped signal enters its EXIT trap with $? == 0 — the 128+n is what the PARENT
+# sees, not what the trap sees. The trigger is therefore state, not status: we told the server
+# the scan had begun, we never told it the scan ended, and no signal handler ran.
+#
+# That happens for real. Bash can fail to parse a trap action when the signal lands while it is
+# expanding a command substitution — measured as one lost SIGHUP in 60, with
+# "trap: unexpected EOF while looking for matching ')'" — and on_signal then never runs. Without
+# this the run would die exactly the way trapping HUP was meant to prevent: the server keeps a
+# begin marker and nothing else, indistinguishable from a scan still in progress, and the
+# private work directory stays behind on the host being triaged.
+# shellcheck disable=SC2317  # trap-invoked only; ShellCheck cannot see the trap as a caller
 on_exit() {
+    local _rc=$?
+    if [ "$INTERRUPTED" -eq 0 ] && [ "$BEGIN_MARKER_SENT" -eq 1 ] && [ "$RUN_FINISHED" -eq 0 ]; then
+        INTERRUPTED=1
+        # Which signal is genuinely unknown here — the handler that would have named it is the
+        # one that did not run — so the marker says so rather than guessing.
+        INTERRUPTED_BY="unknown"
+        log_msg warn "Run ended without completing and without a signal handler running (exit status $_rc); sending the interrupted marker from the exit trap so the server is not left holding an open scan"
+        send_interrupted_marker
+        cleanup_tmp_files
+        return 0
+    fi
     [ "$INTERRUPTED" -eq 0 ] && cleanup_tmp_files
+    return 0
 }
 
 trap on_exit EXIT
-trap 'on_signal 130' INT
-trap 'on_signal 143' TERM
+# HUP and QUIT end a run exactly as INT and TERM do, and were previously left at their default
+# disposition: the process died without sending an interrupted marker (the server was left
+# holding a begin marker and nothing else, indistinguishable from a scan still in progress) and
+# without report_run. HUP is the one that actually happens in the field — an ssh session
+# dropping is the most likely way a long remote collection ends. QUIT matters because the
+# private work directory it would leave behind holds, on the wget path, a full copy of the last
+# collected file, on the host being triaged.
+#
+# Under nohup — and for a background job of a non-interactive shell, which is why the test suite
+# needs 'set -m' to exercise the INT path — the signal arrives as SIG_IGN and bash cannot trap
+# it: 'trap' silently installs nothing. That is benign rather than broken, because such a
+# process is not killed by the signal either and finishes normally.
+trap 'on_signal 129 HUP' HUP
+trap 'on_signal 130 INT' INT
+trap 'on_signal 131 QUIT' QUIT
+trap 'on_signal 143 TERM' TERM
 
 log_msg() {
     local level="$1"
@@ -623,13 +723,20 @@ Notes:
   The size limit bounds DISCOVERY only. It is not a promise about what the server will accept:
   a Thunderstorm behind a reverse proxy may cap how long one upload request may take, which
   makes the largest deliverable file a function of your bandwidth rather than of this flag.
+  unreadable_dirs= counts DIRECTORIES the run could not read in full, one per directory, split in
+  the log between those it could not list (what they held is unknown) and those it could list but
+  not search. unstatable= counts the entries the latter hide: they are known to exist, nothing
+  about them could be read, not even their type, so no filter could be applied and they were not
+  collected. Both make the run a partial failure (exit 4). A directory you cannot search hides
+  its children's attributes, not their names.
   Never collected: kernel pseudo-filesystems, network filesystems unless you name them, and
   cloud-sync folders excluded on positive evidence (their client's marker files).
   scripts/bash/README.md documents the exclusion, accounting and exit-code rules in full.
 
 Exit codes:
   0 success · 1 runtime error · 2 usage/config · 3 missing dependency · 4 partial failure
-  5 partial: files vanished mid-run (host churn only) · 130/143 interrupted
+  5 partial: files vanished mid-run (host churn only)
+  129/130/131/143 interrupted by SIGHUP / SIGINT / SIGQUIT / SIGTERM
 
 Examples:
   bash thunderstorm-collector.sh --server thunderstorm.local
@@ -703,6 +810,7 @@ urlencode() {
     printf "%s" "$out"
 }
 
+SAFE_FILENAME_OUT=""
 sanitize_filename_for_multipart() {
     local input="$1"
     # This value is attacker-influenced (it is the collected file's own path) and is spliced
@@ -719,7 +827,7 @@ sanitize_filename_for_multipart() {
     input="${input//$'\r'/_}"
     input="${input//$'\n'/_}"
     [ -z "$input" ] && input="sample.bin"
-    printf "%s" "$input"
+    SAFE_FILENAME_OUT="$input"
 }
 
 # ensure_work_dir -- create the private work directory on first use (atomic mkdir under
@@ -758,17 +866,23 @@ mktemp_portable() {
     printf '%s\n' "$t"
 }
 
-# scratch_file -- print the path of the per-run scratch file named $1 inside the private work
-# directory, truncated. Uploads used to take three fresh temp files per attempt (four with
+# scratch_file -- put the path of the per-run scratch file named $1, truncated, in
+# SCRATCH_FILE_OUT. It returns through a global rather than stdout so callers need no command
+# substitution: three of these run per uploaded file, and on bash 5.2 a signal arriving while the
+# shell expands a "$( )" can lose that signal's trap entirely (a known bug — bug-bash 2023-09,
+# fixed in 5.3, never backported). Fewer dolparens in the upload loop is fewer chances to lose an
+# operator's interrupt, and it saves a subshell per call. Uploads used to take three fresh temp files per attempt (four with
 # wget, one of them a complete multipart copy of the file being sent) and released none of them
 # until exit: a 16k-file collection left ~50k files behind in the work directory, and on the
 # wget path the directory grew by the size of the entire collection — on the host being
 # triaged. Fixed names bound that to a handful of files and the largest single upload, and save
 # three mktemp forks per file. The directory is mode 700, so the names carry no risk.
+SCRATCH_FILE_OUT=""
 scratch_file() {
+    SCRATCH_FILE_OUT=""
     ensure_work_dir || return 1
     : > "$TS_WORK_DIR/$1" 2>/dev/null || return 1
-    printf '%s\n' "$TS_WORK_DIR/$1"
+    SCRATCH_FILE_OUT="$TS_WORK_DIR/$1"
 }
 
 # resolve_dir -- canonicalize an existing, readable directory ($2) into RESOLVE_DIR_OUT.
@@ -1049,10 +1163,10 @@ upload_with_curl() {
     local code
     local http_code
 
-    safe_filename="$(sanitize_filename_for_multipart "$filename")"
+    sanitize_filename_for_multipart "$filename"; safe_filename="$SAFE_FILENAME_OUT"
 
-    resp_file="$(scratch_file curl.resp)" || return 91
-    header_file="$(scratch_file curl.hdr)" || return 91
+    scratch_file curl.resp || return 91; resp_file="$SCRATCH_FILE_OUT"
+    scratch_file curl.hdr || return 91; header_file="$SCRATCH_FILE_OUT"
 
     # The file is streamed from stdin ('@-'), never named to curl as '@path': curl splits an
     # -F value on ';' and honours sub-parameters, so a collected file whose own name contains
@@ -1061,7 +1175,7 @@ upload_with_curl() {
     local form_arg="file=@-;filename=${safe_filename}"
 
     local err_file
-    err_file="$(scratch_file curl.err)" || return 91
+    scratch_file curl.err || return 91; err_file="$SCRATCH_FILE_OUT"
 
     # A total timeout alone leaves a black-holed SYN eating the whole budget per file
     # (CLAUDE.md §2 asks for connect AND total). --max-time bounds the transfer; note it is a
@@ -1148,7 +1262,7 @@ upload_with_wget() {
     local header_file
     local code
 
-    safe_filename="$(sanitize_filename_for_multipart "$filename")"
+    sanitize_filename_for_multipart "$filename"; safe_filename="$SAFE_FILENAME_OUT"
 
     # Generate a boundary that does not appear in the file content or metadata.
     # Retry with different random seeds to avoid multipart corruption.
@@ -1173,9 +1287,9 @@ upload_with_wget() {
     if [ "$_boundary_attempts" -ge 10 ]; then
         log_msg warn "Could not find safe multipart boundary for '$filepath', upload may be malformed"
     fi
-    body_file="$(scratch_file wget.body)" || return 91
-    resp_file="$(scratch_file wget.resp)" || return 91
-    header_file="$(scratch_file wget.hdr)" || return 91
+    scratch_file wget.body || return 91; body_file="$SCRATCH_FILE_OUT"
+    scratch_file wget.resp || return 91; resp_file="$SCRATCH_FILE_OUT"
+    scratch_file wget.hdr || return 91; header_file="$SCRATCH_FILE_OUT"
 
     # _body_rc, not the compound's own status: a brace group reports the exit status of its LAST
     # command, so a 'cat' that failed (the file vanished or became unreadable between the
@@ -1846,6 +1960,18 @@ collect_symlink_entry() {
         return 0
     fi
     if [ ! -f "$_resolved" ]; then
+        # "Not a regular file" and "not allowed to look" are the same answer from '[ -f ]'.
+        # Calling the second one dangling booked a permission failure as a skip, at debug level,
+        # and let the run exit 0 — CLAUDE.md §3 says an inaccessible target is a failure and must
+        # be surfaced. Only a target we could actually examine is dangling.
+        if entry_stat_denied "$_resolved"; then
+            LINKS_FAILED=$((LINKS_FAILED + 1))
+            FILES_FAILED=$((FILES_FAILED + 1))
+            FILES_UNREADABLE=$((FILES_UNREADABLE + 1))
+            [ -n "$FIRST_UNREADABLE" ] || FIRST_UNREADABLE="$_resolved"
+            log_msg error "Symlink '$link' -> '$_resolved' could not be examined (its directory is not searchable); counted as unreadable, not skipped"
+            return 0
+        fi
         link_skip LINKS_DANGLING debug "Skipping symlink '$link' (dangling or special target)"
         return 0
     fi
@@ -2000,6 +2126,65 @@ compose_root_excludes() {
     return 0
 }
 
+# first_record -- the first NUL-terminated record of file $1, in FIRST_RECORD_OUT. One builtin
+# read, so a path containing a newline survives intact. Lets every loss name a real path instead
+# of quoting find's diagnostic, whose format is locale-dependent and unparseable.
+FIRST_RECORD_OUT=""
+first_record() {
+    FIRST_RECORD_OUT=""
+    IFS= read -r -d '' FIRST_RECORD_OUT < "$1" 2>/dev/null
+    [ -n "$FIRST_RECORD_OUT" ]
+}
+
+# dir_searchable -- can this process stat something INSIDE directory $1? That needs search
+# permission only; read permission is what lets you LIST a directory, which is a different
+# question and the one attribute_walk_errors asks (it tests -r and -x separately, to tell
+# "contents unknown" from "names known, attributes not"). Requiring both here was wrong: a
+# mode-0111 directory is searchable but not listable — legitimate, and anything a user can chmod
+# their own directory to — so a file that genuinely vanished under one was reported as a
+# permission failure.
+#
+# '[ -x ]' is access(2) through the shell, so it answers for THIS caller, honouring ACLs and the
+# root bypass, where '-perm' only reads mode bits and would call /root at 0700 executable for a
+# stranger. It also works where find's -readable/-executable do not: -readable is GNU-only,
+# busybox has just -executable, and neither exists on BSD/macOS — the platforms
+# verify_portable.sh targets. Verified for uid 0 on a mode-000 directory: bash answers true and
+# root can indeed cd into it, so no privileged special case is needed.
+dir_searchable() {
+    [ -x "$1" ]
+}
+
+# entry_stat_denied -- true when a stat on $1 just failed BECAUSE its directory cannot be
+# searched, rather than because $1 is gone. In Bash the two are otherwise indistinguishable:
+# '[ -e ]' needs the very stat that failed, so ENOENT and EACCES both answer "no". Without this
+# an entry that is still perfectly there, merely locked away, was booked as VANISHED — which the
+# exit taxonomy defines as ordinary host churn and "nothing the collector or the operator did
+# wrong" (exit 5) — for what is a permission failure that lost evidence (exit 4).
+# Called only on the failure paths; the hot loop never pays for it.
+entry_stat_denied() {
+    local _d
+    case "$1" in
+        */*) _d="${1%/*}"; [ -n "$_d" ] || _d="/" ;;   # "/x" -> "/", not ""
+        *)   _d="." ;;
+    esac
+    # Three outcomes, and the third is why this recurses.
+    #
+    #  - The parent is searchable: we can look inside it, so the entry really is gone -> churn.
+    #  - The parent is visibly a directory but not searchable: the entry is there and we are
+    #    locked out -> denied.
+    #  - Neither: the parent's own absence might itself be churn (rm -rf of a subtree, a parent
+    #    replaced by a file, a symlinked parent whose target went away) OR permission denial one
+    #    level further up. '[ -r ]'/'[ -x ]'/'[ -d ]' cannot tell EACCES from ENOENT, so asking
+    #    about the parent is the same question again — recurse until an ancestor answers it.
+    #    Bounded by the path depth, and only ever reached on a failure path.
+    dir_searchable "$_d" && return 1
+    [ -d "$_d" ] && return 0
+    case "$_d" in
+        /|.) return 0 ;;    # nothing above it can be consulted; treat as denied
+    esac
+    entry_stat_denied "$_d"
+}
+
 # collect_entries -- the upload pass: walk every classified list produced by the discovery pass
 # and deliver each entry. Routing is by the class recorded AT DISCOVERY (first byte: f regular
 # file, l symlink), never by what the path is now: an entry whose type changed since is not the
@@ -2027,9 +2212,8 @@ collect_entries() {
             # route by the class recorded at discovery (first byte: f file, l symlink).
             # A symlink entry is accounted and — with --follow-symlinks — collected in
             # collect_symlink_entry, never traversed here. An entry whose type changed since
-            # discovery is not the object find checked: failed (vanished) — the rsync code-24
-            # convention for a mid-run change — never uploaded unchecked and never fed to the
-            # link policy under a false identity. Every l entry bumps LINKS_SEEN, so
+            # discovery is not the object find checked: never uploaded unchecked and never fed
+            # to the link policy under a false identity. Every l entry bumps LINKS_SEEN, so
             # LINKS_SEEN == TOTAL_LINKS holds by construction (checked at reconciliation).
             _kind="${file_path:0:1}"
             file_path="${file_path#?}"
@@ -2039,10 +2223,15 @@ collect_entries() {
                         LINKS_SEEN=$((LINKS_SEEN + 1))
                         LINKS_FAILED=$((LINKS_FAILED + 1))
                         FILES_FAILED=$((FILES_FAILED + 1))
-                        FILES_VANISHED=$((FILES_VANISHED + 1))
-                        if [ -e "$file_path" ]; then
+                        if entry_stat_denied "$file_path"; then
+                            FILES_UNREADABLE=$((FILES_UNREADABLE + 1))
+                            [ -n "$FIRST_UNREADABLE" ] || FIRST_UNREADABLE="$file_path"
+                            log_msg error "Symbolic link '$file_path' could not be examined (its directory is not searchable); counted as unreadable, not vanished"
+                        elif [ -e "$file_path" ]; then
+                            FILES_VANISHED=$((FILES_VANISHED + 1))
                             log_msg warn "Symbolic link '$file_path' was replaced by a non-link after discovery; not collected, counted as failed"
                         else
+                            FILES_VANISHED=$((FILES_VANISHED + 1))
                             log_msg debug "Vanished before collection: '$file_path'"
                         fi
                         continue
@@ -2065,8 +2254,20 @@ collect_entries() {
             # reconciliation holds by construction instead of inferring the loss afterwards.
             if [ ! -f "$file_path" ]; then
                 FILES_FAILED=$((FILES_FAILED + 1))
-                FILES_VANISHED=$((FILES_VANISHED + 1))
-                log_msg debug "Vanished before collection: '$file_path'"
+                # The gates-off case has NO other signal: with --max-size 0 --max-age 0 the walk
+                # needs no stat, so find succeeds, prints nothing to stderr, and the entries under
+                # an unsearchable directory are discovered normally — then every one of them fails
+                # '[ -f ]' here. Booking them as vanished made the run exit 5 and say the loss was
+                # ordinary churn that nobody could have prevented. It is a permission failure and
+                # it lost evidence: unreadable, exit 4 (CLAUDE.md §3).
+                if entry_stat_denied "$file_path"; then
+                    FILES_UNREADABLE=$((FILES_UNREADABLE + 1))
+                    [ -n "$FIRST_UNREADABLE" ] || FIRST_UNREADABLE="$file_path"
+                    log_msg error "'$file_path' could not be examined (its directory is not searchable); counted as unreadable, not vanished"
+                else
+                    FILES_VANISHED=$((FILES_VANISHED + 1))
+                    log_msg debug "Vanished before collection: '$file_path'"
+                fi
                 continue
             fi
 
@@ -2121,7 +2322,23 @@ report_run() {
         printf '\r\033[K' >&2
     fi
 
-    log_msg info "Run completed: discovered=$TOTAL_FILES scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED age_filtered=$FILES_AGE_FILTERED size_filtered=$FILES_SIZE_FILTERED age_ctime_only=$FILES_AGE_CTIME_ONLY future=$FILES_FUTURE failed=$FILES_FAILED links_seen=$LINKS_SEEN links_collected=$LINKS_COLLECTED links_skipped=$LINKS_SKIPPED unreadable_dirs=$UNREADABLE_DIRS unusable_dirs=$UNUSABLE_DIRS seconds=$elapsed"
+    # Every line that echoes a PATH is emitted BEFORE the summary, deliberately. A path is
+    # attacker-controlled content: a directory named '... unreadable_dirs=0' would otherwise
+    # appear after the summary line, and a scraper taking the LAST match of
+    # '(^|[[:space:]])key=[0-9]+' would read the planted number instead of the real one — a
+    # silent lie about how much of the host was actually covered. Printing them first means the
+    # authoritative summary is always the last word, whatever a path happens to contain.
+    if [ "$UNREADABLE_DIRS" -gt 0 ]; then
+        log_msg error "$UNREADABLE_DIRS directory(ies) could not be read in full (first: '$FIRST_UNREADABLE_DIR'): $UNLISTABLE_DIRS could not be listed, so what they held is unknown; $UNSEARCHABLE_DIRS could be listed but not searched"
+    fi
+    if [ "$UNSTATABLE_ENTRIES" -gt 0 ]; then
+        log_msg error "$UNSTATABLE_ENTRIES entry(ies) known to exist could not be examined (first: '$FIRST_UNSTATABLE') and were not collected; nothing about them could be read, not even their type"
+    fi
+    if [ "$FILES_UNREADABLE" -gt 0 ]; then
+        log_msg error "$FILES_UNREADABLE file(s) could not be read (first: '$FIRST_UNREADABLE'); counted as failed"
+    fi
+
+    log_msg info "Run completed: discovered=$TOTAL_FILES scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED age_filtered=$FILES_AGE_FILTERED size_filtered=$FILES_SIZE_FILTERED age_ctime_only=$FILES_AGE_CTIME_ONLY future=$FILES_FUTURE failed=$FILES_FAILED links_seen=$LINKS_SEEN links_collected=$LINKS_COLLECTED links_skipped=$LINKS_SKIPPED unreadable_dirs=$UNREADABLE_DIRS unstatable=$UNSTATABLE_ENTRIES unusable_dirs=$UNUSABLE_DIRS seconds=$elapsed"
 
     # Each caveat below is reported unconditionally — never gated on a count being > 0, or an
     # all-zero failed run says nothing. Counter names appear without "=": the summary's keys must
@@ -2171,8 +2388,13 @@ report_run() {
     if [ "$FILES_FAILED" -gt 0 ]; then
         log_msg info "File breakdown: unreadable=$FILES_UNREADABLE vanished=$FILES_VANISHED upload=$FILES_UPLOAD_FAILED"
     fi
-    if [ "$FILES_UNREADABLE" -gt 0 ]; then
-        log_msg error "$FILES_UNREADABLE file(s) could not be read (first: '$FIRST_UNREADABLE'); counted as failed"
+    if [ "$WALK_ERRORS_UNEXPLAINED" -eq 1 ]; then
+        log_msg error "At least one discovery walk reported an error that could not be attributed to a directory or entry still present when it was checked; the usual cause is a path that disappeared during the walk"
+    fi
+    if [ "$UNSTATABLE_ENTRIES" -eq 0 ] && [ "$UNSTATABLE_UNMEASURED_GATES" -eq 1 ]; then
+        log_msg info "Entries hidden by an unsearchable directory were not counted because both discovery gates are off: the regular files among them are enumerated and reported individually instead, but a subdirectory in that position reaches no counter, so the zero is unmeasured rather than a statement that none were hidden"
+    elif [ "$UNSTATABLE_ENTRIES" -eq 0 ] && [ "$UNSTATABLE_UNMEASURED" -eq 1 ]; then
+        log_msg info "Entries hidden by an unsearchable directory were not counted on this platform: this find cannot list an entry it cannot stat, so the zero is unmeasured rather than a statement that none were hidden"
     fi
 
     # in default mode a narrow, operator-scoped scan may hide a payload behind an
@@ -2227,6 +2449,9 @@ report_run() {
         stats_json="$STATS_JSON_OUT"
         collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null
     fi
+    # The server has now been told the scan ended, so the exit trap's backstop must stand down:
+    # from here an exit is a normal one whatever code it carries.
+    RUN_FINISHED=1
 
     # Exit 4 vs 5: rsync splits "partial transfer due to error" (23) from "partial transfer due
     # to vanished source files" (24) because they ask different things of the operator — one is
@@ -2237,7 +2462,8 @@ report_run() {
     # explicitly named target that was unusable is UNUSABLE_DIRS, so it stays 4 even if the
     # only file losses were vanished ones (tar treats a named-but-missing operand the same way).
     if [ "$FILES_UNREADABLE" -gt 0 ] || [ "$FILES_UPLOAD_FAILED" -gt 0 ] \
-        || [ "$UNREADABLE_DIRS" -gt 0 ] || [ "$UNUSABLE_DIRS" -gt 0 ] || [ "$reconcile_failed" -eq 1 ]; then
+        || [ "$UNREADABLE_DIRS" -gt 0 ] || [ "$UNSTATABLE_ENTRIES" -gt 0 ] \
+        || [ "$WALK_ERRORS_UNEXPLAINED" -eq 1 ] || [ "$UNUSABLE_DIRS" -gt 0 ] || [ "$reconcile_failed" -eq 1 ]; then
         return 4
     fi
     if [ "$FILES_VANISHED" -gt 0 ]; then
@@ -2466,20 +2692,130 @@ classify_root() {
     # tests this status and the last statement above is a conditional.
     return 0
 }
+# attribute_walk_errors -- explain why this root's discovery walk exited non-zero, by re-deriving
+# the facts from the TREE rather than from find's stderr. Called ONLY after a walk failed, so a
+# clean run pays nothing for it.
+#
+# find's diagnostics cannot be counted, let alone parsed. One directory that is readable but not
+# searchable (mode 0444) holding four files produces FOUR lines, each naming a FILE inside it —
+# so the old line count read 4 for one directory — while a directory that cannot be opened at all
+# produces ONE line naming the directory. Two different losses, one spelling
+# ('find: <path>: <strerror>'), and the text is not recoverable anyway: GNU quotes with ' in the
+# C locale and U+2018/U+2019 in a UTF-8 one (findutils ignores QUOTING_STYLE), busybox never
+# quotes and splits a newline-bearing path across lines, real paths contain colons, and the
+# prefix is argv[0]. The first line is quoted as a human note and nothing numeric comes from it.
+#
+# Reads: scandir, walk_excludes, cloud_prunes. Writes: UNREADABLE_DIRS, UNLISTABLE_DIRS,
+# UNSEARCHABLE_DIRS, FIRST_UNREADABLE_DIR, UNSTATABLE_ENTRIES, FIRST_UNSTATABLE,
+# UNSTATABLE_UNMEASURED, and the per-root ATTR_* values for the caller's message.
+# Returns 0 when at least one directory was attributed, 1 when nothing could be explained.
+ATTR_DIRS_OUT=0
+ATTR_UNLISTABLE_OUT=0
+ATTR_UNSEARCHABLE_OUT=0
+ATTR_ENTRIES_OUT=0
+ATTR_FIRST_DIR_OUT=""
+ATTR_FIRST_ENTRY_OUT=""
+attribute_walk_errors() {
+    ATTR_DIRS_OUT=0; ATTR_UNLISTABLE_OUT=0; ATTR_UNSEARCHABLE_OUT=0; ATTR_ENTRIES_OUT=0
+    # BOTH first-* values reset here. Omitting ATTR_FIRST_ENTRY_OUT left it sticky across roots —
+    # verbatim the defect the per-root value was added to fix: every root after the first named
+    # an earlier root's file as its own example.
+    ATTR_FIRST_DIR_OUT=""; ATTR_FIRST_ENTRY_OUT=""
+    # Announced so "this never runs on a clean root" is an observable fact rather than an
+    # assertion about counters that would read zero either way.
+    log_msg debug "Attributing walk errors under '$scandir'"
+    local _dlist _elist _d
+    scratch_file walk.dirs || return 1; _dlist="$SCRATCH_FILE_OUT"
+    # Same prune set as the discovery walk: a directory this run deliberately did not enter is
+    # not a directory it could not read.
+    find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \
+        -type d -print0 > "$_dlist" 2>/dev/null
+    while IFS= read -r -d '' _d; do
+        if [ ! -r "$_d" ]; then
+            # opendir would fail: not even the names of what it held are knowable.
+            ATTR_UNLISTABLE_OUT=$(( ATTR_UNLISTABLE_OUT + 1 ))
+        elif [ ! -x "$_d" ]; then
+            # Listable, not searchable: the names are known and every stat on them fails.
+            ATTR_UNSEARCHABLE_OUT=$(( ATTR_UNSEARCHABLE_OUT + 1 ))
+            # Count what it hides. Every entry that CAN be stat'ed satisfies exactly one of
+            # '-size -1c' (zero bytes) and '-size +0c' (non-zero), so matching neither means the
+            # stat failed. '-type f' is deliberately absent: the type is exactly what cannot be
+            # read here, and requiring it would report zero on a filesystem without d_type —
+            # precisely where the loss is largest. find cannot descend a directory it cannot
+            # search, so this stays one level deep by construction.
+            # Only when a gate is on. With BOTH gates off the walk needs no stat, so find
+            # enumerates these entries from the directory entry and they reach collect_entries,
+            # which books each one as unreadable — counting them here as well would name the
+            # same file twice, under two counters that mean different things.
+            if [ "${#SIZE_TEST[@]}" -eq 0 ] && [ "${#AGE_TESTS[@]}" -eq 0 ]; then
+                # Not measured, and it must say WHY — the reason here is the configuration, not
+                # the platform. With both gates off the probe would double-count the regular files
+                # (the upload pass already books them), but a SUBDIRECTORY in that position is
+                # matched by neither -type f nor -type l and reaches no counter at all, so
+                # unstatable=0 is still not a measured zero.
+                UNSTATABLE_UNMEASURED_GATES=1
+            elif scratch_file walk.entries && _elist="$SCRATCH_FILE_OUT"; then
+                # '! -type l': a symlink here is enumerated by the discovery walk's '-o -type l'
+                # arm and accounted by the upload pass, so counting it again would book one object
+                # under two counters that mean different things. It is NOT in links_seen — that
+                # counter comes from '[ -h ]', which is exactly the lstat this directory refuses,
+                # so such a symlink is carried as a regular file and lands in failed=/unreadable=.
+                # Counted once either way; the earlier wording named the wrong counter.
+                find "$_d" ! -size -1c ! -size +0c ! -type l -print0 > "$_elist" 2>/dev/null
+                if count_records "$_elist" && [ "$COUNT_RECORDS_OUT" -gt 0 ]; then
+                    ATTR_ENTRIES_OUT=$(( ATTR_ENTRIES_OUT + COUNT_RECORDS_OUT ))
+                    if first_record "$_elist"; then
+                        # Per-root, for this root's own message. FIRST_UNSTATABLE is a RUN-global
+                        # and interpolating it into a per-root line made every root after the
+                        # first name an EARLIER root's evidence path as its own example.
+                        [ -n "$ATTR_FIRST_ENTRY_OUT" ] || ATTR_FIRST_ENTRY_OUT="$FIRST_RECORD_OUT"
+                        [ -n "$FIRST_UNSTATABLE" ] || FIRST_UNSTATABLE="$FIRST_RECORD_OUT"
+                    fi
+                elif ! find "$_d" -print0 > /dev/null 2>&1; then
+                    # Counted nothing. A plain listing that ALSO fails means this find cannot
+                    # name an entry it cannot stat (busybox does not), so the zero is unmeasured.
+                    # A plain listing that succeeds means the directory really is empty, and
+                    # saying "unmeasured" there would be its own false statement.
+                    UNSTATABLE_UNMEASURED=1
+                fi
+                : > "$_elist" 2>/dev/null || :
+            else
+                UNSTATABLE_UNMEASURED=1
+            fi
+        else
+            continue
+        fi
+        [ -n "$ATTR_FIRST_DIR_OUT" ] || ATTR_FIRST_DIR_OUT="$_d"
+    done < "$_dlist"
+    : > "$_dlist" 2>/dev/null || :
+
+    ATTR_DIRS_OUT=$(( ATTR_UNLISTABLE_OUT + ATTR_UNSEARCHABLE_OUT ))
+    [ "$ATTR_DIRS_OUT" -gt 0 ] || return 1
+    UNLISTABLE_DIRS=$(( UNLISTABLE_DIRS + ATTR_UNLISTABLE_OUT ))
+    UNSEARCHABLE_DIRS=$(( UNSEARCHABLE_DIRS + ATTR_UNSEARCHABLE_OUT ))
+    UNREADABLE_DIRS=$(( UNREADABLE_DIRS + ATTR_DIRS_OUT ))
+    UNSTATABLE_ENTRIES=$(( UNSTATABLE_ENTRIES + ATTR_ENTRIES_OUT ))
+    [ -n "$FIRST_UNREADABLE_DIR" ] || FIRST_UNREADABLE_DIR="$ATTR_FIRST_DIR_OUT"
+    return 0
+}
+
 # enumerate_root -- verify the cloud-named folders under this root, walk it, and record what was
 # found. Returns 1 when the root produced no usable list (it was reported by report_unusable_dir).
 #
 # The walk is PHYSICAL in every mode: find never follows a symlink, so one planted link cannot
 # bypass a path-anchored exclusion or drag an unbounded subtree in. Symlinks are enumerated as
 # entries so they can be counted and — with --follow-symlinks — collected without traversal.
-# Each entry is then re-listed with a one-byte class prefix (f regular file, l symlink) because
+# Each entry is then re-listed with a one-byte class prefix (f regular file, l symlink), because
 # every root is enumerated before any upload: the upload pass must route by what an entry WAS at
-# discovery, not by what it has become since.
+# discovery, not by what it has become since. An entry whose type cannot be READ is written as
+# 'f' and resolved honestly in the upload pass (see the loop's comment), never guessed at.
 # Reads: scandir, walk_excludes, _in_cloud_scope, SIZE_TEST, AGE_TESTS.
-# Writes: cloud_prunes, all_find_files, TOTAL_FILES, TOTAL_LINKS, UNREADABLE_DIRS.
+# Writes: cloud_prunes, all_find_files, TOTAL_FILES, TOTAL_LINKS, UNREADABLE_DIRS,
+#         UNLISTABLE_DIRS, UNSEARCHABLE_DIRS, UNSTATABLE_ENTRIES, WALK_ERRORS_UNEXPLAINED.
 enumerate_root() {
-    local _cand_file _cand _cloud_ev _find_err _entry _count _lcount _k _typed _typed_ok
-    local find_results_file find_rc _find_msg _dir_errs _word
+    local _cand_file _cand _cloud_ev _find_err
+    local find_results_file find_rc _find_msg _word
+    local _entry _count _lcount _k _typed _typed_ok
         # Verify cloud-named folders before excluding them: enumerate the directories under this
         # root whose NAME matches a known cloud service (outermost matches only), then prune just
         # the ones with positive sync evidence — visibly. A folder that merely shares the name is
@@ -2520,48 +2856,77 @@ enumerate_root() {
         # one planted link bypass every path-anchored exclusion and drag in unbounded
         # content). Symlinks are enumerated as entries (-type l) so they can be counted,
         # policy-checked, and — with --follow-symlinks — collected without traversal.
-        _find_err="$(scratch_file find.err)" || _find_err=/dev/null
-        # ONE spelling of the discovery expression for every configuration: AGE_TESTS is empty
-        # when --max-age is 0, so the age arm disappears instead of needing a second,
-        # near-identical find command that has to be kept in sync by hand. The size and age
-        # predicates read the stat find already performed, so both gates are free here.
+        if scratch_file find.err; then _find_err="$SCRATCH_FILE_OUT"; else _find_err=/dev/null; fi
+        # ONE walk, and the class is refined per entry afterwards. That is the shape every
+        # portable collector converges on — unix_collector walks
+        # '\( -type f -o -type d -o -type l \)' once and refines per entry; UAC uses -type only
+        # as a FILTER and re-tests with '[ -f ] || [ -h ]' in remove_non_regular_files.sh —
+        # because there is no portable way to make find report WHICH arm matched: -printf is
+        # GNU-only (FreeBSD's is a documented stub with no %y, macOS has none) and busybox has
+        # neither -printf nor -ls.
+        #
+        # A previous revision split this into a -type l walk and a -type f walk so the class
+        # would come from find itself. It was reverted: two walks are not simultaneous, so an
+        # entry that changed type between them matched NEITHER and left the inventory with no
+        # counter and no diagnostic, and the count-based check added to detect that reported
+        # ordinary file CREATION as a lost entry and forced exit 4 (measured: 14 false losses on
+        # a tree gaining 400 files mid-scan). One walk cannot lose an entry that way.
+        #
+        # What the split was really trying to fix — a symlink under a readable-but-not-searchable
+        # directory being misclassified — is fixed instead where it belongs, in the upload pass:
+        # '[ -h ]' fails there for want of an lstat, and entry_stat_denied then books the entry
+        # as UNREADABLE rather than inventing a type or calling it churn.
+        #
+        # ONE spelling of the discovery expression for every configuration: SIZE_TEST and
+        # AGE_TESTS are empty when their gate is off, so the arm disappears instead of needing a
+        # second, near-identical find command kept in sync by hand. Both gates read the stat find
+        # already performed, so they are free here.
         find "$scandir" "${walk_excludes[@]}" "${cloud_prunes[@]+"${cloud_prunes[@]}"}" \
             \( -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" "${AGE_TESTS[@]+"${AGE_TESTS[@]}"}" -o -type l \) \
             -print0 > "$find_results_file" 2>"$_find_err"
         find_rc=$?
-        # find exits non-zero when a subtree under this (readable) dir could not
-        # be read, writing one diagnostic per directory (GNU, BSD, busybox). A directory is not
-        # an artifact: what it held is unknown, so the DIRECTORIES are counted
-        # (UNREADABLE_DIRS) and the run is partial — as rsync (code 23), tar and find report it.
-        # Keep the files find DID return. When find failed and returned NOTHING, the target was
-        # not enumerated at all — a rejected predicate, a path that vanished, find itself
-        # failing — an unusable target under the rules (explicit -> error and exit 4,
-        # default -> warn), not a silent "Found 0".
+        # A walk exits non-zero when part of the tree could not be read. Attribute that to the
+        # DIRECTORIES responsible by measuring them, never by counting diagnostics. Keep whatever
+        # the walks did return; only a root that was not enumerated at all is unusable.
         if [ "$find_rc" -ne 0 ]; then
             _find_msg="$(head -1 "$_find_err" 2>/dev/null)"
             _find_msg="${_find_msg//$'\n'/ }"
+            # One list again, so this is the original condition: find failed AND returned
+            # nothing, i.e. the target was not enumerated at all. The two-walk revision judged
+            # the file walk alone, which let a single mode-0000 directory discard an entire root
+            # — symlinks the run had already discovered included.
             if [ ! -s "$find_results_file" ]; then
                 report_unusable_dir "$scandir" "file enumeration failed${_find_msg:+: $_find_msg}"
                 return 1
             fi
-            _dir_errs=0
-            while IFS= read -r _entry || [ -n "$_entry" ]; do
-                _dir_errs=$((_dir_errs + 1))
-            done < "$_find_err"
-            [ "$_dir_errs" -gt 0 ] || _dir_errs=1
-            UNREADABLE_DIRS=$((UNREADABLE_DIRS + _dir_errs))
-            _word="directories"
-            [ "$_dir_errs" -eq 1 ] && _word="directory"
-            log_msg error "$_dir_errs $_word under '$scandir' could not be read (first: ${_find_msg:-no diagnostic}); their files are unknown and were not collected"
+            if attribute_walk_errors; then
+                _word="directories"
+                [ "$ATTR_DIRS_OUT" -eq 1 ] && _word="directory"
+                log_msg error "$ATTR_DIRS_OUT $_word under '$scandir' could not be read in full (first: '$ATTR_FIRST_DIR_OUT'): $ATTR_UNLISTABLE_OUT could not be listed, so what they held is unknown, and $ATTR_UNSEARCHABLE_OUT could be listed but not searched"
+                if [ "$ATTR_ENTRIES_OUT" -gt 0 ]; then
+                    log_msg error "$ATTR_ENTRIES_OUT entry(ies) inside them are known to exist and could not be examined (first: '$ATTR_FIRST_ENTRY_OUT'); their type, size and age could not be read, so the discovery filters were never applied to them and they were not collected"
+                fi
+            else
+                # Nothing in the tree explains it now — most often a path that disappeared during
+                # the walk. Say so instead of inventing a directory, and keep the run partial:
+                # relaxing a forensic guarantee inside a bug fix would be the wrong trade.
+                WALK_ERRORS_UNEXPLAINED=1
+                log_msg error "The walk of '$scandir' reported an error that could not be attributed to a directory it cannot read or an entry it cannot examine (first: ${_find_msg:-no diagnostic}); reported as a partial run rather than guessed at"
+            fi
         fi
-        # Count entries (each is null-terminated by -print0; fork-free) and RECORD each one's
-        # class as a one-byte prefix in a rewritten list: f regular file, l symlink (one lstat
-        # each — the lstat the summary already needed). find's -size/-mtime apply to
-        # -type f only and every root is enumerated before any upload, so the upload loop must
-        # route each entry by what it WAS at discovery: a link swapped for a regular file must
-        # never become an unchecked upload, a file swapped for a link must never enter the link
-        # policy. A list that cannot be written makes the root unusable, as a failed mktemp
-        # does above (the same work directory would fail every real upload of this root anyway).
+        # Count the entries (each NUL-terminated by -print0; fork-free) and record each one's
+        # class as a one-byte prefix in a rewritten list: f regular file, l symlink. One lstat
+        # per entry — the same refinement UAC performs with '[ -f ] || [ -h ]'. The upload pass
+        # must route by what an entry WAS at discovery, because every root is enumerated before
+        # any upload: a link swapped for a regular file must never become an unchecked upload,
+        # and a file swapped for a link must never enter the link policy.
+        #
+        # '[ -h ]' answering false is NOT taken as proof of a regular file. It also answers false
+        # when the lstat itself was refused, which is what a readable-but-not-searchable parent
+        # does. Such an entry is written as 'f' here and then fails '[ -f ]' in the upload pass,
+        # where entry_stat_denied books it as unreadable — a named failure and exit 4 — instead
+        # of the churn it used to be called. A list that cannot be written makes the root
+        # unusable, as a failed mktemp does above.
         local _count=0 _lcount=0 _k
         _typed="$find_results_file.typed"
         if ! { : > "$_typed"; } 2>/dev/null; then
@@ -2729,6 +3094,7 @@ prepare_run() {
             log_msg error "Cannot connect to Thunderstorm server at ${base_url} (begin marker failed after retry)"
             exit 1
         fi
+        BEGIN_MARKER_SENT=1
         if [ -n "$SCAN_ID" ]; then
             log_msg info "Collection scan_id: $SCAN_ID"
             case "$api_endpoint" in
@@ -2761,30 +3127,48 @@ prepare_run() {
 COUNT_MATCHING_OUT=0
 COUNT_MATCHING_PARTIAL=0   # 1 when find could not finish, so the count is a lower bound
 COUNT_FAST=0               # 1 when tr+wc are present, so counting need not loop per record
+# count_records -- how many NUL-terminated records file $1 holds, in COUNT_RECORDS_OUT.
+# Extracted from count_matching so the discovery pass can count its own lists the same way:
+# deleting everything but the separators and measuring beats reading record by record several
+# times over, and the read loop remains as the fallback when wc is absent. Returns 1 when the
+# fast path produced no digits, so the caller can decide (count_matching calls that partial).
+COUNT_RECORDS_OUT=0
+count_records() {
+    local _f="$1" _n=0 _e
+    COUNT_RECORDS_OUT=0
+    if [ "$COUNT_FAST" -eq 1 ]; then
+        # One NUL per record; everything else is deleted, so the byte count IS the record count.
+        # wc pads its output on some implementations, hence the digit strip.
+        _n="$(tr -d -c '\000' < "$_f" 2>/dev/null | wc -c 2>/dev/null)" || _n=""
+        _n="${_n//[^0-9]/}"
+        if [ -z "$_n" ]; then
+            COUNT_RECORDS_OUT=0
+            return 1
+        fi
+    else
+        while IFS= read -r -d '' _e; do
+            _n=$(( _n + 1 ))
+        done < "$_f"
+    fi
+    COUNT_RECORDS_OUT="$_n"
+    return 0
+}
+
 count_matching() {
     local _root="$1"
     shift
-    local _n=0 _e _list _rc
+    local _list _rc
     COUNT_MATCHING_OUT=0
     # A scratch file rather than '< <(find ...)': process substitution hides the producer's exit
     # status, and a counting walk that died partway would then publish a silently short number as
     # if it were the truth. scratch_file reuses a fixed name, so this costs no temp-file growth.
-    _list="$(scratch_file count.lst)" || { COUNT_MATCHING_PARTIAL=1; return 0; }
+    scratch_file count.lst || { COUNT_MATCHING_PARTIAL=1; return 0; }
+    _list="$SCRATCH_FILE_OUT"
     find "$_root" "$@" -print0 > "$_list" 2>/dev/null
     _rc=$?
-    if [ "$COUNT_FAST" -eq 1 ]; then
-        # One NUL per record; everything else is deleted, so the byte count IS the record count.
-        # wc pads its output on some implementations, hence the digit strip.
-        _n="$(tr -d -c '\000' < "$_list" 2>/dev/null | wc -c 2>/dev/null)" || _n=""
-        _n="${_n//[^0-9]/}"
-        [ -n "$_n" ] || { _n=0; COUNT_MATCHING_PARTIAL=1; }
-    else
-        while IFS= read -r -d '' _e; do
-            _n=$(( _n + 1 ))
-        done < "$_list"
-    fi
+    count_records "$_list" || COUNT_MATCHING_PARTIAL=1
     [ "$_rc" -eq 0 ] || COUNT_MATCHING_PARTIAL=1
-    COUNT_MATCHING_OUT="$_n"
+    COUNT_MATCHING_OUT="$COUNT_RECORDS_OUT"
     : > "$_list" 2>/dev/null || :
 }
 
@@ -2835,7 +3219,7 @@ count_filtered_under() {
     fi
     # The size test keeps the two categories disjoint: oversize-and-too-old counts once, as size.
     if [ "${#AGE_TESTS[@]}" -gt 0 ]; then
-        count_matching "${_base[@]}" -type f "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" ! "${AGE_TESTS[@]}"
+        count_matching "${_base[@]}" -type f "${STATABLE_TEST[@]}" "${SIZE_TEST[@]+"${SIZE_TEST[@]}"}" ! "${AGE_TESTS[@]}"
         _age="$COUNT_MATCHING_OUT"
         FILES_AGE_FILTERED=$(( FILES_AGE_FILTERED + _age ))
         # What the ctime arm alone contributed: in the window, but only because ctime moved.
@@ -3140,7 +3524,6 @@ main() {
     local _excluded_note
     local _physdir
     local _physnote
-    local _entry
     local _known
     local _in_cloud_scope
     local _keep_cloudstorage_prune
@@ -3148,7 +3531,6 @@ main() {
     local _find_msg
     local _covered
     local _child_prunes
-    local _dir_errs
     local _word
     local _folders _f
     local _typed _typed_ok _kind

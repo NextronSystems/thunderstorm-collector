@@ -43,6 +43,12 @@ find_stub_server() {
     if [ -x "$sibling" ]; then
         echo "$sibling"; return 0
     fi
+    # The in-tree stub (Python, like verify_uploads.py), so the suite is runnable from a bare
+    # checkout instead of depending on a binary that lives in another repository.
+    local intree="$REPO_ROOT/scripts/tests/thunderstorm-stub-server"
+    if [ -x "$intree" ] && command -v python3 >/dev/null 2>&1; then
+        echo "$intree"; return 0
+    fi
     if command -v thunderstorm-stub-server >/dev/null 2>&1; then
         command -v thunderstorm-stub-server; return 0
     fi
@@ -78,6 +84,7 @@ STUB_LOG=""
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+TESTS_SKIPPED=0
 FAILED_NAMES=""
 
 # Colours (disabled if not a terminal)
@@ -252,7 +259,19 @@ run_test() {
     fi
     TESTS_RUN=$((TESTS_RUN + 1))
     printf "  ${BOLD}%-55s${RESET}" "$name"
-    if "$name"; then
+    local _rc=0
+    "$name" || _rc=$?
+    # 77 = skipped (the automake convention). A test whose preconditions are absent must not be
+    # reported as PASS: the permission cases below cannot run as a user who cannot drop
+    # privileges, and silently counting them green is how a whole class of coverage disappears
+    # on the platform that needs it most.
+    if [ "$_rc" -eq 77 ]; then
+        printf " ${YELLOW}SKIP${RESET}\n"
+        TESTS_RUN=$((TESTS_RUN - 1))
+        TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+        return 0
+    fi
+    if [ "$_rc" -eq 0 ]; then
         printf " ${GREEN}PASS${RESET}\n"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
@@ -287,6 +306,11 @@ create_file_bytes() {
     dd if=/dev/urandom of="$path" bs=1 count="$size" 2>/dev/null
 }
 
+# NOTE: the tools below are SYMLINKS to the real binaries. Writing a shim with
+# `cat > "$fakebin/<tool>"` on one of these names follows the symlink and overwrites the REAL
+# binary on this machine — `rm -f` the name first. (Learned the hard way: a shim written to
+# "$fakebin/find" truncated /usr/bin/find and had to be reinstalled. curl and wget are not in
+# the list below, which is the only reason the older shim tests were safe.)
 create_fake_tool_path() {
     local dir="$TEST_TMP/fake-tools-$1"
     mkdir -p "$dir"
@@ -341,7 +365,7 @@ test_basic_async_upload() {
 # ── 2. Basic upload (sync) ──────────────────────────────────────────────────
 
 test_basic_sync_upload() {
-    has_stub_verification || { echo "    (skipped: sync scan too slow on external server)"; return 0; }
+    has_stub_verification || { echo "    (skipped: sync scan too slow on external server)"; return 77; }
     restart_stub
     local d; d="$(create_sample_dir basic_sync)"
     create_file "$d/sample.bin"
@@ -471,7 +495,7 @@ test_cloud_exclusion_by_proof() {
 # ── 8. Source parameter arrives at server ────────────────────────────────────
 
 test_source_parameter_received() {
-    has_stub_verification || { echo "    (skipped: needs stub server)"; return 0; }
+    has_stub_verification || { echo "    (skipped: needs stub server)"; return 77; }
     restart_stub
     local d; d="$(create_sample_dir source_test)"
     create_file "$d/s.bin"
@@ -486,7 +510,7 @@ test_source_parameter_received() {
 # ── 9. File content integrity ────────────────────────────────────────────────
 
 test_file_content_integrity() {
-    has_stub_verification || { echo "    (skipped: needs stub server)"; return 0; }
+    has_stub_verification || { echo "    (skipped: needs stub server)"; return 77; }
     restart_stub
     local d; d="$(create_sample_dir integrity)"
     local content="THUNDERSTORM_INTEGRITY_TEST_$(date +%s)"
@@ -673,7 +697,7 @@ test_log_file_written() {
 # ── 22. Source URL-encoding ──────────────────────────────────────────────────
 
 test_source_url_encoding() {
-    has_stub_verification || { echo "    (skipped: needs stub server)"; return 0; }
+    has_stub_verification || { echo "    (skipped: needs stub server)"; return 77; }
     restart_stub
     local d; d="$(create_sample_dir urlenc)"
     create_file "$d/a.bin"
@@ -1443,7 +1467,7 @@ test_max_size_errors_name_the_spelling_used() {
 # The size bound must be self-describing on the wire: max_size_kb alone repeats the KB/KiB
 # ambiguity the log line was rewritten to remove, and a disabled gate had to be inferred.
 test_size_bound_bytes_in_marker_stats() {
-    has_stub_verification || return 0
+    has_stub_verification || return 77
     restart_stub
     local d; d="$(create_sample_dir size_bound_wire)"
     create_file "$d/a.txt" "x"
@@ -1474,6 +1498,7 @@ test_cutoff_midtransfer_points_at_max_size() {
     local d; d="$(create_sample_dir size_cutoff)"
     create_file "$d/a.txt" "payload"
     local fakebin; fakebin="$(create_fake_tool_path size_cutoff)"
+    rm -f "$fakebin/curl"
     cat > "$fakebin/curl" <<EOF
 #!/bin/sh
 hdr=""; outfile=""; endpoint=""
@@ -1518,7 +1543,7 @@ EOF
 # The server records size_filtered=; without max_size_kb beside it that number cannot be
 # interpreted. max_age has always been sent — max_size_kb was not.
 test_max_size_reported_in_marker_stats() {
-    has_stub_verification || return 0
+    has_stub_verification || return 77
     restart_stub
     local d; d="$(create_sample_dir size_marker)"
     create_file "$d/a.txt" "x"
@@ -1538,6 +1563,7 @@ test_oversize_rejection_is_not_retried() {
     local fakebin; fakebin="$(create_fake_tool_path size_413)"
     local hits="$TEST_TMP/413-hits"
     : > "$hits"
+    rm -f "$fakebin/curl"
     cat > "$fakebin/curl" <<EOF
 #!/bin/sh
 hdr=""; outfile=""; endpoint=""
@@ -1590,6 +1616,7 @@ test_server_error_is_still_retried() {
     local fakebin; fakebin="$(create_fake_tool_path size_502)"
     local hits="$TEST_TMP/502-hits"
     : > "$hits"
+    rm -f "$fakebin/curl"
     cat > "$fakebin/curl" <<EOF
 #!/bin/sh
 hdr=""; outfile=""; endpoint=""
@@ -1634,7 +1661,7 @@ EOF
 # the two payloads were written out verbatim twice. Both are now built by build_stats_json;
 # this pins that they stay in step.
 test_interrupted_marker_carries_policy() {
-    has_stub_verification || return 0
+    has_stub_verification || return 77
     restart_stub
     local d; d="$(create_sample_dir interrupt_marker)"
     local i
@@ -1661,7 +1688,11 @@ test_interrupted_marker_carries_policy() {
         # NB: 'grep -c' prints 0 AND exits 1 when there is no match, so a '|| echo 0' fallback
         # captures "0\n0" and every numeric test after it is a shell error.
         _seen="$(grep -c 'THOR finding' "$AUDIT_LOG" 2>/dev/null)" || _seen=0
-        [ "${_seen:-0}" -ge 5 ] && break
+        # 1, not 5: each poll costs a fork, and under battery load waiting for five
+        # uploads could consume the run's remaining work, so the signal landed after the
+        # collector had already exited and the test failed for a reason that was not a
+        # regression. One upload proves the upload pass has started, which is all this needs.
+        [ "${_seen:-0}" -ge 1 ] && break
         sleep 0.05
     done
     kill -INT "$pid" 2>/dev/null || true
@@ -1671,6 +1702,9 @@ test_interrupted_marker_carries_policy() {
     set -e
 
     local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+    # A 0 here means the run finished before the signal landed (fixture too small or the box
+    # too fast), not that the signal path is broken — say so rather than leaving a bare mismatch.
+    [ "$rc" -ne 0 ] || { printf 'FAIL: the run completed before the signal was delivered (test setup, not a product failure)\n' >&2; return 1; }
     assert_eq "interrupted exit code" "130" "$rc" || return 1
     assert_contains "an interrupted marker was sent" '"type":"interrupted"' "$audit" || return 1
     assert_contains "carrying the size policy" '"max_size_kb":77' "$audit" || return 1
@@ -1710,6 +1744,7 @@ test_transient_status_still_retried() {
     local fakebin; fakebin="$(create_fake_tool_path transient_100)"
     local hits="$TEST_TMP/100-hits"
     : > "$hits"
+    rm -f "$fakebin/curl"
     cat > "$fakebin/curl" <<EOF
 #!/bin/sh
 hdr=""; outfile=""; endpoint=""
@@ -1764,6 +1799,7 @@ test_wget_vanished_file_is_not_reported_collected() {
     # standing in for the file vanishing between the pre-open check and the body build.
     local fakebin; fakebin="$(create_fake_tool_path wget_vanish)"
     rm -f "$fakebin/curl"                       # force the wget path
+    rm -f "$fakebin/wget"
     cat > "$fakebin/wget" <<EOF
 #!/bin/sh
 exec $(command -v wget) "\$@"
@@ -1875,6 +1911,893 @@ test_size_filtered_excludes_unsizeable_files() {
     rm -rf "$base"
 }
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Signals, walk-error attribution, and inaccessible-vs-vanished
+#
+# All of the permission cases below are invisible to root, which bypasses DAC entirely — which
+# is why they survived four audit rounds. They drop privileges, and SKIP rather than pass
+# vacuously when they cannot.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Shared fixture: a world-traversable tree with one directory that can be listed but not
+# searched (0444) and one that cannot be listed at all (0700), plus its own TMPDIR.
+# Echoes the base path.
+make_denied_fixture() {
+    local base="/tmp/ts-denied-$$-$1"
+    rm -rf "$base"
+    mkdir -p "$base/unsearchable" "$base/unlistable" "$base/tmp"
+    local i
+    for i in 1 2 3 4; do head -c 100 /dev/zero > "$base/unsearchable/f$i.bin"; done
+    for i in 1 2; do head -c 100 /dev/zero > "$base/unlistable/g$i.bin"; done
+    head -c 100 /dev/zero > "$base/ok.bin"
+    chmod -R a+rX "$base"
+    chmod 0777 "$base/tmp"
+    chmod 0444 "$base/unsearchable"
+    chmod 0700 "$base/unlistable"
+    echo "$base"
+}
+
+drop_privs_prefix() {
+    if [ "$(id -u)" -eq 0 ]; then
+        command -v setpriv >/dev/null 2>&1 || return 1
+        local _uid _gid
+        _uid="$(id -u nobody 2>/dev/null)" || return 1
+        _gid="$(id -g nobody 2>/dev/null)" || return 1
+        # The one path a priv-dropped test cannot relocate is the collector itself: under a 0700
+        # checkout every such test would FAIL on an unreadable script rather than SKIP.
+        setpriv --reuid="$_uid" --regid="$_gid" --clear-groups \
+            env COLLECTOR_PATH="$COLLECTOR" sh -c 'test -r "$COLLECTOR_PATH"' 2>/dev/null || return 1
+        echo "setpriv --reuid=$_uid --regid=$_gid --clear-groups"
+        return 0
+    fi
+    echo ""
+}
+
+# A curl that sleeps briefly, then delegates to the real curl: gives a signal test a
+# deterministic window in which the run is still in its upload pass, without faking the wire.
+# Its own directory, never create_fake_tool_path's (whose entries are symlinks to REAL binaries).
+make_slow_curl_path() {
+    local dir="$TEST_TMP/slowcurl-$1" real
+    real="$(type -P curl)" || return 1
+    mkdir -p "$dir"
+    rm -f "$dir/curl"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'sleep 0.15\n'
+        printf 'exec %s "$@"\n' "$real"
+    } > "$dir/curl"
+    chmod +x "$dir/curl"
+    printf '%s\n' "$dir"
+}
+
+# Reap $1 with a bound: a hung signal handler must FAIL the test, not hang the suite (the
+# handler blanks its own traps, so a defect there is precisely a hang).
+BOUNDED_WAIT_RC=0
+bounded_wait() {
+    local pid="$1" max="${2:-200}" i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt "$max" ]; then
+            kill -KILL "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            BOUNDED_WAIT_RC=137
+            return 1
+        fi
+        sleep 0.05
+    done
+    wait "$pid" 2>/dev/null
+    BOUNDED_WAIT_RC=$?
+    return 0
+}
+
+# Whether the find on PATH lists entries it cannot stat. GNU answers -type from the directory
+# entry and so lists them; busybox stats unconditionally and cannot see them at all. That
+# difference is a documented platform limitation, not a defect, so the tests below assert the
+# GNU counts where they are obtainable and the documented fallback where they are not.
+# $1 = an unsearchable directory, $2 = the privilege-dropping prefix (may be empty).
+find_lists_unstatable_entries() {
+    local n
+    # The SAME expression the collector's probe uses, '! -type l' included — a probe with a
+    # different shape than the one it predicts is how every one of these tests once took the
+    # busybox branch on GNU. NUL-terminated and counted by separator, so a newline-bearing
+    # path cannot inflate the answer.
+    n="$($2 find "$1" ! -size -1c ! -size +0c ! -type l -print0 2>/dev/null | tr -d -c '\000' | wc -c | tr -d ' ')"
+    [ "${n:-0}" -gt 0 ]
+}
+
+cleanup_denied_fixture() {
+    chmod 0755 "$1/unsearchable" "$1/unlistable" 2>/dev/null || true
+    rm -rf "$1"
+}
+
+# Each signal must end the run deliberately: interrupted marker naming the signal, work directory
+# removed, exit 128+signum. Before the fix HUP and QUIT were at their default disposition — the
+# process died with no marker at all, so the server held a begin marker and nothing else.
+test_signals_end_the_run_cleanly() {
+    has_stub_verification || return 77
+    local sig rc expect
+    for sig in HUP QUIT INT TERM; do
+        case "$sig" in
+            HUP) expect=129 ;; INT) expect=130 ;; QUIT) expect=131 ;; TERM) expect=143 ;;
+        esac
+        # A signal the HARNESS itself inherited as SIG_IGN (a suite run under nohup ignores HUP)
+        # is untrappable in every child by design — that leg is the ignore-on-entry test's job,
+        # not a failure of this one. Probe deliverability with a child that signals itself.
+        bash -c "trap 'exit 42' $sig; kill -$sig \$\$; sleep 0.1; exit 0" >/dev/null 2>&1
+        if [ "$?" -ne 42 ]; then
+            echo "    (SIG$sig arrives ignored in this harness — e.g. a nohup run — skipping that leg)"
+            continue
+        fi
+        restart_stub
+        local d; d="$(create_sample_dir "sig_$sig")"
+        local i
+        for i in $(seq 1 80); do create_file_bytes "$d/f$i.bin" 512; done
+        local wt="$TEST_TMP/work_$sig"; rm -rf "$wt"; mkdir -p "$wt"
+        # The slow-curl shim makes the window deterministic: 80 uploads at >=0.15 s each is
+        # ~12 s of runway, where the bare 600-file run finished before the kill under load.
+        local slow; slow="$(make_slow_curl_path "sig_$sig")" || return 77
+
+        # 'set -m' so the child gets its own process group and the default disposition: a
+        # non-interactive shell starts background jobs with INT ignored, and bash cannot trap a
+        # signal ignored on entry.
+        set -m
+        env PATH="$slow:$PATH" TMPDIR="$wt" bash "$COLLECTOR" --server "$(server_host)" --port "$STUB_PORT" \
+            --no-log-file --no-progress --dir "$d" --max-size 2000 --max-age 0 >/dev/null 2>&1 &
+        local pid=$!
+        set +m
+        local seen
+        for i in $(seq 1 200); do
+            seen="$(grep -c 'THOR finding' "$AUDIT_LOG" 2>/dev/null)" || seen=0
+            # One upload proves the upload pass started, and leaves the most runway.
+            [ "${seen:-0}" -ge 1 ] && break
+            sleep 0.05
+        done
+        kill -"$sig" "$pid" 2>/dev/null || true
+        set +e
+        # The handler blanks its own traps, so a defect in it is a HANG: bound the reap.
+        bounded_wait "$pid" 400 \
+            || { printf 'FAIL: SIG%s — the signal handler hung (killed after 20 s)\n' "$sig" >&2; return 1; }
+        rc=$BOUNDED_WAIT_RC
+        set -e
+
+        local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+        [ "$rc" -ne 0 ] || { printf 'FAIL: SIG%s — the run completed before the signal was delivered (test setup, not a product failure)\n' "$sig" >&2; return 1; }
+        assert_eq "SIG$sig exit code" "$expect" "$rc" || return 1
+        assert_contains "SIG$sig sent an interrupted marker" '"type":"interrupted"' "$audit" || return 1
+        assert_contains "SIG$sig named itself on the wire" "\"interrupted_by\":\"$sig\"" "$audit" || return 1
+        assert_eq "SIG$sig removed its work directory" "0" "$(find "$wt" -maxdepth 1 -name 'thunderstorm.work.*' 2>/dev/null | wc -l | tr -d ' ')" || return 1
+    done
+}
+
+test_help_documents_the_interrupt_exit_codes() {
+    local out; out="$(bash "$COLLECTOR" --help 2>&1)"
+    assert_contains "help lists the interrupt codes" "129/130/131/143" "$out" || return 1
+}
+
+# unreadable_dirs= must count DIRECTORIES. find writes one diagnostic per failed stat, so one
+# unsearchable directory holding four files produced four lines and the counter read 4 — for one
+# directory — while claiming "their files are unknown".
+test_unreadable_dirs_counts_directories_not_diagnostics() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base; base="$(make_denied_fixture dirs)"
+    local out
+    out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 2 --max-age 0 2>&1)"
+    cleanup_denied_fixture "$base"
+
+    # Two directories: one unlistable, one unsearchable. Not four diagnostics.
+    assert_eq "unreadable_dirs counts directories" "2" "$(parse_collector_stat "$out" unreadable_dirs)" || return 1
+    # The message template always contains both phrases, so grepping them proves nothing —
+    # assert the COUNTS: one directory of each class, not four diagnostics.
+    assert_contains "one directory could not be listed" ": 1 could not be listed" "$out" || return 1
+    assert_contains "and one could not be searched" "; 1 could be listed but not searched" "$out" || return 1
+}
+
+# The entries an unsearchable directory hides are known to exist and are silently never
+# collected. Nothing counted them before.
+test_unstatable_entries_are_counted_and_named() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base; base="$(make_denied_fixture entries)"
+    local _sees=0
+    find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
+    local out
+    out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 2 --max-age 0 2>&1)"
+    local rc
+    set +e
+    $pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 2 --max-age 0 >/dev/null 2>&1
+    rc=$?
+    set -e
+    cleanup_denied_fixture "$base"
+
+    if [ "$_sees" -eq 1 ]; then
+        assert_eq "the four hidden entries are counted" "4" "$(parse_collector_stat "$out" unstatable)" || return 1
+        assert_contains "and a REAL path is named, not a constant phrase" "$base/unsearchable/f" "$out" || return 1
+    else
+        # This find cannot see an entry it cannot stat. The zero must be declared unmeasured,
+        # never printed as a statement that nothing was hidden.
+        assert_eq "unstatable reads zero here" "0" "$(parse_collector_stat "$out" unstatable)" || return 1
+        assert_contains "and says so instead of claiming none were hidden" "unmeasured rather than a statement" "$out" || return 1
+    fi
+    # Either way the directory is counted and the run is partial.
+    assert_contains "the directory is still counted" "could be listed but not searched" "$out" || return 1
+    assert_eq "the run is partial" "4" "$rc" || return 1
+}
+
+# D4: with both gates off the walk needs no stat, so find SUCCEEDS, writes nothing to stderr and
+# unreadable_dirs= never fires — yet every hidden file is discovered and then fails [ -f ].
+# Booking those as vanished made the run exit 5 and call a permission failure "ordinary churn on
+# a live host and nothing the collector or the operator did wrong". This is the case with no
+# other signal at all.
+test_inaccessible_files_are_unreadable_not_vanished() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base; base="$(make_denied_fixture d4)"
+    chmod 0755 "$base/unlistable"        # isolate the unsearchable class
+    local _sees=0
+    find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
+    local out rc
+    out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 0 --max-age 0 2>&1)"
+    set +e
+    $pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 0 --max-age 0 >/dev/null 2>&1
+    rc=$?
+    set -e
+    cleanup_denied_fixture "$base"
+
+    if [ "$_sees" -eq 1 ]; then
+        # The entries are discovered, then cannot be examined: unreadable, never churn.
+        assert_eq "failed" "4" "$(parse_collector_stat "$out" failed)" || return 1
+        assert_contains "counted as unreadable" "unreadable=4" "$out" || return 1
+        assert_contains "and not as churn" "vanished=0" "$out" || return 1
+    else
+        # They are never enumerated here, so the loss shows as the unreadable directory instead.
+        assert_eq "nothing is miscounted as churn" "0" "$(parse_collector_stat "$out" failed)" || return 1
+        assert_contains "the directory carries the loss" "could be listed but not searched" "$out" || return 1
+    fi
+    assert_eq "exit 4 (partial failure), not 5 (churn)" "4" "$rc" || return 1
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+}
+
+# A symlink under an unsearchable directory cannot be lstat'ed, so its type is genuinely
+# unknowable to the upload pass. It must be reported as a named FAILURE — the entry exists and
+# was not collected — and never as churn ("vanished", exit 5, "nothing anyone did wrong"), which
+# is what it used to be. Discovery deliberately does not guess a type it cannot read.
+test_symlink_under_unsearchable_dir_is_a_named_failure() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base; base="$(make_denied_fixture linkfail)"
+    chmod 0755 "$base/unsearchable"
+    ln -s "$base/ok.bin" "$base/unsearchable/alink"
+    chmod 0444 "$base/unsearchable"
+    chmod 0755 "$base/unlistable"
+
+    local _sees=0
+    find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
+    local out rc
+    out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 0 --max-age 0 2>&1)"
+    set +e
+    $pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --dir "$base" --max-size 0 --max-age 0 >/dev/null 2>&1
+    rc=$?
+    set -e
+    cleanup_denied_fixture "$base"
+
+    if [ "$_sees" -eq 1 ]; then
+        assert_contains "the link is named as unreadable" "alink' could not be examined" "$out" || return 1
+        assert_contains "and not booked as churn" "vanished=0" "$out" || return 1
+    else
+        # This find cannot enumerate an entry it cannot stat, so the link never reaches the
+        # upload pass at all; the unreadable directory carries the loss instead.
+        assert_contains "the directory carries the loss" "could be listed but not searched" "$out" || return 1
+    fi
+    assert_eq "the run is partial, not churn-only" "4" "$rc" || return 1
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+}
+
+# A symlink inside a proven cloud-storage folder must not be enumerated: the prune applies to the
+# whole discovery expression, symlink arm included.
+test_symlink_respects_cloud_prunes() {
+    restart_stub
+    local d; d="$(create_sample_dir link_prune)"
+    mkdir -p "$d/Dropbox"
+    : > "$d/Dropbox/.dropbox.cache"
+    create_file "$d/Dropbox/inside.txt" "secret"
+    ln -s "$d/outside.txt" "$d/Dropbox/alink"
+    create_file "$d/outside.txt" "fine"
+
+    local out; out="$(run_collector --dry-run --dir "$d" --max-size 0 --max-age 0)"
+    assert_contains "the cloud folder is pruned" "Excluding cloud storage folder" "$out" || return 1
+    assert_eq "the pruned symlink is not enumerated" "0" "$(parse_collector_stat "$out" links_seen)" || return 1
+    assert_not_contains "nor its contents" "inside.txt" "$out" || return 1
+}
+
+# The attribution probes must not run on a clean root — the zero-cost claim.
+test_clean_run_runs_no_attribution_probe() {
+    restart_stub
+    local d; d="$(create_sample_dir clean_probe)"
+    create_file "$d/a.txt" "x"
+    local out; out="$(run_collector --dry-run --dir "$d" --max-size 0 --max-age 0 --debug)"
+    assert_eq "nothing unreadable" "0" "$(parse_collector_stat "$out" unreadable_dirs)" || return 1
+    assert_eq "nothing unstatable" "0" "$(parse_collector_stat "$out" unstatable)" || return 1
+    # The counters would read zero whether or not the probe ran, so assert on the probe's own
+    # debug line: without it a collector that probed every root would still pass this test.
+    assert_not_contains "the attribution probe did not run" "Attributing walk errors" "$out" || return 1
+}
+
+# walk_excludes is built per root and includes the prunes for overlapping child roots. A symlink
+# inside a pruned child must not be enumerated by the parent's walk. (This and its sibling below
+# were written when discovery was split into two walks; discovery is one walk again, so they no
+# longer guard against a prune set diverging BETWEEN walks — they still pin that the single
+# walk's prune set covers symlinks, which is what they actually test.)
+test_symlink_respects_child_prunes() {
+    restart_stub
+    local parent; parent="$(create_sample_dir link_child_prune)"
+    mkdir -p "$parent/child"
+    create_file "$parent/child/target.txt" "x"
+    ln -s "$parent/child/target.txt" "$parent/child/alink"
+
+    # Naming both parent and child means the child is pruned from the parent's walk.
+    local out; out="$(run_collector --dry-run --dir "$parent" --dir "$parent/child" --follow-symlinks --max-size 0 --max-age 0)"
+    assert_eq "the symlink is enumerated exactly once" "1" "$(parse_collector_stat "$out" links_seen)" || return 1
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+}
+
+
+
+# The discriminator must not OVER-reach: a file genuinely deleted between discovery and upload is
+# still churn (vanished, exit 5), not a permission failure. Without this guard the fix for the
+# inaccessible case could quietly reclassify every churn event as a real loss, inverting the
+# rsync 23-vs-24 distinction the exit taxonomy is built on.
+test_genuine_churn_is_still_vanished() {
+    local d; d="$(create_sample_dir churn_guard)"
+    create_file_bytes "$d/aaa.bin" 100
+    create_file_bytes "$d/zzz.bin" 100
+    local fakebin; fakebin="$(create_fake_tool_path churn_guard)"
+    # A curl shim that deletes the not-yet-uploaded sibling on its first sample POST: a real
+    # churn event, at exactly the moment the collector is walking its own discovery list.
+    rm -f "$fakebin/curl"
+    cat > "$fakebin/curl" <<EOF
+#!/bin/sh
+hdr=""; outfile=""; endpoint=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        -D) hdr="\$2"; shift 2 ;;
+        -o) outfile="\$2"; shift 2 ;;
+        -F|-H|-d|--max-time|--connect-timeout|--cacert) shift 2 ;;
+        -sS|--show-error|-X|-k) shift ;;
+        http://*|https://*) endpoint="\$1"; shift ;;
+        *) shift ;;
+    esac
+done
+case "\$endpoint" in
+    */api/collection)
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && : > "\$outfile"
+        ;;
+    *)
+        # First sample POST only, and BOTH candidates go: whichever file is mid-upload is
+        # already streaming, so exactly one not-yet-uploaded file vanishes — in either readdir
+        # order. Deleting only zzz.bin made the test depend on aaa.bin uploading first.
+        if [ ! -e "$fakebin/.hit" ]; then
+            : > "$fakebin/.hit"
+            rm -f "$d/aaa.bin" "$d/zzz.bin"
+        fi
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"id":1}' > "\$outfile"
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$fakebin/curl"
+
+    local out rc
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" --server 127.0.0.1 --port 8080 \
+        --no-log-file --no-progress --dir "$d" --max-size 0 --max-age 0 2>&1)"
+    rc=$?
+    set -e
+
+    assert_contains "the lost file is churn, not a permission failure" "vanished=1" "$out" || return 1
+    assert_contains "and not counted as unreadable" "unreadable=0" "$out" || return 1
+    assert_eq "churn-only run exits 5, not 4" "5" "$rc" || return 1
+}
+
+# Under nohup the signal arrives already ignored and cannot be trapped. That must be benign: the
+# run completes and sends a normal END marker, never an interrupted one.
+test_untrappable_hup_lets_the_run_finish() {
+    has_stub_verification || return 77
+    restart_stub
+    local d; d="$(create_sample_dir hup_ignored)"
+    local i
+    for i in $(seq 1 30); do create_file_bytes "$d/f$i.bin" 64; done
+    local slow; slow="$(make_slow_curl_path hup_ignored)" || return 77
+
+    # 'exec' so the backgrounded PID IS the collector, with HUP already SIG_IGN through the
+    # exec. The first spelling of this test killed the ignoring SUBSHELL after a fixed sleep:
+    # the collector never received any signal (verified), the run was usually over anyway, and
+    # '|| true' ate the evidence — a test that could not fail.
+    local rc
+    set +e
+    ( trap '' HUP
+      exec env PATH="$slow:$PATH" bash "$COLLECTOR" --server "$(server_host)" --port "$STUB_PORT" \
+          --no-log-file --no-progress --dir "$d" --max-size 0 --max-age 0 >/dev/null 2>&1 ) &
+    local pid=$!
+    local seen
+    for i in $(seq 1 200); do
+        seen="$(grep -c 'THOR finding' "$AUDIT_LOG" 2>/dev/null)" || seen=0
+        [ "${seen:-0}" -ge 1 ] && break
+        sleep 0.05
+    done
+    kill -HUP "$pid" 2>/dev/null
+    local delivered=$?
+    bounded_wait "$pid" 600 || { echo "FAIL: the run hung after an ignored HUP" >&2; return 1; }
+    rc=$BOUNDED_WAIT_RC
+    set -e
+
+    local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+    assert_eq "HUP was delivered to the live collector" "0" "$delivered" || return 1
+    assert_eq "the run finished normally" "0" "$rc" || return 1
+    assert_contains "an end marker was sent" '"type":"end"' "$audit" || return 1
+    assert_not_contains "and no interrupted marker" '"type":"interrupted"' "$audit" || return 1
+}
+
+
+# The discriminator must not treat every failed stat as a permission problem. '[ -r ]'/'[ -x ]'
+# answer false for a parent that no longer EXISTS exactly as for one that cannot be searched, so
+# three ordinary churn events were reported as permission failures — with a sentence claiming the
+# directory "is not searchable" when it was gone, replaced by a file, or a dangling symlink.
+test_discriminator_calls_churn_churn() {
+    local probe="$TEST_TMP/disc-probe.sh"
+    local base="$TEST_TMP/disc"
+    rm -rf "$base"; mkdir -p "$base"
+    printf 'x' > "$base/notdir"
+    ln -sfn "$base/missing" "$base/danglink"
+    mkdir -p "$base/gone"; : > "$base/gone/f.bin"; rm -rf "$base/gone"
+
+    cat > "$probe" <<EOF
+eval "\$(sed '/^main "\\\$@"/,\$d' "$COLLECTOR")"
+entry_stat_denied "$base/gone/f.bin"     && echo gone_PERM     || echo gone_churn
+entry_stat_denied "$base/notdir/f.bin"   && echo notdir_PERM   || echo notdir_churn
+entry_stat_denied "$base/danglink/f.bin" && echo dangling_PERM || echo dangling_churn
+entry_stat_denied "$base/never-existed"  && echo missing_PERM  || echo missing_churn
+EOF
+    local out; out="$(bash "$probe" 2>&1)"
+    assert_contains "a removed parent directory is churn" "gone_churn" "$out" || return 1
+    assert_contains "a parent replaced by a file is churn" "notdir_churn" "$out" || return 1
+    assert_contains "a dangling symlink parent is churn" "dangling_churn" "$out" || return 1
+    assert_contains "a plainly deleted file is churn" "missing_churn" "$out" || return 1
+}
+
+# A path is attacker-controlled content. Any line echoing one must come BEFORE the summary, or a
+# directory named "... unreadable_dirs=0" makes a scraper taking the last match read the planted
+# number and believe the host was fully covered.
+test_paths_cannot_forge_summary_counters() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-inject-$$"
+    rm -rf "$base"; mkdir -p "$base/evil unreadable_dirs=0" "$base/tmp"
+    head -c 100 /dev/zero > "$base/evil unreadable_dirs=0/f.bin"
+    head -c 100 /dev/zero > "$base/ok.bin"
+    chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/evil unreadable_dirs=0"
+
+    local out; out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
+        --no-progress --dir "$base" --max-size 2 --max-age 0 2>&1)"
+    chmod 0755 "$base/evil unreadable_dirs=0" 2>/dev/null || true
+    rm -rf "$base"
+
+    # The property has two halves: the forged path IS printed (else the test proves nothing)
+    # and the scraper's last match is still the real counter, because every path-bearing line
+    # is emitted before the summary.
+    assert_contains "the forged path itself is printed" "evil unreadable_dirs=0" "$out" || return 1
+    # parse_collector_stat is exactly what a scraper does: last match wins.
+    assert_eq "the real count survives a forged one in a path" "1" "$(parse_collector_stat "$out" unreadable_dirs)" || return 1
+}
+
+
+# Bash can LOSE a signal whose trap action it fails to parse while expanding a command
+# substitution (measured: 1 lost SIGHUP in 60 on 5.2.15). on_signal then never runs. The EXIT
+# trap still runs, so the run must still tell the server it stopped. Driven here with SIGUSR1,
+# which the collector deliberately does not trap — the same end state as a swallowed signal,
+# reached deterministically.
+test_lost_signal_still_reports_to_the_server() {
+    has_stub_verification || return 77
+    restart_stub
+    local d; d="$(create_sample_dir lost_signal)"
+    local i
+    for i in $(seq 1 400); do create_file_bytes "$d/f$i.bin" 512; done
+    local wt="$TEST_TMP/work_lost"; rm -rf "$wt"; mkdir -p "$wt"
+
+    set -m
+    env TMPDIR="$wt" bash "$COLLECTOR" --server "$(server_host)" --port "$STUB_PORT" \
+        --no-log-file --no-progress --dir "$d" --max-size 2000 --max-age 0 >/dev/null 2>&1 &
+    local pid=$!
+    set +m
+    local seen
+    for i in $(seq 1 200); do
+        seen="$(grep -c 'THOR finding' "$AUDIT_LOG" 2>/dev/null)" || seen=0
+        [ "${seen:-0}" -ge 1 ] && break
+        sleep 0.05
+    done
+    kill -USR1 "$pid" 2>/dev/null || true
+    set +e
+    wait "$pid"
+    local rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || { printf 'FAIL: the run completed before the signal landed (test setup)\n' >&2; return 1; }
+
+    local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+    assert_contains "the exit trap still sent an interrupted marker" '"type":"interrupted"' "$audit" || return 1
+    assert_contains "and admits the signal is unknown" '"interrupted_by":"unknown"' "$audit" || return 1
+    assert_eq "the work directory was still removed" "0" "$(find "$wt" -maxdepth 1 -name 'thunderstorm.work.*' 2>/dev/null | wc -l | tr -d ' ')" || return 1
+}
+
+# Denial one level ABOVE the entry must still be a permission failure, not churn. The earlier
+# '[ -d parent ]' guard answered false here and booked files that are still on disk as vanished
+# (exit 5, "nothing anyone did wrong").
+test_denial_above_the_parent_is_not_churn() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-h3-$$"
+    # The probe lives in the fixture, not in TEST_TMP: mktemp -d is 0700 and owned by the
+    # invoking user, so the unprivileged user cannot even read a script placed there.
+    local probe="$base/h3probe.sh"
+    rm -rf "$base"; mkdir -p "$base/denied/sub"
+    : > "$base/denied/sub/f.bin"
+    mkdir -p "$base/gone"; : > "$base/gone/f.bin"; rm -rf "$base/gone"
+    cat > "$probe" <<EOF
+eval "\$(sed '/^main "\\\$@"/,\$d' "$COLLECTOR")"
+entry_stat_denied "$base/denied/sub/f.bin" && echo grandparent_DENIED || echo grandparent_churn
+entry_stat_denied "$base/denied/f.bin"     && echo parent_DENIED      || echo parent_churn
+entry_stat_denied "$base/gone/f.bin"       && echo removed_DENIED     || echo removed_churn
+EOF
+    chmod -R a+rX "$base"; chmod 0444 "$base/denied"
+    local out; out="$($pre bash "$probe" 2>&1)"
+    chmod 0755 "$base/denied" 2>/dev/null || true; rm -rf "$base"
+
+    assert_contains "denial at the grandparent is a permission failure" "grandparent_DENIED" "$out" || return 1
+    assert_contains "denial at the parent likewise" "parent_DENIED" "$out" || return 1
+    assert_contains "but a removed subtree is still churn" "removed_churn" "$out" || return 1
+}
+
+# A symlink under an unsearchable directory is NOT in links_seen — that counter comes from
+# '[ -h ]', which is exactly the lstat the directory refuses — so it is carried as a regular
+# entry and booked once, in failed=/unreadable=. Counting it in unstatable= as well would book
+# one object under two counters that mean different things.
+test_unstatable_does_not_double_count_symlinks() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-h2-$$"
+    rm -rf "$base"; mkdir -p "$base/unsearchable" "$base/tmp"
+    local i
+    for i in 1 2 3; do head -c 100 /dev/zero > "$base/unsearchable/f$i.bin"; done
+    head -c 100 /dev/zero > "$base/target.bin"
+    ln -s "$base/target.bin" "$base/unsearchable/alink"
+    chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/unsearchable"
+
+    local _sees=0
+    find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
+    local out; out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
+        --no-progress --dir "$base" --max-size 2 --max-age 0 2>&1)"
+    chmod 0755 "$base/unsearchable" 2>/dev/null || true; rm -rf "$base"
+
+    if [ "$_sees" -eq 1 ]; then
+        # Three regular files are hidden and counted. The symlink is NOT among them: it is
+        # enumerated by the walk and accounted in the upload pass as an unreadable entry, so
+        # counting it here too would book one object under two counters that mean different
+        # things.
+        assert_eq "only the hidden regular files are counted" "3" "$(parse_collector_stat "$out" unstatable)" || return 1
+        assert_contains "the symlink is accounted once, as a failure" "alink' could not be examined" "$out" || return 1
+    fi
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+}
+
+# Ordinary churn must never be reported as a loss. A previous revision verified the two
+# discovery walks against a third count of the same tree; because the three counts were taken at
+# three different instants, files merely CREATED during the scan were reported as "entries lost
+# to a type change" and forced exit 4 (measured: 14 false losses on a tree gaining 400 files).
+# Discovery is a single walk again, so creation and deletion during it are invisible to the
+# inventory, which is the honest outcome — a snapshot is a snapshot.
+test_churn_during_discovery_is_not_reported_as_loss() {
+    restart_stub
+    local d; d="$(create_sample_dir churn_discovery)"
+    local i
+    for i in $(seq 1 400); do create_file_bytes "$d/f$i.bin" 64; done
+
+    # Create files continuously while the scan runs.
+    ( for i in $(seq 1 200); do : > "$d/new$i.bin"; sleep 0.005; done ) &
+    local churn=$!
+    local out rc
+    set +e
+    out="$(run_collector --dry-run --dir "$d" --max-size 0 --max-age 0)"
+    rc=$?
+    set -e
+    wait "$churn" 2>/dev/null || true
+
+    # Real output only: the first spelling asserted the absence of strings that exist nowhere
+    # in the collector ("changed type" lives in comments; the other needle nowhere) — two
+    # assertions that could never fail.
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+    assert_not_contains "no unattributed walk error" "could not be attributed" "$out" || return 1
+    assert_eq "nothing counted as failed" "0" "$(parse_collector_stat "$out" failed)" || return 1
+    assert_eq "a run that only gained files is clean" "0" "$rc" || return 1
+}
+
+
+# A run that COMPLETES — even as a partial failure — must announce its end and nothing else.
+# RUN_FINISHED is what stands the exit-trap backstop down; get that ordering wrong and every
+# non-root partial collection reports itself to the server as an interrupted scan.
+test_completed_partial_run_sends_end_not_interrupted() {
+    has_stub_verification || return 77
+    restart_stub
+    local d; d="$(create_sample_dir partial_end)"
+    create_file "$d/ok.txt" "content"
+
+    local rc
+    set +e
+    run_collector --dir "$d" --dir "$TEST_TMP/absent-dir-$$" --max-size 0 --max-age 0 >/dev/null 2>&1
+    rc=$?
+    set -e
+
+    local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+    assert_eq "a named missing target is a partial run" "4" "$rc" || return 1
+    assert_contains "the run announced its end" '"type":"end"' "$audit" || return 1
+    assert_not_contains "and never called itself interrupted" '"type":"interrupted"' "$audit" || return 1
+    assert_not_contains "interrupted_by stays off a normal end marker" '"interrupted_by"' "$audit" || return 1
+}
+
+# The end marker must carry the attribution counters — build_stats_json exists because a field
+# was once added to one marker copy and not the other, and these are the newest fields.
+test_end_marker_carries_attribution_counters() {
+    has_stub_verification || return 77
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    restart_stub
+    local base; base="$(make_denied_fixture marker)"
+    find_lists_unstatable_entries "$base/unsearchable" "$pre" || { cleanup_denied_fixture "$base"; return 77; }
+
+    $pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --server "$(server_host)" --port "$STUB_PORT" \
+        --no-log-file --no-progress --dir "$base" --max-size 2 --max-age 0 >/dev/null 2>&1 || true
+    cleanup_denied_fixture "$base"
+
+    local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+    assert_contains "unreadable_dirs on the wire" '"unreadable_dirs":2' "$audit" || return 1
+    assert_contains "unstatable on the wire" '"unstatable":4' "$audit" || return 1
+    assert_contains "walk_errors_unexplained on the wire" '"walk_errors_unexplained":0' "$audit" || return 1
+}
+
+# A walk error nothing in the tree can explain must be reported as exactly that — not converted
+# into an invented "1 directory could not be read". Driven with a find that fails the discovery
+# walk on a healthy tree, which is what a path vanishing mid-walk looks like afterwards.
+test_unexplained_walk_error_is_reported_not_invented() {
+    local d; d="$(create_sample_dir unexplained)"
+    create_file "$d/a.txt" "x"
+    local shim="$TEST_TMP/failwalk-bin" real
+    real="$(type -P find)" || return 77
+    mkdir -p "$shim"
+    rm -f "$shim/find"
+    {
+        printf '#!/usr/bin/env bash\n'
+        # Only the discovery walk carries the '-o -type l' arm; every other walk runs untouched.
+        printf 'case " $* " in *" -type l "*) %s "$@"; exit 1 ;; esac\n' "$real"
+        printf 'exec %s "$@"\n' "$real"
+    } > "$shim/find"
+    chmod +x "$shim/find"
+
+    local out rc
+    set +e
+    out="$(env PATH="$shim:$PATH" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --server 127.0.0.1 --port 8080 --dir "$d" --max-size 2000 --max-age 0 2>&1)"
+    rc=$?
+    set -e
+
+    assert_contains "the error is named unattributable" "could not be attributed" "$out" || return 1
+    assert_eq "no directory count is invented" "0" "$(parse_collector_stat "$out" unreadable_dirs)" || return 1
+    assert_eq "no entry count is invented" "0" "$(parse_collector_stat "$out" unstatable)" || return 1
+    assert_eq "the run is still partial" "4" "$rc" || return 1
+}
+
+# --follow-symlinks onto a target inside an unsearchable directory: lost evidence, so a named
+# unreadable failure and exit 4 — not the old debug-level "dangling" skip with exit 0.
+test_denied_symlink_target_is_a_named_failure() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-denied-target-$$"
+    rm -rf "$base"; mkdir -p "$base/real" "$base/scan" "$base/tmp"
+    head -c 64 /dev/zero > "$base/real/target.bin"
+    ln -s "$base/real/target.bin" "$base/scan/alink"
+    chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/real"
+
+    local out rc
+    set +e
+    out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --follow-symlinks --dir "$base/scan" --max-size 0 --max-age 0 2>&1)"
+    rc=$?
+    set -e
+    chmod 0755 "$base/real" 2>/dev/null || true
+    rm -rf "$base"
+
+    assert_contains "the refusal is named" "could not be examined" "$out" || return 1
+    assert_eq "booked as unreadable" "1" "$(parse_collector_stat "$out" failed)" || return 1
+    assert_eq "not as vanished churn" "0" "$(parse_collector_stat "$out" vanished)" || return 1
+    assert_not_contains "and never called dangling" "dangling or special target" "$out" || return 1
+    assert_eq "lost evidence is a partial run" "4" "$rc" || return 1
+}
+
+# dir_searchable tests search permission ONLY. A mode-0111 directory (searchable, not listable —
+# anything a user can chmod their own directory to) whose file genuinely vanished must be churn:
+# requiring -r as well booked that loss as a permission failure.
+test_vanish_under_searchable_unlistable_dir_is_churn() {
+    local d; d="$(create_sample_dir churn0111)"
+    mkdir -p "$d/sub"
+    create_file_bytes "$d/sub/aaa.bin" 64
+    create_file_bytes "$d/sub/zzz.bin" 64
+    local fakebin; fakebin="$(create_fake_tool_path churn0111)"
+    rm -f "$fakebin/curl"
+    cat > "$fakebin/curl" <<EOF
+#!/bin/sh
+hdr=""; outfile=""; endpoint=""
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        -D) hdr="\$2"; shift 2 ;;
+        -o) outfile="\$2"; shift 2 ;;
+        -F|-H|-d|--max-time|--connect-timeout|--cacert) shift 2 ;;
+        -sS|--show-error|-X|-k) shift ;;
+        http://*|https://*) endpoint="\$1"; shift ;;
+        *) shift ;;
+    esac
+done
+case "\$endpoint" in
+    */api/collection)
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && : > "\$outfile"
+        ;;
+    *)
+        if [ ! -e "$fakebin/.hit" ]; then
+            : > "$fakebin/.hit"
+            rm -f "$d/sub/aaa.bin" "$d/sub/zzz.bin"
+            chmod 0111 "$d/sub"
+        fi
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"id":1}' > "\$outfile"
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$fakebin/curl"
+
+    local out rc
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" --server 127.0.0.1 --port 8080 \
+        --no-log-file --no-progress --dir "$d" --max-size 0 --max-age 0 2>&1)"
+    rc=$?
+    set -e
+    chmod 0755 "$d/sub" 2>/dev/null || true
+
+    assert_contains "the loss under 0111 is churn" "vanished=1" "$out" || return 1
+    assert_contains "not a permission failure" "unreadable=0" "$out" || return 1
+    assert_eq "churn-only run exits 5" "5" "$rc" || return 1
+}
+
+# The busybox arm of the attribution engine, driven by the real busybox find: it stats
+# unconditionally, cannot list what it cannot stat, and the run must say "unmeasured" instead of
+# printing a bare zero — while still counting the directories and staying a partial run.
+test_busybox_find_reports_unstatable_as_unmeasured() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    command -v busybox >/dev/null 2>&1 || return 77
+    busybox find /dev/null >/dev/null 2>&1 || return 77
+    # In /tmp so the priv-dropped collector can traverse to it; a shim script of its own, never
+    # a create_fake_tool_path entry (those are symlinks to the real binaries).
+    local bb="/tmp/ts-bbbin-$$" real
+    real="$(command -v busybox)"
+    rm -rf "$bb"; mkdir -p "$bb"
+    {
+        printf '#!/bin/sh\n'
+        printf 'exec %s find "$@"\n' "$real"
+    } > "$bb/find"
+    chmod 0755 "$bb" "$bb/find"
+
+    local base; base="$(make_denied_fixture bbarm)"
+    local out rc
+    set +e
+    out="$($pre env PATH="$bb:$PATH" TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
+        --no-progress --dir "$base" --max-size 2 --max-age 0 2>&1)"
+    rc=$?
+    set -e
+    cleanup_denied_fixture "$base"
+    rm -rf "$bb"
+
+    assert_contains "the zero is declared unmeasured" "unmeasured rather than a statement" "$out" || return 1
+    assert_eq "unstatable stays an honest zero" "0" "$(parse_collector_stat "$out" unstatable)" || return 1
+    assert_eq "the directories are still counted" "2" "$(parse_collector_stat "$out" unreadable_dirs)" || return 1
+    assert_eq "and the run is still partial" "4" "$rc" || return 1
+}
+
+# With both gates off the walk needs no stat, so the hidden files are enumerated and booked
+# individually as unreadable — but a SUBDIRECTORY in that position reaches no counter, so
+# unstatable=0 must say WHY it is not a measured zero. Reachable only when the walk fails for
+# another reason (an unlistable directory) while the gates are off.
+test_gates_off_declares_unstatable_unmeasured() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-gatesoff-$$"
+    rm -rf "$base"; mkdir -p "$base/tmp" "$base/r/unlist" "$base/r/unsearch"
+    head -c 50 /dev/zero > "$base/r/unlist/a.bin"
+    head -c 50 /dev/zero > "$base/r/unsearch/b.bin"
+    head -c 50 /dev/zero > "$base/r/ok.bin"
+    chmod 0777 "$base/tmp"; chmod -R a+rX "$base/r"
+    chmod 0700 "$base/r/unlist"; chmod 0444 "$base/r/unsearch"
+
+    local out rc
+    set +e
+    out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
+        --server 127.0.0.1 --port 8080 --dir "$base/r" --max-size 0 --max-age 0 2>&1)"
+    rc=$?
+    set -e
+    chmod 0755 "$base/r/unlist" "$base/r/unsearch" 2>/dev/null || true
+    rm -rf "$base"
+
+    assert_contains "the zero names the configuration as its reason" "both discovery gates are off" "$out" || return 1
+    assert_eq "and stays an unmeasured zero" "0" "$(parse_collector_stat "$out" unstatable)" || return 1
+    assert_eq "both directories still counted" "2" "$(parse_collector_stat "$out" unreadable_dirs)" || return 1
+    assert_eq "the hidden file is booked as a failure" "1" "$(parse_collector_stat "$out" failed)" || return 1
+    assert_eq "lost evidence is a partial run" "4" "$rc" || return 1
+}
+
+# Per-root evidence must belong to the root that reports it. ATTR_FIRST_ENTRY_OUT is reset with
+# the rest of the per-root ATTR_* set; when it was omitted from that reset it stayed sticky, so
+# every failing root after the first named an EARLIER root's file as its own example — which is
+# exactly the defect the per-root value was introduced to fix.
+test_per_root_evidence_names_its_own_root() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-tworoot-$$"
+    rm -rf "$base"; mkdir -p "$base/tmp" "$base/A/denied" "$base/B/denied"
+    local i
+    for i in 1 2; do head -c 100 /dev/zero > "$base/A/denied/aaa$i.bin"; done
+    for i in 1 2; do head -c 100 /dev/zero > "$base/B/denied/bbb$i.bin"; done
+    head -c 100 /dev/zero > "$base/A/ok.bin"; head -c 100 /dev/zero > "$base/B/ok.bin"
+    chmod -R a+rX "$base"; chmod 0777 "$base/tmp"
+    chmod 0444 "$base/A/denied" "$base/B/denied"
+
+    local _sees=0
+    find_lists_unstatable_entries "$base/A/denied" "$pre" && _sees=1
+    local out; out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
+        --no-progress --dir "$base/A" --dir "$base/B" --max-size 2 --max-age 0 2>&1)"
+    chmod 0755 "$base/A/denied" "$base/B/denied" 2>/dev/null || true; rm -rf "$base"
+
+    if [ "$_sees" -eq 1 ]; then
+        # The B root's own line must name a bbb* path, never one of A's aaa* files.
+        local bline; bline="$(printf '%s\n' "$out" | grep "entry(ies) inside them" | tail -1)"
+        assert_contains "the second root names its own evidence" "bbb" "$bline" || return 1
+        assert_not_contains "and not the first root's" "aaa" "$bline" || return 1
+    fi
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+}
+
+# A category matched by NEGATION counts entries whose stat was REFUSED, not just entries outside
+# the category. With --max-size 0 the age arm was '-type f ! <age test>', so every file hidden by
+# an unsearchable directory satisfied it and was reported as "outside the age window" — a false
+# statement about files whose age was never read. The arm now requires the size to be readable
+# first, which is the same guard the size category gets by matching positively.
+test_age_filter_does_not_count_unreadable_files() {
+    local pre; pre="$(drop_privs_prefix)" || return 77
+    local base="/tmp/ts-agedenied-$$"
+    rm -rf "$base"; mkdir -p "$base/tmp" "$base/denied"
+    local i
+    for i in 1 2 3 4; do head -c 100 /dev/zero > "$base/denied/f$i.bin"; done
+    head -c 100 /dev/zero > "$base/fresh.bin"
+    chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/denied"
+
+    local _sees=0
+    find_lists_unstatable_entries "$base/denied" "$pre" && _sees=1
+    # Size gate OFF so the age arm is the only qualifier; age gate ON so it actually runs.
+    local out; out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
+        --no-progress --dir "$base" --max-size 0 --max-age 3650 2>&1)"
+    chmod 0755 "$base/denied" 2>/dev/null || true; rm -rf "$base"
+
+    if [ "$_sees" -eq 1 ]; then
+        assert_eq "files whose age could not be read are not 'outside the age window'" "0" \
+            "$(parse_collector_stat "$out" age_filtered)" || return 1
+    fi
+    assert_not_contains "no reconciliation failure" "Reconciliation failed" "$out" || return 1
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1966,8 +2889,37 @@ run_test test_transient_status_still_retried
 run_test test_wget_vanished_file_is_not_reported_collected
 run_test test_wget_boundary_guard_reads_the_file
 
+# Signals, walk-error attribution, inaccessible-vs-vanished
+run_test test_signals_end_the_run_cleanly
+run_test test_help_documents_the_interrupt_exit_codes
+run_test test_unreadable_dirs_counts_directories_not_diagnostics
+run_test test_unstatable_entries_are_counted_and_named
+run_test test_inaccessible_files_are_unreadable_not_vanished
+run_test test_symlink_under_unsearchable_dir_is_a_named_failure
+run_test test_symlink_respects_cloud_prunes
+run_test test_symlink_respects_child_prunes
+run_test test_clean_run_runs_no_attribution_probe
+run_test test_genuine_churn_is_still_vanished
+run_test test_discriminator_calls_churn_churn
+run_test test_paths_cannot_forge_summary_counters
+run_test test_untrappable_hup_lets_the_run_finish
+run_test test_completed_partial_run_sends_end_not_interrupted
+run_test test_end_marker_carries_attribution_counters
+run_test test_unexplained_walk_error_is_reported_not_invented
+run_test test_denied_symlink_target_is_a_named_failure
+run_test test_vanish_under_searchable_unlistable_dir_is_churn
+run_test test_busybox_find_reports_unstatable_as_unmeasured
+run_test test_gates_off_declares_unstatable_unmeasured
+run_test test_lost_signal_still_reports_to_the_server
+run_test test_denial_above_the_parent_is_not_churn
+run_test test_per_root_evidence_names_its_own_root
+run_test test_age_filter_does_not_count_unreadable_files
+run_test test_unstatable_does_not_double_count_symlinks
+run_test test_churn_during_discovery_is_not_reported_as_loss
+
 # Summary
 printf "\n${BOLD}Results:${RESET} %d/%d passed" "$TESTS_PASSED" "$TESTS_RUN"
+[ "$TESTS_SKIPPED" -gt 0 ] && printf ", ${YELLOW}%d skipped${RESET}" "$TESTS_SKIPPED"
 if [ "$TESTS_FAILED" -gt 0 ]; then
     printf ", ${RED}%d failed${RESET}\n" "$TESTS_FAILED"
     printf "\n${RED}Failed tests:${RESET}\n"
