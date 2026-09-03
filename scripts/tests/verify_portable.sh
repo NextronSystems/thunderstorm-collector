@@ -70,7 +70,11 @@ info "network/pseudo mount points that will be excluded: $(get_excluded_mounts |
 # link_skip indirect increment (Bash 3.2 arithmetic by name)
 LINKS_SKIPPED=0; LINKS_DUP=0; link_skip LINKS_DUP debug "x"; [ "$LINKS_SKIPPED" -eq 1 ] && [ "$LINKS_DUP" -eq 1 ] && ok "link_skip increments by variable name" || no "link_skip"
 # sanitizer + urlencode
-[ "$(sanitize_filename_for_multipart 'a,b;c"d\e')" = 'a_b_c_d_e' ] && ok "multipart filename sanitizer" || no "sanitizer"
+# Returns through SAFE_FILENAME_OUT, not stdout: four command substitutions per uploaded file
+# were removed from the upload path because a signal arriving while bash expands one can be lost
+# on 5.2 (bug-bash 2023-09, fixed in 5.3).
+sanitize_filename_for_multipart 'a,b;c"d\e'
+[ "$SAFE_FILENAME_OUT" = 'a_b_c_d_e' ] && ok "multipart filename sanitizer" || no "sanitizer -> $SAFE_FILENAME_OUT"
 [ "$(urlencode 'a b/ü')" = 'a%20b%2F%C3%BC' ] && ok "urlencode (od/tr based)" || no "urlencode -> $(urlencode 'a b/ü')"
 
 printf '\n=== find semantics on this platform ===\n'

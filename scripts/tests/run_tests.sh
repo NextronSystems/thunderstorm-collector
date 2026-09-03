@@ -175,6 +175,34 @@ has_stub_verification() {
     [ "$USE_EXTERNAL" -eq 0 ]
 }
 
+# verify_stub_contract -- refuse to run against a stub whose marker log shape audit_has_marker
+# does not describe.
+#
+# The shape is an assumption about a server in ANOTHER repository (Nextron-Labs/thunderstorm-
+# stub-server, pinned by STUB_SERVER_REF in .github/workflows/script-collectors.yml), and an
+# unchecked cross-repo assumption is exactly how six marker tests came to assert a shape no
+# server writes: they passed against an early in-tree stub that logged the request body verbatim
+# and could not pass in CI. One probe at startup turns that into a single legible error instead
+# of six assertions passing for the wrong reason — and if the Go stub's log shape ever moves, it
+# is reported here in one line rather than as a scatter of assertion diffs.
+verify_stub_contract() {
+    local probe='{"type":"begin","source":"contract-probe","collector":"contract-probe"}'
+    if ! curl -fsS -X POST -H 'Content-Type: application/json' -d "$probe" \
+        "http://127.0.0.1:$STUB_PORT/api/collection" >/dev/null 2>&1; then
+        echo "ERROR: the stub rejected the collection-marker contract probe" >&2
+        return 1
+    fi
+    local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
+    if audit_has_marker begin "$audit"; then
+        return 0
+    fi
+    echo "ERROR: this stub does not record collection markers the way the Go stub does." >&2
+    echo "  expected: a line with \"type\":\"collection_marker\" and \"marker\":\"begin\"" >&2
+    echo "  got:      ${audit:-<nothing logged>}" >&2
+    echo "  Every marker assertion would pass for the wrong reason — refusing to run." >&2
+    return 1
+}
+
 # The server address used by the collector
 server_host() {
     if [ "$USE_EXTERNAL" -eq 1 ]; then
@@ -246,6 +274,44 @@ assert_not_contains() {
     local label="$1" needle="$2" haystack="$3"
     if echo "$haystack" | grep -qF -- "$needle"; then
         printf "    ${RED}FAIL${RESET}: %s — output unexpectedly contains '%s'\n" "$label" "$needle"
+        return 1
+    fi
+    return 0
+}
+
+# audit_has_marker -- the ONE definition of how a collection marker appears in the audit log.
+#
+# Those lines are the SERVER's record, not the collector's request body: a marker POSTed as
+# {"type":"interrupted",...} is logged with "type":"collection_marker" and the marker name in a
+# separate "marker" field (the stats object rides along under "stats"). Six tests each spelled
+# that shape by hand as '"type":"interrupted"' — a shape no server writes — so six tests were
+# wrong in six places and had to be corrected in six places. Spelled once here instead, checked
+# once against the live server by verify_stub_contract, it cannot be spelled wrong by a new test
+# and an upstream change to it is a one-line fix.
+#
+# Assertions on the request BODY (the curl/wget shims) legitimately use "type" and are unrelated.
+#
+# Matched per LINE, not across the whole log: an audit log normally holds several markers and
+# many THOR findings, and requiring the two fields to appear on the SAME line keeps the answer
+# independent of the order the server happens to serialize them in.
+#   $1 = marker name, $2 = the whitespace-stripped audit text
+audit_has_marker() {
+    printf '%s\n' "$2" | grep -F -- "\"marker\":\"$1\"" | grep -qF -- '"type":"collection_marker"'
+}
+
+assert_marker_sent() {
+    local label="$1" marker="$2" audit="$3"
+    if ! audit_has_marker "$marker" "$audit"; then
+        printf "    ${RED}FAIL${RESET}: %s — no '%s' collection marker in the audit log\n" "$label" "$marker"
+        return 1
+    fi
+    return 0
+}
+
+assert_marker_absent() {
+    local label="$1" marker="$2" audit="$3"
+    if audit_has_marker "$marker" "$audit"; then
+        printf "    ${RED}FAIL${RESET}: %s — unexpected '%s' collection marker in the audit log\n" "$label" "$marker"
         return 1
     fi
     return 0
@@ -1706,7 +1772,7 @@ test_interrupted_marker_carries_policy() {
     # too fast), not that the signal path is broken — say so rather than leaving a bare mismatch.
     [ "$rc" -ne 0 ] || { printf 'FAIL: the run completed before the signal was delivered (test setup, not a product failure)\n' >&2; return 1; }
     assert_eq "interrupted exit code" "130" "$rc" || return 1
-    assert_contains "an interrupted marker was sent" '"type":"interrupted"' "$audit" || return 1
+    assert_marker_sent "an interrupted marker was sent" interrupted "$audit" || return 1
     assert_contains "carrying the size policy" '"max_size_kb":77' "$audit" || return 1
     assert_contains "and the age policy beside it" '"max_age":0' "$audit" || return 1
 }
@@ -1882,12 +1948,11 @@ test_max_size_legacy_flag_name_still_works() {
 # Root bypasses DAC entirely, so this can only be observed as an unprivileged user; the test
 # skips rather than passing vacuously when it cannot drop privileges.
 test_size_filtered_excludes_unsizeable_files() {
-    local runas=""
-    if [ "$(id -u)" -eq 0 ]; then
-        command -v setpriv >/dev/null 2>&1 || return 0
-        id -u nobody >/dev/null 2>&1 || return 0
-        runas="setpriv --reuid=65534 --regid=65534 --clear-groups"
-    fi
+    # drop_privs_prefix, not an inline copy: this reimplemented it with a hardcoded 65534 instead
+    # of looking `nobody` up, and — the part that mattered — returned 0 when it could not drop
+    # privileges at all. A test that cannot establish its own premise was reporting PASS having
+    # asserted nothing; 77/SKIP is the convention run_test understands.
+    local runas; runas="$(drop_privs_prefix)" || return 77
 
     # World-traversable fixture: the unprivileged user has to be able to reach it.
     local base="/tmp/ts-unsizeable-$$"
@@ -1897,6 +1962,7 @@ test_size_filtered_excludes_unsizeable_files() {
     head -c 100 /dev/zero > "$base/normal.bin"
     chmod -R a+rX "$base"
     chmod 0444 "$base/locked"          # readable, NOT searchable -> stat on children denied
+    assert_fixture_denies "$base/locked" x "$runas" || return 1
     local tmp="$base/tmp"; mkdir -p "$tmp"; chmod 0777 "$tmp"
 
     local out
@@ -1920,9 +1986,68 @@ test_size_filtered_excludes_unsizeable_files() {
 # vacuously when they cannot.
 # ══════════════════════════════════════════════════════════════════════════════
 
+# assert_fixture_denies -- a denial fixture must deny through its MODE BITS ALONE, never by
+# relying on the reader being someone other than the owner.
+#
+# drop_privs_prefix returns a setpriv prefix when the suite is root and an EMPTY string when it
+# is not, so the identity that reads a fixture differs by box: `nobody` reading a root-owned tree
+# here, the tree's own owner on a non-root runner. chmod 0700 denied the former and granted the
+# latter rwx, so the "unlistable" directory was fully readable in CI: unreadable_dirs= counted 1
+# instead of 2 and its files were collected, while the same fixture read correctly under
+# root+setpriv. Green here, red in GitHub Actions.
+#
+# The mode-bit check below is what closes that, and it is deliberately NOT a live read: probing
+# the fixture as the reader would have passed here too, because under root+setpriv 0700 genuinely
+# denied `nobody`. A property that never asks who is reading fails identically on every box.
+# Root itself bypasses r/x bits entirely (which is why the suite drops privileges at all), so
+# this divergence cannot be removed — only made impossible to get wrong.
+#   $1 = directory  $2 = the bit that must be clear for u, g AND o: r (unlistable) / x (unsearchable)
+#   $3 = the privilege-drop prefix the collector will use ("" when the suite is not root)
+assert_fixture_denies() {
+    local dir="$1" want="$2" pre="$3" mode bit n
+    case "$want" in
+        r) bit=4 ;;
+        x) bit=1 ;;
+        *) printf 'FIXTURE: assert_fixture_denies got bit %s, expected r or x\n' "$want" >&2; return 1 ;;
+    esac
+    mode="$(stat -c '%a' "$dir" 2>/dev/null)" || mode=""
+    [ -n "$mode" ] || mode="$(stat -f '%Lp' "$dir" 2>/dev/null)" || mode=""
+    if [ -n "$mode" ]; then
+        # 10# so a leading zero is not read as octal by the shell's own arithmetic.
+        n=$(( 10#$mode ))
+        if [ $(( n / 100 % 10 & bit )) -ne 0 ] || [ $(( n / 10 % 10 & bit )) -ne 0 ] \
+            || [ $(( n % 10 & bit )) -ne 0 ]; then
+            printf 'FIXTURE: %s is mode %s — a %s bit is still set, so it denies only non-owners\n' \
+                "$dir" "$mode" "$want" >&2
+            return 1
+        fi
+    fi
+    # Then confirm it live as the identity that will actually read it. Costs one process and
+    # catches what mode bits cannot: an ACL, an unexpected umask, a `nobody` that happens to
+    # share the fixture's group. No r -> cannot list; no x -> cannot cd into it.
+    #
+    # Only when that identity is NOT root, though. Root bypasses r/x bits, so the probe would
+    # report every correct fixture as readable and fail it — the mode-bit check above is the
+    # whole invariant in that case. An empty prefix means "read as whoever runs the suite", so
+    # root + no prefix is exactly the case to skip.
+    if [ -z "$pre" ] && [ "$(id -u)" -eq 0 ]; then
+        return 0
+    fi
+    case "$want" in
+        r) if $pre sh -c "ls '$dir' >/dev/null 2>&1"; then
+               printf 'FIXTURE: %s is listable by the reader\n' "$dir" >&2; return 1
+           fi ;;
+        x) if $pre sh -c "cd '$dir' >/dev/null 2>&1"; then
+               printf 'FIXTURE: %s is searchable by the reader\n' "$dir" >&2; return 1
+           fi ;;
+    esac
+    return 0
+}
+
 # Shared fixture: a world-traversable tree with one directory that can be listed but not
-# searched (0444) and one that cannot be listed at all (0700), plus its own TMPDIR.
-# Echoes the base path.
+# searched (0444) and one that cannot be listed at all (0300), plus its own TMPDIR.
+# Echoes the base path, and refuses to hand one back that does not actually deny.
+# $1 = fixture name, $2 = the privilege-drop prefix the collector will run under.
 make_denied_fixture() {
     local base="/tmp/ts-denied-$$-$1"
     rm -rf "$base"
@@ -1933,8 +2058,13 @@ make_denied_fixture() {
     head -c 100 /dev/zero > "$base/ok.bin"
     chmod -R a+rX "$base"
     chmod 0777 "$base/tmp"
+    # 0444 has no x bit for anyone (listable, not searchable); 0300 has no r bit for anyone (not
+    # listable). Both classes then hold for the owner and for a privilege-dropped reader alike —
+    # see assert_fixture_denies, which refuses to hand back a fixture that does not.
     chmod 0444 "$base/unsearchable"
-    chmod 0700 "$base/unlistable"
+    chmod 0300 "$base/unlistable"
+    assert_fixture_denies "$base/unsearchable" x "$2" || return 1
+    assert_fixture_denies "$base/unlistable"   r "$2" || return 1
     echo "$base"
 }
 
@@ -2064,7 +2194,7 @@ test_signals_end_the_run_cleanly() {
         local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
         [ "$rc" -ne 0 ] || { printf 'FAIL: SIG%s — the run completed before the signal was delivered (test setup, not a product failure)\n' "$sig" >&2; return 1; }
         assert_eq "SIG$sig exit code" "$expect" "$rc" || return 1
-        assert_contains "SIG$sig sent an interrupted marker" '"type":"interrupted"' "$audit" || return 1
+        assert_marker_sent "SIG$sig sent an interrupted marker" interrupted "$audit" || return 1
         assert_contains "SIG$sig named itself on the wire" "\"interrupted_by\":\"$sig\"" "$audit" || return 1
         assert_eq "SIG$sig removed its work directory" "0" "$(find "$wt" -maxdepth 1 -name 'thunderstorm.work.*' 2>/dev/null | wc -l | tr -d ' ')" || return 1
     done
@@ -2080,7 +2210,7 @@ test_help_documents_the_interrupt_exit_codes() {
 # directory — while claiming "their files are unknown".
 test_unreadable_dirs_counts_directories_not_diagnostics() {
     local pre; pre="$(drop_privs_prefix)" || return 77
-    local base; base="$(make_denied_fixture dirs)"
+    local base; base="$(make_denied_fixture dirs "$pre")" || return 1
     local out
     out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file --no-progress \
         --dir "$base" --max-size 2 --max-age 0 2>&1)"
@@ -2098,7 +2228,7 @@ test_unreadable_dirs_counts_directories_not_diagnostics() {
 # collected. Nothing counted them before.
 test_unstatable_entries_are_counted_and_named() {
     local pre; pre="$(drop_privs_prefix)" || return 77
-    local base; base="$(make_denied_fixture entries)"
+    local base; base="$(make_denied_fixture entries "$pre")" || return 1
     local _sees=0
     find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
     local out
@@ -2133,7 +2263,7 @@ test_unstatable_entries_are_counted_and_named() {
 # other signal at all.
 test_inaccessible_files_are_unreadable_not_vanished() {
     local pre; pre="$(drop_privs_prefix)" || return 77
-    local base; base="$(make_denied_fixture d4)"
+    local base; base="$(make_denied_fixture d4 "$pre")" || return 1
     chmod 0755 "$base/unlistable"        # isolate the unsearchable class
     local _sees=0
     find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
@@ -2167,11 +2297,12 @@ test_inaccessible_files_are_unreadable_not_vanished() {
 # is what it used to be. Discovery deliberately does not guess a type it cannot read.
 test_symlink_under_unsearchable_dir_is_a_named_failure() {
     local pre; pre="$(drop_privs_prefix)" || return 77
-    local base; base="$(make_denied_fixture linkfail)"
+    local base; base="$(make_denied_fixture linkfail "$pre")" || return 1
     chmod 0755 "$base/unsearchable"
     ln -s "$base/ok.bin" "$base/unsearchable/alink"
     chmod 0444 "$base/unsearchable"
     chmod 0755 "$base/unlistable"
+    assert_fixture_denies "$base/unsearchable" x "$pre" || return 1
 
     local _sees=0
     find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
@@ -2340,8 +2471,8 @@ test_untrappable_hup_lets_the_run_finish() {
     local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
     assert_eq "HUP was delivered to the live collector" "0" "$delivered" || return 1
     assert_eq "the run finished normally" "0" "$rc" || return 1
-    assert_contains "an end marker was sent" '"type":"end"' "$audit" || return 1
-    assert_not_contains "and no interrupted marker" '"type":"interrupted"' "$audit" || return 1
+    assert_marker_sent "an end marker was sent" end "$audit" || return 1
+    assert_marker_absent "and no interrupted marker" interrupted "$audit" || return 1
 }
 
 
@@ -2381,6 +2512,7 @@ test_paths_cannot_forge_summary_counters() {
     head -c 100 /dev/zero > "$base/evil unreadable_dirs=0/f.bin"
     head -c 100 /dev/zero > "$base/ok.bin"
     chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/evil unreadable_dirs=0"
+    assert_fixture_denies "$base/evil unreadable_dirs=0" x "$pre" || return 1
 
     local out; out="$($pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
         --no-progress --dir "$base" --max-size 2 --max-age 0 2>&1)"
@@ -2428,7 +2560,7 @@ test_lost_signal_still_reports_to_the_server() {
     [ "$rc" -ne 0 ] || { printf 'FAIL: the run completed before the signal landed (test setup)\n' >&2; return 1; }
 
     local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
-    assert_contains "the exit trap still sent an interrupted marker" '"type":"interrupted"' "$audit" || return 1
+    assert_marker_sent "the exit trap still sent an interrupted marker" interrupted "$audit" || return 1
     assert_contains "and admits the signal is unknown" '"interrupted_by":"unknown"' "$audit" || return 1
     assert_eq "the work directory was still removed" "0" "$(find "$wt" -maxdepth 1 -name 'thunderstorm.work.*' 2>/dev/null | wc -l | tr -d ' ')" || return 1
 }
@@ -2452,6 +2584,7 @@ entry_stat_denied "$base/denied/f.bin"     && echo parent_DENIED      || echo pa
 entry_stat_denied "$base/gone/f.bin"       && echo removed_DENIED     || echo removed_churn
 EOF
     chmod -R a+rX "$base"; chmod 0444 "$base/denied"
+    assert_fixture_denies "$base/denied" x "$pre" || return 1
     local out; out="$($pre bash "$probe" 2>&1)"
     chmod 0755 "$base/denied" 2>/dev/null || true; rm -rf "$base"
 
@@ -2473,6 +2606,7 @@ test_unstatable_does_not_double_count_symlinks() {
     head -c 100 /dev/zero > "$base/target.bin"
     ln -s "$base/target.bin" "$base/unsearchable/alink"
     chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/unsearchable"
+    assert_fixture_denies "$base/unsearchable" x "$pre" || return 1
 
     local _sees=0
     find_lists_unstatable_entries "$base/unsearchable" "$pre" && _sees=1
@@ -2540,8 +2674,8 @@ test_completed_partial_run_sends_end_not_interrupted() {
 
     local audit; audit="$(tr -d ' \t' < "$AUDIT_LOG" 2>/dev/null)"
     assert_eq "a named missing target is a partial run" "4" "$rc" || return 1
-    assert_contains "the run announced its end" '"type":"end"' "$audit" || return 1
-    assert_not_contains "and never called itself interrupted" '"type":"interrupted"' "$audit" || return 1
+    assert_marker_sent "the run announced its end" end "$audit" || return 1
+    assert_marker_absent "and never called itself interrupted" interrupted "$audit" || return 1
     assert_not_contains "interrupted_by stays off a normal end marker" '"interrupted_by"' "$audit" || return 1
 }
 
@@ -2551,7 +2685,7 @@ test_end_marker_carries_attribution_counters() {
     has_stub_verification || return 77
     local pre; pre="$(drop_privs_prefix)" || return 77
     restart_stub
-    local base; base="$(make_denied_fixture marker)"
+    local base; base="$(make_denied_fixture marker "$pre")" || return 1
     find_lists_unstatable_entries "$base/unsearchable" "$pre" || { cleanup_denied_fixture "$base"; return 77; }
 
     $pre env TMPDIR="$base/tmp" bash "$COLLECTOR" --server "$(server_host)" --port "$STUB_PORT" \
@@ -2604,6 +2738,7 @@ test_denied_symlink_target_is_a_named_failure() {
     head -c 64 /dev/zero > "$base/real/target.bin"
     ln -s "$base/real/target.bin" "$base/scan/alink"
     chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/real"
+    assert_fixture_denies "$base/real" x "$pre" || return 1
 
     local out rc
     set +e
@@ -2653,6 +2788,9 @@ case "\$endpoint" in
         if [ ! -e "$fakebin/.hit" ]; then
             : > "$fakebin/.hit"
             rm -f "$d/sub/aaa.bin" "$d/sub/zzz.bin"
+            # 0111: no r bit for anyone, so it is unlistable for the owner too and needs no
+            # assert_fixture_denies. It could not have one anyway — this fires inside the shim,
+            # mid-collection, and the mutation IS the thing under test.
             chmod 0111 "$d/sub"
         fi
         [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
@@ -2694,7 +2832,7 @@ test_busybox_find_reports_unstatable_as_unmeasured() {
     } > "$bb/find"
     chmod 0755 "$bb" "$bb/find"
 
-    local base; base="$(make_denied_fixture bbarm)"
+    local base; base="$(make_denied_fixture bbarm "$pre")" || return 1
     local out rc
     set +e
     out="$($pre env PATH="$bb:$PATH" TMPDIR="$base/tmp" bash "$COLLECTOR" --dry-run --no-log-file \
@@ -2722,7 +2860,13 @@ test_gates_off_declares_unstatable_unmeasured() {
     head -c 50 /dev/zero > "$base/r/unsearch/b.bin"
     head -c 50 /dev/zero > "$base/r/ok.bin"
     chmod 0777 "$base/tmp"; chmod -R a+rX "$base/r"
-    chmod 0700 "$base/r/unlist"; chmod 0444 "$base/r/unsearch"
+    # 0300 not 0700: the denial has to apply to the owner too — see make_denied_fixture. This
+    # test needs the walk to FAIL for a second reason (an unlistable directory) while both gates
+    # are off, and a 0700 directory its own owner can read denies nothing, so on a non-root
+    # runner the walk succeeded and the message under test was never reached.
+    chmod 0300 "$base/r/unlist"; chmod 0444 "$base/r/unsearch"
+    assert_fixture_denies "$base/r/unlist"   r "$pre" || return 1
+    assert_fixture_denies "$base/r/unsearch" x "$pre" || return 1
 
     local out rc
     set +e
@@ -2754,6 +2898,8 @@ test_per_root_evidence_names_its_own_root() {
     head -c 100 /dev/zero > "$base/A/ok.bin"; head -c 100 /dev/zero > "$base/B/ok.bin"
     chmod -R a+rX "$base"; chmod 0777 "$base/tmp"
     chmod 0444 "$base/A/denied" "$base/B/denied"
+    assert_fixture_denies "$base/A/denied" x "$pre" || return 1
+    assert_fixture_denies "$base/B/denied" x "$pre" || return 1
 
     local _sees=0
     find_lists_unstatable_entries "$base/A/denied" "$pre" && _sees=1
@@ -2783,6 +2929,7 @@ test_age_filter_does_not_count_unreadable_files() {
     for i in 1 2 3 4; do head -c 100 /dev/zero > "$base/denied/f$i.bin"; done
     head -c 100 /dev/zero > "$base/fresh.bin"
     chmod -R a+rX "$base"; chmod 0777 "$base/tmp"; chmod 0444 "$base/denied"
+    assert_fixture_denies "$base/denied" x "$pre" || return 1
 
     local _sees=0
     find_lists_unstatable_entries "$base/denied" "$pre" && _sees=1
@@ -2812,6 +2959,14 @@ else
 fi
 
 setup_tmp
+
+# Before any assertion runs: confirm this stub records markers the way audit_has_marker says it
+# does. A stub that logs the collector's request body verbatim makes every marker test pass for
+# the wrong reason, which is how the suite came to be green here and red in CI.
+if [ "$USE_EXTERNAL" -eq 0 ]; then
+    restart_stub && verify_stub_contract || exit 1
+    stop_stub
+fi
 
 # Validation tests (no server needed)
 run_test test_help_flag
