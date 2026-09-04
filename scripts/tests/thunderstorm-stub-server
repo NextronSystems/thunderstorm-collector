@@ -190,7 +190,19 @@ class H(BaseHTTPRequestHandler):
             'endpoint': path,
             'query': query,
         })
-        self._reply(200, {'status': 'ok'})
+        # The acknowledgement the collector requires before counting a file submitted (a peer
+        # answering 2xx to everything without one is not a Thunderstorm). The Go stub returns
+        # {"id":"<uuid>"} from handleCheckAsync; production returns {"id":27844}, a number. The
+        # string spelling is mirrored here deliberately -- it keeps this file faithful to the Go
+        # stub AND makes the local suite exercise the branch production does not.
+        if path == '/api/check':
+            # The sync endpoint answers with the scan RESULT, not an id: production answers `null`
+            # for a clean file, the Go stub writeJSON(w, results) -- a JSON array. The collector
+            # requires one of those two shapes before a sync upload counts as submitted, so an id
+            # object here would make every --sync test fail closed.
+            self._reply(200, [])
+        else:
+            self._reply(200, {'status': 'ok', 'id': uuid.uuid4().hex})
 
     def _collection(self, body):
         try:

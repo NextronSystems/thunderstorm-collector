@@ -39,7 +39,13 @@ LOG_TO_SYSLOG=0
 LOG_TO_CMDLINE=1
 SYSLOG_FACILITY="user"
 
+# Captured before the defaults overwrite them, so the run can say the environment was ignored
+# rather than ignoring it in silence. Deliberately NOT honoured: an exported variable that can
+# redirect where evidence is sent is not something a forensic collector should obey -- and the
+# server decides that even more than the port does.
+THUNDERSTORM_SERVER_ENV="${THUNDERSTORM_SERVER:-}"
 THUNDERSTORM_SERVER="ygdrasil.nextron"
+THUNDERSTORM_PORT_ENV="${THUNDERSTORM_PORT:-}"
 THUNDERSTORM_PORT=8080
 USE_SSL=0
 INSECURE=0
@@ -94,6 +100,7 @@ AGE_CUTOFF_TEXT=""     # human-readable absolute cutoff, for the run log ("" if 
 AGE_FUTURE_REF=""      # file stamped at run start, for the POSIX -newer future-timestamp test
 
 UPLOAD_TOOL=""
+WGET_IS_MINIMAL=0   # the wget found rejects the options this file relies on (busybox applet)
 # every temp file the collector makes lives in ONE private work directory (created on
 # demand, mode 700), which is excluded from scanning by exact path — the collector must
 # never collect its own working files. Cleanup is a single rm -rf of this directory.
@@ -150,6 +157,15 @@ FILES_UNREADABLE=0     # discovered, then found unreadable ([ -r ] false; regula
 FIRST_UNREADABLE=""    # first such path, named once in the end-of-run error
 FILES_VANISHED=0       # discovered, then gone (or of another type) before it could be read
 FILES_UPLOAD_FAILED=0  # readable, but every upload attempt failed (regular files and link targets)
+# Set when a 2xx is not a Thunderstorm answer ({"id":N} on /api/checkAsync, a scan result on
+# /api/check) BEFORE any upload has ever been acknowledged: from then on submit_file withholds every
+# file without transmitting, so evidence stops flowing to a peer that has not proved what it is. A
+# peer that already acknowledged uploads is not poisoned by one odd answer -- that is retried like
+# any other failed attempt. The run still ends normally (end marker attempted, exit 4).
+PEER_UNACKNOWLEDGED=0
+PEER_UNACKNOWLEDGED_AT=""
+PEER_UNACKNOWLEDGED_FILE=""  # the ONE file whose bytes reached the peer before the flow stopped
+FILES_UNACKNOWLEDGED=0 # that file plus every one withheld; a subset of FILES_UPLOAD_FAILED
 # Directories find could not read. A directory is not an artifact: what it held is unknown, so
 # the files missed cannot be counted — only the directories can (one find diagnostic each on
 # GNU, BSD and busybox). Any such directory makes the run partial (exit 4).
@@ -484,6 +500,25 @@ build_stats_json() {
     STATS_JSON_OUT="\"stats\":{${_by}\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"age_filtered\":${FILES_AGE_FILTERED},\"size_filtered\":${FILES_SIZE_FILTERED},\"age_ctime_only\":${FILES_AGE_CTIME_ONLY},\"future\":${FILES_FUTURE},\"max_size_kb\":${MAX_FILE_SIZE_KB},\"size_bound_bytes\":$(( MAX_FILE_SIZE_KB * 1024 )),\"max_age\":${MAX_AGE},\"age_timestamp\":\"${AGE_TIMESTAMP}\",\"age_precision\":\"${AGE_PRECISION:-none}\",\"counts_measured\":${COUNT_FILTERED},\"failed\":${FILES_FAILED},\"links_seen\":${LINKS_SEEN},\"links_collected\":${LINKS_COLLECTED},\"links_skipped\":${LINKS_SKIPPED},\"unreadable_dirs\":${UNREADABLE_DIRS},\"unstatable\":${UNSTATABLE_ENTRIES},\"walk_errors_unexplained\":${WALK_ERRORS_UNEXPLAINED},\"unusable_dirs\":${UNUSABLE_DIRS},\"elapsed_seconds\":${1:-0}}"
 }
 
+# build_base_url -- put "<scheme>://<server>:<port>" into BASE_URL_OUT.
+#
+# There were two of these: prepare_run built it for the run, and send_interrupted_marker built it
+# again from a trap, re-deriving the scheme with its own copy of the USE_SSL test. Two spellings of
+# one address is the divergence class build_stats_json's comment already argues against -- and here
+# the consequence was two URLs for one run. The residual this does NOT remove: a signal that arrives
+# BEFORE validate_config canonicalises the port still sends the interrupted marker with the raw
+# value (--port 08080 -> ":08080"). Accepted -- that marker is best-effort and carries no evidence.
+#
+# Note there is no trailing-slash strip. Both copies used to end with "${_base%/}" under a comment
+# saying it stripped a trailing slash; it never could, because the string always ends in the port's
+# digits. Dead code with a comment that described something it did not do.
+BASE_URL_OUT=""
+build_base_url() {
+    local _scheme="http"
+    [ "$USE_SSL" -eq 1 ] && _scheme="https"
+    BASE_URL_OUT="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
+}
+
 # shellcheck disable=SC2317  # trap-invoked only; ShellCheck cannot see the trap as a caller
 send_interrupted_marker() {
     if [ "$DRY_RUN" -eq 0 ] && [ -n "$THUNDERSTORM_SERVER" ]; then
@@ -497,11 +532,8 @@ send_interrupted_marker() {
         local _stats
         build_stats_json "$_elapsed"
         _stats="$STATS_JSON_OUT"
-        local _scheme="http"
-        [ "$USE_SSL" -eq 1 ] && _scheme="https"
-        local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
-        _base="${_base%/}"
-        collection_marker "$_base" "interrupted" "${SCAN_ID:-}" "$_stats" >/dev/null 2>&1
+        build_base_url
+        collection_marker "$BASE_URL_OUT" "interrupted" "${SCAN_ID:-}" "$_stats" >/dev/null 2>&1
     fi
 }
 
@@ -627,14 +659,33 @@ log_msg() {
     fi
 }
 
-die() {
-    # A usage error must never exit without reaching some sink: force the terminal while the log
-    # file is not ready, and whenever every sink is disabled (--quiet --no-log-file, no --syslog).
-    # die exits, so forcing the sink here changes nothing else.
+# force_sink -- make sure the next message reaches SOMEWHERE. The terminal is forced while the
+# log file is not yet open, and whenever every sink is disabled (--quiet --no-log-file with no
+# --syslog). Only ever called immediately before exiting, so forcing the sink changes nothing else.
+#
+# This was inline in die(). It is a function because die() is not the only fatal path: the runtime
+# fatals in prepare_run used a bare `log_msg error` + `exit`, so under `--quiet --no-log-file` --
+# the ordinary cron/CI invocation -- the single line naming an unreachable server reached no sink
+# at all and the operator got a bare exit 1 with a decorative banner. die() cannot simply be reused
+# there: it is hard-wired to exit 2, and these are not usage errors.
+force_sink() {
     if [ "$LOG_FILE_READY" -ne 1 ] || { [ "$LOG_TO_CMDLINE" -eq 0 ] \
         && [ "$LOG_TO_FILE" -eq 0 ] && [ "$LOG_TO_SYSLOG" -eq 0 ]; }; then
         LOG_TO_CMDLINE=1
     fi
+}
+
+# die_runtime -- a fatal that is NOT a usage error: force a sink, report, exit with $1.
+die_runtime() {
+    local _code="$1"
+    shift
+    force_sink
+    log_msg error "$*"
+    exit "$_code"
+}
+
+die() {
+    force_sink
     log_msg error "$*"
     exit 2
 }
@@ -660,7 +711,9 @@ Usage:
 
 Options:
   -s, --server <host>        Thunderstorm server hostname or IP
-  -p, --port <port>          Thunderstorm port (default: 8080)
+  -p, --port <port>          Thunderstorm port (default: 8080). Always appended to the URL:
+                             --ssl does NOT change it to 443, so an HTTPS server on the
+                             standard port needs --ssl --port 443.
   -d, --dir <path>           Directory to scan (repeatable; replaces the defaults)
   --max-age <days>           Collect files younger than <days>; 0 = no age filter (default: 14)
   --age-timestamp <which>    File clock --max-age is measured on: mtime, ctime, or any
@@ -673,8 +726,11 @@ Options:
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
-  --ca-cert <path>           Path to custom CA certificate bundle for TLS
-  --sync                     Use /api/check (default: /api/checkAsync)
+  --ca-cert <path>           CA certificate bundle for TLS. Replaces the trust store under
+                             curl; under wget it is only ADDED to the system store.
+  --sync                     Use /api/check (default: /api/checkAsync). On either endpoint a 2xx
+                             must carry Thunderstorm's own answer ({"id":N} async; null or a
+                             JSON array sync) or the file is not counted as submitted.
   --retries <num>            Retry attempts per file (default: 3)
   --follow-symlinks          Collect the files symlinks point to (default: off)
   --dry-run                  Show what would be submitted; contact no server
@@ -740,8 +796,13 @@ Exit codes:
 
 Examples:
   bash thunderstorm-collector.sh --server thunderstorm.local
-  bash thunderstorm-collector.sh --server 10.0.0.5 --ssl --dir "/tmp/My Files" --dry-run
+  bash thunderstorm-collector.sh --server 10.0.0.5 --ssl --port 443 --dir "/tmp/My Files"
   bash thunderstorm-collector.sh --server=thunderstorm.local --dir=/evidence --max-age=30
+  Before any file is read the server must answer GET /api/status. Redirects are never followed.
+  ~/.curlrc and ~/.wgetrc are not read, and THUNDERSTORM_SERVER / THUNDERSTORM_PORT in the
+  environment are ignored (and announced as ignored): only the command line decides where
+  evidence goes. Proxy variables are honoured as the transport in use reads them; credentials
+  in a proxy URL are never logged.
 EOF
 }
 
@@ -1127,9 +1188,233 @@ detect_upload_tool() {
     fi
     if command -v wget >/dev/null 2>&1; then
         UPLOAD_TOOL="wget"
+        # Presence is not capability (the grep -o lesson): busybox's wget applet rejects --tries,
+        # --max-redirect and --content-on-error with a usage dump. It announces itself on
+        # --version (which it also rejects, printing "BusyBox vX.Y.Z"), so that is the probe:
+        # once, offline, no URL a test double could count, and keyed on the signature rather than
+        # the exit status so a wrapper that exits non-zero for unknown arguments is not misjudged.
+        case "$(wget --version 2>&1)" in *[Bb]usy[Bb]ox*) WGET_IS_MINIMAL=1 ;; esac
         return 0
     fi
     return 1
+}
+
+# http_status_from_headers -- put the LAST HTTP status code in the header file $1 into
+# HTTP_STATUS_OUT, or "" when the file holds no status line at all.
+#
+# Pure parameter expansion, for three reasons. It was `grep -oE ... | tail -1 | grep -oE`,
+# spelled two different ways at three call sites:
+#   1. CORRECTNESS. `grep -o` is a GNU extension, absent on Solaris/AIX, and `grep` was never
+#      detected. Where -o is unsupported the status came back EMPTY, and an empty status was
+#      read as success by both uploaders and the marker -- so a wrong port reported a complete
+#      collection with no errors. The status path must not depend on an undetected tool.
+#   2. COST. Three forks and a subshell per uploaded file; a 10k-file run spent ~30k processes
+#      deciding what it had already been told. This is also why the result comes back in a
+#      global rather than through $( ) -- see scratch_file's comment on the bash 5.2 lost-signal
+#      bug in the per-file path.
+#   3. TRUTHFULNESS. The old expression was unanchored, so it matched a status line anywhere on
+#      a line -- a response header whose VALUE contained "HTTP/1.1 500" forged the status of a
+#      healthy request. Anchoring to the start (after optional leading space, because `wget -S`
+#      indents its copy of the headers and `curl -D` does not) makes a header value inert.
+#
+# Last match wins, as before: a "100 Continue" followed by a real status resolves to the real
+# one, and a bare 100 stays 100 (see http_status_is_terminal's note on why that matters).
+HTTP_STATUS_OUT=""
+http_status_from_headers() {
+    HTTP_STATUS_OUT=""
+    local _line _rest _code
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _rest="${_line#"${_line%%[![:space:]]*}"}"
+        case "$_rest" in HTTP/[0-9]*) ;; *) continue ;; esac
+        _rest="${_rest#HTTP/}"          # "1.1 200 OK"
+        _rest="${_rest#*[!0-9.]}"       # "200 OK"  (drop the version and its separator)
+        _code="${_rest%%[![:digit:]]*}" # "200"
+        case "$_code" in [0-9][0-9][0-9]) HTTP_STATUS_OUT="$_code" ;; esac
+    done < "$1"
+}
+
+# thunderstorm_ack_in -- true when the response body in file $1 carries Thunderstorm's upload
+# acknowledgement: an "id" key with a value. A foreign service answering 200 to everything
+# returns '{}', HTML or nothing, so a 2xx alone must not count as a submitted file -- GRR and
+# Fleetspeak both refuse to trust a bare status, because captive proxies answer 200 without
+# connectivity, and Thunderstorm already returns the id on /api/checkAsync at no extra cost.
+#
+# The id's TYPE is deliberately not constrained, because the API family uses both spellings and
+# a collector that accepted only one would refuse a legitimate peer: the production server
+# answers '{"id":27844}' (a number) while the reference stub answers '{"id":"<uuid>"}' (a
+# string). Requiring digits passed against production and rejected every upload against the
+# stub -- caught by running the suite, not by reading the code. What must be present is the key
+# and a non-empty value; what must be rejected is a body that has no acknowledgement at all.
+# The whole body is read (bounded to 4 KiB): a pretty-printing encoder or gateway may put the id on
+# any line, and a formatting change must not turn every run into submitted=0.
+thunderstorm_ack_in() {
+    local _ack="" _rest
+    IFS= read -r -d '' -n 4096 _ack 2>/dev/null < "$1" || [ -n "$_ack" ] || return 1
+    # '"id"' with the quotes, so a key merely ENDING in id ('{"paid":1}') cannot satisfy it.
+    _rest="${_ack#*\"id\"}"
+    [ "$_rest" != "$_ack" ] || return 1
+    _rest="${_rest#"${_rest%%[![:space:]]*}"}"
+    case "$_rest" in :*) _rest="${_rest#:}" ;; *) return 1 ;; esac
+    _rest="${_rest#"${_rest%%[![:space:]]*}"}"
+    case "$_rest" in
+        [0-9]*) return 0 ;;   # {"id":27844}     -- production
+        '""'*)  return 1 ;;   # {"id":""}        -- present but empty is not an acknowledgement
+        '"'*)   return 0 ;;   # {"id":"<uuid>"}  -- the reference stub
+    esac
+    return 1
+}
+
+# retry_after_seconds -- put the LAST Retry-After value in header file $1 into RETRY_AFTER_OUT as a
+# number of seconds, or "" when there is none we can honour. RFC 9110 also allows an HTTP-date;
+# that is "unknown" here, never a number: the old `sed 's/[^0-9]//g'` turned
+# "Fri, 04 Sep 2026 10:00:00 GMT" into 042026100000 and the log then attributed the capped value
+# to the server. Pure expansion, case-insensitive (Bash 3.2 has no ${var,,}), wget's indent tolerated.
+RETRY_AFTER_OUT=""
+retry_after_seconds() {
+    RETRY_AFTER_OUT=""
+    local _line _v
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line#"${_line%%[![:space:]]*}"}"
+        case "$_line" in
+            [Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]:*) ;;
+            *) continue ;;
+        esac
+        _v="${_line#*:}"
+        _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
+        case "$_v" in
+            ''|*[!0-9]*) RETRY_AFTER_OUT="" ;;
+            *) [ "${#_v}" -gt 6 ] && _v=999999   # anything this large is capped anyway; no 64-bit games
+               RETRY_AFTER_OUT=$((10#$_v)) ;;
+        esac
+    done < "$1"
+}
+
+# thunderstorm_sync_result_in -- true when the body in file $1 is what /api/check answers for a
+# scanned sample: `null` for a clean file, or a JSON array of assessments for a match (both measured
+# against the live server). '{}', HTML and an empty body are what a foreign 2xx looks like. The
+# async endpoint acknowledges with {"id":N} instead -- see thunderstorm_ack_in; neither shape is in
+# a published contract, so a server change here fails CLOSED (files withheld, exit 4), never open.
+thunderstorm_sync_result_in() {
+    local _r=""
+    IFS= read -r -d '' -n 4096 _r 2>/dev/null < "$1" || [ -n "$_r" ] || return 1
+    _r="${_r#"${_r%%[![:space:]]*}"}"
+    case "$_r" in null*|\[*) return 0 ;; esac
+    return 1
+}
+
+# redact_userinfo -- $1 with any user:pass@ replaced by <redacted>@, scheme or no scheme (curl
+# accepts and USES a proxy spelled user:pass@host:port with no scheme). Result in REDACTED_OUT.
+# redact_detail  -- $1 with the effective proxy's credential (PROXY_CRED_OUT, set by
+# effective_proxy) blanked in both the user:pass and wget's user/pass spelling. The transports echo
+# the raw proxy URL in some of their own diagnostics, which this file now keeps and logs.
+REDACTED_OUT=""
+PROXY_CRED_OUT=""
+redact_userinfo() {
+    local _h
+    case "$1" in
+        *@*)
+            _h="${1##*@}"
+            case "$1" in
+                *://*) REDACTED_OUT="${1%%://*}://<redacted>@${_h}" ;;
+                *)     REDACTED_OUT="<redacted>@${_h}" ;;
+            esac ;;
+        *) REDACTED_OUT="$1" ;;
+    esac
+}
+redact_detail() {
+    REDACTED_OUT="$1"
+    [ -n "$PROXY_CRED_OUT" ] || return 0
+    REDACTED_OUT="${REDACTED_OUT//"$PROXY_CRED_OUT"/<redacted>}"
+    REDACTED_OUT="${REDACTED_OUT//"${PROXY_CRED_OUT/:/\/}"/<redacted>}"
+}
+
+# last_diagnostic_line -- the last line of a `wget -S` stderr capture ($1) that is NOT an echoed
+# header (wget indents those); i.e. wget's own last word on what went wrong. In DIAG_LINE_OUT.
+DIAG_LINE_OUT=""
+last_diagnostic_line() {
+    DIAG_LINE_OUT=""
+    local _line _tab
+    _tab="$(printf '\t')"
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in ''|' '*|"$_tab"*) continue ;; esac
+        DIAG_LINE_OUT="$_line"
+    done < "$1"
+}
+
+# sentinel_name -- the closed-set value $1 as words, for the operator-facing attempt line. The
+# numbers are an implementation detail documented only in this file; "code 92" told nobody anything.
+SENTINEL_NAME_OUT=""
+sentinel_name() {
+    case "$1" in
+        90) SENTINEL_NAME_OUT="transport failure" ;;
+        91) SENTINEL_NAME_OUT="local failure" ;;
+        92) SENTINEL_NAME_OUT="non-2xx status" ;;
+        93) SENTINEL_NAME_OUT="503 back-pressure" ;;
+        95) SENTINEL_NAME_OUT="2xx without a Thunderstorm answer" ;;
+        98) SENTINEL_NAME_OUT="no readable HTTP status" ;;
+        *)  SENTINEL_NAME_OUT="code $1" ;;
+    esac
+}
+
+# submit_file's return space is a CLOSED SET, and every value in it is defined here. It is
+# closed because it used to leak: the two uploaders ended with `return $code`, handing the
+# transport's OWN exit status back into the same numbers. Modern curl reaches into that range --
+# 92 CURLE_HTTP2_STREAM, 93, 94 CURLE_AUTH_ERROR, 96 CURLE_QUIC_CONNECT_ERROR, 97 CURLE_PROXY --
+# so a curl that failed its proxy handshake (97) was read as "the server gave a terminal verdict"
+# and the file was dropped after one attempt; curl 94 was read as "the file vanished", inflating
+# vanished= and steering the run to exit 5; curl 93 was read as 503 back-pressure. The transport's
+# exit code is now CLASSIFIED and LOGGED instead of returned.
+#
+#   0   submitted
+#   90  transport failed before a verdict (see transport_error_reason for the cause)
+#   91  local failure (scratch file, body build)
+#   92  non-2xx from the server, retryable (both transports)
+#   93  503 back-pressure
+#   94  file vanished or changed type
+#   95  2xx that is not a Thunderstorm answer for this endpoint (no {"id":N} on /api/checkAsync,
+#       no scan result on /api/check)
+#   97  terminal server verdict; re-sending cannot change it
+#   98  transport exited 0 but produced no readable HTTP status
+#
+# transport_error_reason -- put a human cause for tool exit code $2 ("curl" or "wget" in $1)
+# into TRANSPORT_ERR_OUT. Every tool benchmarked for this collector (Velociraptor, GRR,
+# osquery, UAC) leaves this to the runtime's error string; curl's exit codes are better raw
+# material than any of them has, so they are named here rather than printed as a bare number.
+TRANSPORT_ERR_OUT=""
+transport_error_reason() {
+    TRANSPORT_ERR_OUT=""
+    if [ "$1" = "curl" ]; then
+        case "$2" in
+            1|8) TRANSPORT_ERR_OUT="the peer did not answer with HTTP — wrong port, or a service that does not speak HTTP (a TLS-only port without --ssl looks like this too)" ;;
+            5)  TRANSPORT_ERR_OUT="could not resolve the proxy" ;;
+            6)  TRANSPORT_ERR_OUT="could not resolve the host name" ;;
+            7)  TRANSPORT_ERR_OUT="connection refused or unreachable — check the port" ;;
+            16|92) TRANSPORT_ERR_OUT="HTTP/2 framing error" ;;
+            18) TRANSPORT_ERR_OUT="transfer ended early" ;;
+            23) TRANSPORT_ERR_OUT="could not write the response locally" ;;
+            26) TRANSPORT_ERR_OUT="could not read the file being uploaded" ;;
+            28) TRANSPORT_ERR_OUT="timed out (connecting, or the transfer exceeded the client's window)" ;;
+            35) TRANSPORT_ERR_OUT="TLS handshake failed" ;;
+            51|60) TRANSPORT_ERR_OUT="server certificate not trusted or name mismatch (use --ca-cert, or --insecure to accept it)" ;;
+            52) TRANSPORT_ERR_OUT="empty reply — the peer may not speak HTTP on this port, or it is TLS-only and --ssl is missing" ;;
+            55|56) TRANSPORT_ERR_OUT="network send/receive error" ;;
+            77) TRANSPORT_ERR_OUT="CA certificate file could not be read" ;;
+            97) TRANSPORT_ERR_OUT="proxy handshake failed (see the Proxy: line)" ;;
+            *)  TRANSPORT_ERR_OUT="see curl(1) exit code $2" ;;
+        esac
+        return 0
+    fi
+    case "$2" in
+        1) TRANSPORT_ERR_OUT="generic failure (see wget's own message)" ;;
+        2) TRANSPORT_ERR_OUT="wget rejected an option or its configuration file (an old or busybox wget?)" ;;
+        3) TRANSPORT_ERR_OUT="local file I/O error" ;;
+        4) TRANSPORT_ERR_OUT="network failure — check the host and port" ;;
+        5) TRANSPORT_ERR_OUT="TLS verification failed (use --ca-cert, or --insecure to accept it)" ;;
+        6) TRANSPORT_ERR_OUT="authentication failure" ;;
+        7) TRANSPORT_ERR_OUT="the peer did not answer with HTTP — wrong port, or a service that does not speak HTTP" ;;
+        8) TRANSPORT_ERR_OUT="server returned an error status" ;;
+        *) TRANSPORT_ERR_OUT="see wget(1) exit code $2" ;;
+    esac
 }
 
 # http_status_is_terminal -- true ONLY for a 4xx the server means as a verdict about THIS
@@ -1147,10 +1432,112 @@ detect_upload_tool() {
 # file was abandoned after one attempt instead of the configured --retries.
 http_status_is_terminal() {
     case "$1" in
+        407)         return 1 ;;   # a PROXY status (RFC 9110 15.5.8): the server said nothing
         408|429)     return 1 ;;
         4[0-9][0-9]) return 0 ;;
         *)           return 1 ;;
     esac
+}
+
+# classify_upload_response -- turn one transport attempt into a value from the closed set above.
+# $1 tool (curl|wget), $2 its exit status, $3 endpoint, $4 file, $5 header file, $6 body file.
+# One function for both transports: the two copies it replaces had already drifted in three places
+# (Retry-After anchoring, body flattening, 92 vs 96) and every later fix would have been made twice.
+# Sets RETRY_AFTER_SLEPT so the 503 arm's caller knows whether to back off itself.
+RETRY_AFTER_SLEPT=0
+classify_upload_response() {
+    local _tool="$1" _code="$2" _endpoint="$3" _filepath="$4" _hdr="$5" _resp="$6"
+    local _http _body _wait
+    RETRY_AFTER_SLEPT=0
+    http_status_from_headers "$_hdr"; _http="$HTTP_STATUS_OUT"
+
+    # 503 back-pressure. The server's value is honoured and REPORTED truthfully: when the cap
+    # applies the line says both numbers; when there is no usable value the line says so and the
+    # caller applies its own backoff instead of re-sending the whole body at once.
+    if [ "$_http" = "503" ]; then
+        retry_after_seconds "$_hdr"
+        if [ -n "$RETRY_AFTER_OUT" ]; then
+            _wait="$RETRY_AFTER_OUT"
+            [ "$_wait" -gt 120 ] && _wait=120
+            if [ "$_wait" != "$RETRY_AFTER_OUT" ]; then
+                log_msg warn "Server returned 503; Retry-After asked for ${RETRY_AFTER_OUT}s, waiting ${_wait}s (cap 120)"
+            else
+                log_msg warn "Server returned 503, waiting ${_wait}s (Retry-After)"
+            fi
+            sleep "$_wait"
+            RETRY_AFTER_SLEPT=1
+        else
+            log_msg warn "Server returned 503 without a usable Retry-After; backing off before retrying"
+        fi
+        return 93
+    fi
+
+    # 407 comes from a proxy, never from the server (RFC 9110 15.5.8): a transport-class failure,
+    # retried like one and blamed on the right party.
+    if [ "$_http" = "407" ]; then
+        log_msg error "Upload of '$_filepath' failed: the proxy at ${EFFECTIVE_PROXY_OUT:-<unknown>} refused the request (HTTP 407 Proxy Authentication Required)"
+        return 90
+    fi
+
+    if [ "$_code" -ne 0 ]; then
+        # wget exits 8 for EVERY HTTP error response: that is a verdict with a status line, and it
+        # is classified with the statuses below. Any other non-zero exit with a status line means
+        # the transfer died AFTER a status arrived -- a proxy closing the request mid-body after a
+        # 502, or a proxy's own "200 Connection established" before the tunnel failed. Reported as
+        # what it is: a status line received, not the server's verdict on the file.
+        if [ -n "$_http" ] && { [ "$_tool" != "wget" ] || [ "$_code" -ne 8 ]; }; then
+            log_msg error "Upload of '$_filepath' failed: an HTTP $_http status line was received before the transfer completed ($_tool exit $_code; a proxy's CONNECT reply counts as one)"
+            http_status_is_terminal "$_http" && return 97
+            case "${_tool}:${_code}" in
+                curl:18|curl:28) log_msg warn "'$_filepath' was cut off mid-transfer; if this repeats for large files the server or a proxy in front of it is enforcing a shorter per-request window than this client — lower --max-size so files stay inside it" ;;
+            esac
+            transport_error_reason "$_tool" "$_code"
+            log_msg error "Upload of '$_filepath' to $_endpoint failed: $TRANSPORT_ERR_OUT ($_tool exit $_code)"
+            return 90
+        fi
+        if [ -z "$_http" ]; then
+            transport_error_reason "$_tool" "$_code"
+            DIAG_LINE_OUT=""
+            [ "$_tool" = "wget" ] && last_diagnostic_line "$_hdr"
+            redact_detail "$DIAG_LINE_OUT"
+            log_msg error "Upload of '$_filepath' to $_endpoint failed: $TRANSPORT_ERR_OUT ($_tool exit $_code)${REDACTED_OUT:+: $REDACTED_OUT}"
+            return 90
+        fi
+    fi
+
+    if [ -z "$_http" ]; then
+        # The transport exited 0 but said nothing we could read as a status. That is not permission
+        # to call the file submitted: a truncated header, an HTTP/0.9 peer or a header file we could
+        # not write all look like this, and reading silence as success is exactly how a wrong port
+        # came to report a complete collection. Fail closed.
+        log_msg error "No readable HTTP status for '$_filepath' (target $_endpoint); not counted as submitted"
+        return 98
+    fi
+
+    case "$_http" in
+        2[0-9][0-9])
+            # A 2xx alone is not a submitted file: the peer must answer as a Thunderstorm does on
+            # THIS endpoint -- {"id":N} on /api/checkAsync, a scan result on /api/check. A foreign
+            # service answering 200 to everything returns neither (GRR and Fleetspeak refuse to trust
+            # a bare status for the same reason: captive proxies answer 200 without connectivity).
+            case "$_endpoint" in
+                */api/checkAsync*)
+                    if ! thunderstorm_ack_in "$_resp"; then
+                        log_msg error "HTTP $_http from $_endpoint carried no Thunderstorm acknowledgement for '$_filepath'; the peer did not answer as a Thunderstorm would"
+                        return 95
+                    fi ;;
+                */api/check\?*|*/api/check)
+                    if ! thunderstorm_sync_result_in "$_resp"; then
+                        log_msg error "HTTP $_http from $_endpoint carried no Thunderstorm scan result for '$_filepath'; the peer did not answer as a Thunderstorm would"
+                        return 95
+                    fi ;;
+            esac
+            return 0 ;;
+    esac
+    _body="$(tr '\r\n' '  ' < "$_resp" 2>/dev/null)"
+    log_msg error "Server returned HTTP $_http for '$_filepath' (target $_endpoint): $_body"
+    http_status_is_terminal "$_http" && return 97
+    return 92
 }
 
 upload_with_curl() {
@@ -1161,7 +1548,6 @@ upload_with_curl() {
     local resp_file
     local header_file
     local code
-    local http_code
 
     sanitize_filename_for_multipart "$filename"; safe_filename="$SAFE_FILENAME_OUT"
 
@@ -1182,7 +1568,11 @@ upload_with_curl() {
     # CLIENT bound only — a reverse proxy in front of Thunderstorm may enforce a much shorter
     # per-request window, in which case it, not this value, decides the largest file that can
     # actually be delivered. See the note in submit_file.
-    curl -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
+    # -q FIRST: it disables ~/.curlrc, $CURL_HOME and $XDG_CONFIG_HOME/curlrc, which can otherwise
+    # set proxy=, location (redirect following, C1 all over again) or insecure behind the
+    # collector's back while the log describes a run that did not happen. Same rule as the ignored
+    # THUNDERSTORM_PORT: a file on the host must not decide where evidence goes.
+    curl -q -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
         --connect-timeout 10 \
         --max-time 300 \
         -D "$header_file" \
@@ -1190,64 +1580,13 @@ upload_with_curl() {
         -F "$form_arg" \
         < "$filepath" > "$resp_file" 2>"$err_file"
     code=$?
-
     if [ $code -ne 0 ]; then
         local _curl_err
         _curl_err="$(cat "$err_file" 2>/dev/null)"
-        [ -n "$_curl_err" ] && log_msg debug "curl error: $_curl_err"
+        redact_detail "$_curl_err"
+        [ -n "$REDACTED_OUT" ] && log_msg debug "curl error: $REDACTED_OUT"
     fi
-
-    # Extract HTTP status code from headers
-    http_code="$(grep -oE 'HTTP/[0-9.]+ [0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
-
-    # Handle 503 back-pressure
-    if [ "$http_code" = "503" ]; then
-        local retry_after
-        retry_after="$(grep -i '^Retry-After:' "$header_file" 2>/dev/null | head -1 | sed 's/[^0-9]//g')"
-        if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
-            [ "$retry_after" -gt 120 ] && retry_after=120
-            log_msg warn "Server returned 503, waiting ${retry_after}s (Retry-After)"
-            sleep "$retry_after"
-        fi
-        return 93
-    fi
-
-    if [ $code -ne 0 ]; then
-        # The server's verdict must not be thrown away just because the transfer also failed.
-        # curl exits 18 (partial transfer) / 28 (timeout) when a proxy closes the request
-        # mid-body, and the status line it already sent was being discarded here: the operator
-        # saw only "code 18" for what was in fact a reported HTTP 502. Observed against a live
-        # Thunderstorm behind a proxy with a ~60 s per-request window: a 450 MB upload was cut
-        # at 60 s with 502, three times over, and nothing in the log named the status.
-        if [ -n "$http_code" ]; then
-            log_msg error "Upload of '$filepath' failed after the server returned HTTP $http_code (curl exit $code, transfer incomplete)"
-            http_status_is_terminal "$http_code" && return 97
-        fi
-        # A transfer that dies partway through a large body is usually the peer's per-request
-        # window, not a flaky link — and every retry re-sends the whole file. Name the knob.
-        case "$code" in
-            18|28) log_msg warn "'$filepath' was cut off mid-transfer; if this repeats for large files the server or a proxy in front of it is enforcing a shorter per-request window than this client — lower --max-size so files stay inside it" ;;
-        esac
-        return $code
-    fi
-
-    # Only 2xx responses count as a successful submission.
-    if [ -n "$http_code" ]; then
-        case "$http_code" in
-            2[0-9][0-9]) ;;
-            *)
-                local body
-                body="$(cat "$resp_file" 2>/dev/null)"
-                body="${body//$'\r'/ }"
-                body="${body//$'\n'/ }"
-                log_msg error "Server returned HTTP $http_code for '$filepath': $body"
-                http_status_is_terminal "$http_code" && return 97
-                return 92
-                ;;
-        esac
-    fi
-
-    return 0
+    classify_upload_response curl "$code" "$endpoint" "$filepath" "$header_file" "$resp_file"
 }
 
 upload_with_wget() {
@@ -1325,57 +1664,21 @@ upload_with_wget() {
     # multiplied RETRIES=3 into up to 60 full-body uploads of the same file. Retry policy
     # belongs to submit_file, which counts and logs its attempts; the tool must not add its own
     # (CLAUDE.md §2, "bound total attempts including any tool's own retry policy").
-    # --timeout is wget's dns/connect/read timeout, not a total, so it is not a transfer bound.
+    # wget has no total-transfer bound (curl's --max-time); --timeout=N would have set DNS, connect
+    # AND idle-read to N each, so a peer that stopped accepting cost 300 s per attempt where curl
+    # gave up after 10. The three are set separately (wget >= 1.10). The residual -- a peer that
+    # trickles a byte every <300 s holds one upload open -- is documented in README.
+    # --content-on-error keeps the body of a non-2xx answer so the status line can quote it, as
+    # the curl path does.
     wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
         --tries=1 \
-        --timeout=300 \
+        --dns-timeout=10 --connect-timeout=10 --read-timeout=300 \
+        --content-on-error \
         --header="Content-Type: multipart/form-data; boundary=${boundary}" \
         --post-file="$body_file" \
         "$endpoint" 2>"$header_file"
     code=$?
-
-    # Extract HTTP status code from headers (wget -S writes headers to stderr with leading spaces)
-    local http_code
-    http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
-
-    # Handle 503 back-pressure
-    if [ "$http_code" = "503" ]; then
-        local retry_after
-        retry_after="$(grep -i 'Retry-After' "$header_file" 2>/dev/null | head -1 | sed 's/[^0-9]//g')"
-        if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
-            [ "$retry_after" -gt 120 ] && retry_after=120
-            log_msg warn "Server returned 503, waiting ${retry_after}s (Retry-After)"
-            sleep "$retry_after"
-        fi
-        return 93
-    fi
-
-    if [ $code -ne 0 ]; then
-        # wget exits 8 for EVERY HTTP error response, so returning here unconditionally made the
-        # status classification below unreachable on this path: a 413 was retried --retries times
-        # exactly as before. The server's verdict is honoured first, as on the curl path.
-        if [ -n "$http_code" ]; then
-            log_msg error "Upload of '$filepath' failed after the server returned HTTP $http_code (wget exit $code)"
-            http_status_is_terminal "$http_code" && return 97
-        fi
-        return $code
-    fi
-
-    # Only 2xx responses count as a successful submission.
-    if [ -n "$http_code" ]; then
-        case "$http_code" in
-            2[0-9][0-9]) ;;
-            *)
-                local body
-                body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
-                log_msg error "Server returned HTTP $http_code for '$filepath': $body"
-                http_status_is_terminal "$http_code" && return 97
-                return 96
-                ;;
-        esac
-    fi
-
-    return 0
+    classify_upload_response wget "$code" "$endpoint" "$filepath" "$header_file" "$resp_file"
 }
 
 json_escape() {
@@ -1393,6 +1696,8 @@ json_escape() {
     printf '%s' "$s"
 }
 
+# Why the last collection_marker POST failed, for the caller's fatal message.
+MARKER_ERR_OUT=""
 # collection_marker -- POST a begin/end marker to /api/collection
 # Args: $1=base_url  $2=type(begin|end)  $3=scan_id(optional)  $4=stats_json(optional)
 # Outputs: scan_id extracted from response on stdout (empty if unsupported or failed)
@@ -1403,10 +1708,12 @@ collection_marker() {
     local scan_id="${3:-}"
     local stats_json="${4:-}"
     local marker_url="${base_url}/api/collection"
-    local body scan_id_out resp_file header_file
+    local body scan_id_out resp_file header_file err_file
+    local _marker_tool="" _marker_detail=""
 
     resp_file="$(mktemp_portable)" || return 1
     header_file="$(mktemp_portable)" || return 1
+    err_file="$(mktemp_portable)" || return 1
 
     # Build JSON body with proper escaping
     local safe_source safe_scan_id
@@ -1426,6 +1733,8 @@ collection_marker() {
     local _marker_rc=1
     local _marker_attempts=1
     [ "$marker_type" = "begin" ] && _marker_attempts=2
+    # The interrupted marker can fire from a trap before prepare_run detected the transport.
+    [ -n "$UPLOAD_TOOL" ] || detect_upload_tool || true
 
     local _http_code
     local _attempt=0
@@ -1434,30 +1743,59 @@ collection_marker() {
         _marker_rc=1
         : > "$header_file"
         # Attempt POST — capture HTTP status to detect server-side errors
-        if command -v curl >/dev/null 2>&1; then
-            curl -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
+        if [ "$UPLOAD_TOOL" = "curl" ]; then
+            # curl's stderr used to go to /dev/null here, even though -sS was passed precisely to
+            # make it explain itself. That is why a refused port, a filtered port, a rejected
+            # certificate and a DNS failure all produced one identical sentence: the collector
+            # threw away the only thing that told them apart. Keep it and name the cause.
+            curl -q -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
                 --connect-timeout 10 \
                 -H "Content-Type: application/json" \
                 -d "$body" \
                 --max-time 10 \
-                "$marker_url" 2>/dev/null
+                "$marker_url" 2>"$err_file"
             _marker_rc=$?
-        elif command -v wget >/dev/null 2>&1; then
+            _marker_tool="curl"
+        elif [ "$UPLOAD_TOOL" = "wget" ]; then
             wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
                 --tries=1 \
                 --header "Content-Type: application/json" \
                 --post-data "$body" \
-                --timeout=10 \
+                --dns-timeout=10 --connect-timeout=10 --read-timeout=10 \
                 "$marker_url" 2>"$header_file"
             _marker_rc=$?
+            _marker_tool="wget"
+            # wget writes both its headers and its diagnostics to the same stream, so the header
+            # file is also the error file on this path.
+            err_file="$header_file"
+        fi
+        # Whatever the transport said about WHY, keep it for the caller's fatal message.
+        MARKER_ERR_OUT=""
+        if [ "$_marker_rc" -ne 0 ] && [ -n "$_marker_tool" ]; then
+            transport_error_reason "$_marker_tool" "$_marker_rc"
+            MARKER_ERR_OUT="$TRANSPORT_ERR_OUT"
+            if [ "$_marker_tool" = "wget" ]; then
+                # wget's own last word, not its whole -S header dump
+                last_diagnostic_line "$err_file"; _marker_detail="$DIAG_LINE_OUT"
+            else
+                _marker_detail="$(cat "$err_file" 2>/dev/null)"
+            fi
+            _marker_detail="${_marker_detail//$'\r'/ }"
+            _marker_detail="${_marker_detail//$'\n'/ }"
+            redact_detail "$_marker_detail"
+            [ -n "$REDACTED_OUT" ] && MARKER_ERR_OUT="$MARKER_ERR_OUT: $REDACTED_OUT"
         fi
         # Validate the HTTP status code even when wget exits non-zero on 4xx/5xx.
         # 404/501 means the server doesn't implement marker endpoint; continue without scan_id.
-        _http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+        http_status_from_headers "$header_file"; _http_code="$HTTP_STATUS_OUT"
         if [ -n "$_http_code" ]; then
             case "$_http_code" in
                 2[0-9][0-9])
-                    _marker_rc=0
+                    # Only when the transport itself succeeded: a proxy's "200 Connection
+                    # established" survives in curl's header file after a failed tunnel.
+                    if [ "$_marker_rc" -ne 0 ]; then
+                        log_msg warn "Collection marker '$marker_type': an HTTP $_http_code status line was received but the transport failed${MARKER_ERR_OUT:+ ($MARKER_ERR_OUT)}"
+                    fi
                     ;;
                 404|501)
                     log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
@@ -1465,12 +1803,17 @@ collection_marker() {
                     ;;
                 *)
                     log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
+                    [ -n "$MARKER_ERR_OUT" ] || MARKER_ERR_OUT="HTTP $_http_code from /api/collection"
                     _marker_rc=1
                     ;;
             esac
         elif [ "$_marker_rc" -eq 0 ]; then
-            # Some clients may succeed without exposing a parseable status line.
-            _marker_rc=0
+            # The tool exited 0 and produced no readable status line. Previously that counted as
+            # a delivered marker, which made the begin marker -- the run's only reachability
+            # gate -- pass on any peer whose reply we could not parse. Treat it as a failure so
+            # the gate cannot be satisfied by silence.
+            log_msg warn "Collection marker '$marker_type' produced no readable HTTP status"
+            _marker_rc=1
         fi
         if [ "$_marker_rc" -eq 0 ]; then
             break
@@ -1587,6 +1930,8 @@ submit_file() {
         log_msg info "DRY-RUN: would submit '$filepath'"
         return 0
     fi
+    # Nothing more goes to a peer that failed to acknowledge as a Thunderstorm.
+    [ "$PEER_UNACKNOWLEDGED" -eq 0 ] || return 95
 
     # Last type check before the open. The upload opens the path through a shell redirect, so
     # if it has become a FIFO or a device since the discovery-time check the process blocks in
@@ -1601,12 +1946,13 @@ submit_file() {
     # fork per file (Bash has no stat builtin), undoing the measured 6851 ms -> 391 ms win from
     # moving the limit into find. Documented as an accepted residual in README.md rather than
     # paid for in the hot loop.
-    if [ ! -f "$filepath" ]; then
-        log_msg warn "'$filepath' is no longer a regular file; not uploaded"
-        return 94
-    fi
-
     while [ "$try" -le "$RETRIES" ]; do
+        # Inside the loop, not before it: a file that vanished between attempts used to be
+        # re-attempted with backoff and booked as an upload failure (exit 4). It is churn (94).
+        if [ ! -f "$filepath" ]; then
+            log_msg warn "'$filepath' is no longer a regular file; not uploaded"
+            return 94
+        fi
         if [ "$UPLOAD_TOOL" = "curl" ]; then
             upload_with_curl "$endpoint" "$filepath" "$filename"
             rc=$?
@@ -1619,19 +1965,37 @@ submit_file() {
             return 0
         fi
 
-        # 95 = the server gave a verdict about THIS request that re-sending cannot change
+        # 97 = the server gave a verdict about THIS request that re-sending cannot change
         # (413 Payload Too Large above all). Retrying would re-upload the whole body for a
         # guaranteed second refusal, so the attempt budget is not spent on it.
         if [ "$rc" -eq 97 ]; then
             log_msg error "Server rejected '$filepath' with a non-retryable status; not retrying"
             return "$rc"
         fi
+        # 95: a 2xx that was not a Thunderstorm answer. From a peer that has NEVER acknowledged an
+        # upload, re-sending cannot change the answer and every further file would be disclosed to
+        # a party of unknown identity: stop the flow, and remember which file's bytes did reach it.
+        # From a peer that has already proved itself, one odd answer (a proxy's HTML error page, a
+        # backend out of rotation) is an anomaly like any other failed attempt: retried, and if it
+        # persists, booked below as an upload failure -- not as an impostor.
+        if [ "$rc" -eq 95 ] && [ "$FILES_SUBMITTED" -eq 0 ] && [ "$LINKS_COLLECTED" -eq 0 ]; then
+            PEER_UNACKNOWLEDGED=1
+            PEER_UNACKNOWLEDGED_AT="$endpoint"
+            PEER_UNACKNOWLEDGED_FILE="$filepath"
+            return "$rc"
+        fi
 
-        # 503 back-pressure: sleep already happened in upload function,
-        # retry without counting against the normal retry budget (up to a cap)
+        # 503 back-pressure: retried without counting against the normal retry budget (up to a cap).
+        # The upload function slept for Retry-After when the server sent a usable one; otherwise the
+        # ordinary backoff applies here, so an overloaded peer is never re-sent the body at once.
         if [ "$rc" -eq 93 ]; then
             _503_count=$((_503_count + 1))
             if [ "$_503_count" -lt "$max_503_retries" ]; then
+                if [ "$RETRY_AFTER_SLEPT" -eq 0 ]; then
+                    sleep "$backoff"
+                    backoff=$((backoff * 2))
+                    [ "$backoff" -gt 60 ] && backoff=60
+                fi
                 log_msg warn "Retrying '$filepath' after 503 back-pressure ($_503_count/$max_503_retries)"
                 continue
             fi
@@ -1639,8 +2003,11 @@ submit_file() {
             return "$rc"
         fi
 
-        log_msg warn "Upload failed for '$filepath' (attempt ${try}/${RETRIES}, code ${rc})"
-        if [ "$try" -lt "$RETRIES" ]; then
+        sentinel_name "$rc"
+        log_msg warn "Upload failed for '$filepath' (attempt ${try}/${RETRIES}: ${SENTINEL_NAME_OUT})"
+        # Network backoff is for the network. A local failure (91: scratch file, body build) is not
+        # helped by waiting on the peer; it is retried at once and then given up.
+        if [ "$try" -lt "$RETRIES" ] && [ "$rc" -ne 91 ]; then
             sleep "$backoff"
             backoff=$((backoff * 2))
             # Cap backoff at 60 seconds
@@ -1649,6 +2016,9 @@ submit_file() {
         try=$((try + 1))
     done
 
+    # A 2xx-without-answer from a peer that had already proved itself is, once the attempts are
+    # spent, an ordinary upload failure -- not an unacknowledged peer.
+    [ "$rc" -eq 95 ] && rc=92
     return "$rc"
 }
 
@@ -1876,12 +2246,16 @@ validate_config() {
     # Canonical decimal, AFTER the range checks (they compare by string length so an over-64-bit
     # value never reaches arithmetic). Bash reads a leading zero as octal: without 10#,
     # '--max-age 010' means 8 days and '08' is a raw arithmetic error.
+    # Keep the spelling the operator typed: the canonicalisation below overwrites the variable
+    # in place, so "Port must be greater than 0" could not quote its value the way every other
+    # port message does ('--port 00000' reported a rule without saying what broke it).
+    local _port_raw="$THUNDERSTORM_PORT"
     THUNDERSTORM_PORT=$(( 10#$THUNDERSTORM_PORT ))
     MAX_AGE=$(( 10#$MAX_AGE ))
     MAX_FILE_SIZE_KB=$(( 10#$MAX_FILE_SIZE_KB ))
     RETRIES=$(( 10#$RETRIES ))
 
-    [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0"
+    [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0: '$_port_raw'"
     # No ">= 1" check for max-size: 0 turns the size filter OFF, exactly as --max-age 0 turns
     # the age filter off, so the two policy gates are spelled the same way on the command line.
     # (The Go collector's engine already reads 0 as unlimited -- collector.go's
@@ -1892,9 +2266,7 @@ validate_config() {
     if [ -n "$CA_CERT" ] && [ ! -f "$CA_CERT" ]; then
         die "CA certificate file not found: '$CA_CERT'"
     fi
-    if [ -n "$CA_CERT" ] && [ "$INSECURE" -eq 1 ]; then
-        log_msg warn "--ca-cert and --insecure are both set; --insecure takes precedence"
-    fi
+    # NOTE: the --ca-cert/--insecure warning lives in prepare_run, after the log sink is armed.
 }
 
 # collect_symlink_entry -- account, and with --follow-symlinks collect, ONE symlink entry
@@ -2052,6 +2424,11 @@ collect_symlink_entry() {
     if [ "$_rc" -eq 0 ]; then
         LINKS_COLLECTED=$((LINKS_COLLECTED + 1))
         log_msg info "Collected via symlink: '$link' -> '$_target'"
+    elif [ "$_rc" -eq 95 ]; then
+        LINKS_FAILED=$((LINKS_FAILED + 1))
+        FILES_FAILED=$((FILES_FAILED + 1))
+        FILES_UPLOAD_FAILED=$((FILES_UPLOAD_FAILED + 1))
+        FILES_UNACKNOWLEDGED=$((FILES_UNACKNOWLEDGED + 1))
     elif [ "$_rc" -eq 94 ]; then
         # The target stopped being a regular file before the open: churn, counted as vanished.
         LINKS_FAILED=$((LINKS_FAILED + 1))
@@ -2295,6 +2672,11 @@ collect_entries() {
                 # a vanished file, so it is counted as one (and reaches exit 5, not 4).
                 FILES_FAILED=$((FILES_FAILED + 1))
                 FILES_VANISHED=$((FILES_VANISHED + 1))
+            elif [ "$_sub_rc" -eq 95 ]; then
+                # Withheld from an unacknowledged peer: one run-level line names them all.
+                FILES_FAILED=$((FILES_FAILED + 1))
+                FILES_UPLOAD_FAILED=$((FILES_UPLOAD_FAILED + 1))
+                FILES_UNACKNOWLEDGED=$((FILES_UNACKNOWLEDGED + 1))
             else
                 FILES_FAILED=$((FILES_FAILED + 1))
                 FILES_UPLOAD_FAILED=$((FILES_UPLOAD_FAILED + 1))
@@ -2311,7 +2693,7 @@ collect_entries() {
 # Reads every counter; writes elapsed and reconcile_failed.
 report_run() {
     local base_url="$1"
-    local _excluded_by
+    local _excluded_by _withheld
     if [ "$START_TS" -gt 0 ] 2>/dev/null; then
         elapsed=$(( $(date +%s 2>/dev/null || printf '%s\n' "$START_TS") - START_TS ))
         [ "$elapsed" -lt 0 ] && elapsed=0
@@ -2336,6 +2718,10 @@ report_run() {
     fi
     if [ "$FILES_UNREADABLE" -gt 0 ]; then
         log_msg error "$FILES_UNREADABLE file(s) could not be read (first: '$FIRST_UNREADABLE'); counted as failed"
+    fi
+    if [ "$PEER_UNACKNOWLEDGED" -eq 1 ]; then
+        _withheld=$((FILES_UNACKNOWLEDGED - 1)); [ "$_withheld" -lt 0 ] && _withheld=0
+        log_msg error "The peer at $PEER_UNACKNOWLEDGED_AT answered HTTP 2xx without a Thunderstorm answer and never acknowledged an upload: '$PEER_UNACKNOWLEDGED_FILE' was transmitted to it and not acknowledged; $_withheld further file(s) were withheld without transmitting; all counted as failed — check --server and --port"
     fi
 
     log_msg info "Run completed: discovered=$TOTAL_FILES scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED age_filtered=$FILES_AGE_FILTERED size_filtered=$FILES_SIZE_FILTERED age_ctime_only=$FILES_AGE_CTIME_ONLY future=$FILES_FUTURE failed=$FILES_FAILED links_seen=$LINKS_SEEN links_collected=$LINKS_COLLECTED links_skipped=$LINKS_SKIPPED unreadable_dirs=$UNREADABLE_DIRS unstatable=$UNSTATABLE_ENTRIES unusable_dirs=$UNUSABLE_DIRS seconds=$elapsed"
@@ -2988,17 +3374,228 @@ root_cloud_scope() {
     return 0
 }
 
+# transport_version -- the first line of the transport's own --version, for the run record.
+# Read with a builtin rather than `| head -1`: this is the only place the collector would need
+# `head`, and it is not a dependency worth acquiring for one cosmetic line.
+transport_version() {
+    local _v="" _tool="" _num=""
+    IFS= read -r _v < <("$1" --version 2>/dev/null) || _v=""
+    # "curl 7.88.1 (aarch64...) libcurl/7.88.1 ..." / "GNU Wget 1.21.3 built on linux-gnu."
+    # Keep the tool and its version number; the rest is a paragraph, not a log line.
+    case "$_v" in
+        curl\ *)     _tool="curl"; _num="${_v#curl }"; _num="${_num%% *}" ;;
+        GNU\ Wget\ *) _tool="wget"; _num="${_v#GNU Wget }"; _num="${_num%% *}" ;;
+        *)           printf '%s' "${_v:-version unknown}"; return 0 ;;
+    esac
+    printf '%s %s' "$_tool" "$_num"
+}
+
+# effective_proxy -- put the proxy that will actually be used for scheme $1 into
+# EFFECTIVE_PROXY_OUT, with any credentials removed, or "" when the run goes direct.
+#
+# curl and wget both honour http_proxy/https_proxy silently, and the collector neither clears nor
+# reports them: a run could print "Port: 443" and the real endpoint while every byte went to a
+# proxy instead, making both lines false statements about where the evidence went. No collector
+# benchmarked for this audit records the proxy; this one does.
+#
+# The credential strip is not optional -- a proxy URL is routinely http://user:pass@host, and
+# logging it would put a password in the log file, in syslog and on the terminal.
+EFFECTIVE_PROXY_OUT=""
+effective_proxy() {
+    EFFECTIVE_PROXY_OUT=""
+    PROXY_CRED_OUT=""
+    local _scheme="$1" _tool="$2" _p="" _np="" _host _lc_host _e _rest
+    # The variables each transport ACTUALLY reads, taken from their sources rather than assumed.
+    # curl: http_proxy in lower case only (the upper-case spelling is ignored on purpose -- CGI sets
+    # HTTP_PROXY from a request header), https_proxy or HTTPS_PROXY, then all_proxy or ALL_PROXY as
+    # the scheme-independent fallback; exemptions from no_proxy or NO_PROXY, a lone "*" exempting
+    # everything. wget: http_proxy, https_proxy and no_proxy in lower case only, no all_proxy, no
+    # "*" rule. One table for both is how this line came to announce a proxy neither tool would
+    # use, and to say "none" while curl went through all_proxy.
+    if [ "$_tool" = "wget" ]; then
+        if [ "$_scheme" = "https" ]; then _p="${https_proxy:-}"; else _p="${http_proxy:-}"; fi
+        _np="${no_proxy:-}"
+    else
+        if [ "$_scheme" = "https" ]; then _p="${https_proxy:-${HTTPS_PROXY:-}}"; else _p="${http_proxy:-}"; fi
+        [ -n "$_p" ] || _p="${all_proxy:-${ALL_PROXY:-}}"
+        _np="${no_proxy:-${NO_PROXY:-}}"
+    fi
+    [ -n "$_p" ] || return 0
+    # Exemptions, each tool's way. Both compare case-insensitively (tr: Bash 3.2 has no ${var,,})
+    # and ignore IPv6 brackets; curl also drops a leading dot from the entry and matches
+    # host == entry or host ends in ".entry", and accepts spaces as separators; wget matches a
+    # plain suffix. CIDR entries are not evaluated here -- README says so.
+    if [ -n "$_np" ]; then
+        if [ "$_tool" != "wget" ] && [ "$_np" = "*" ]; then return 0; fi
+        _host="${THUNDERSTORM_SERVER#\[}"; _host="${_host%\]}"
+        _lc_host="$(printf '%s' "$_host" | tr '[:upper:]' '[:lower:]')"
+        _rest="${_np// /,}"
+        _rest="$(printf '%s' "$_rest" | tr '[:upper:]' '[:lower:]'),"
+        while [ -n "$_rest" ]; do
+            _e="${_rest%%,*}"; _rest="${_rest#*,}"
+            _e="${_e#\[}"; _e="${_e%\]}"
+            [ -n "$_e" ] || continue
+            if [ "$_tool" = "wget" ]; then
+                case "$_lc_host" in *"$_e") return 0 ;; esac
+            else
+                _e="${_e#.}"
+                case "$_lc_host" in "$_e"|*".$_e") return 0 ;; esac
+            fi
+        done
+    fi
+    # Redacted BEFORE anything is logged; the raw credential is kept only to scrub it out of the
+    # transports' own diagnostics (redact_detail). curl accepts user:pass@host with no scheme, so
+    # the redaction cannot key on "://".
+    case "$_p" in
+        *@*) PROXY_CRED_OUT="${_p%@*}"; PROXY_CRED_OUT="${PROXY_CRED_OUT##*://}" ;;
+    esac
+    redact_userinfo "$_p"
+    EFFECTIVE_PROXY_OUT="$REDACTED_OUT"
+}
+
+# server_preflight -- ask the server for its status page and require a 2xx before a single file
+# is read. $1 is the base url. Returns 0 when the server answered; 1 otherwise, with the reason in
+# PREFLIGHT_ERR_OUT.
+#
+# Why this exists: a wrong --port was previously only discovered by trying to upload to it. The
+# collection marker is not a reachability gate -- a 404 there is forgiven, deliberately, because
+# /api/collection is optional -- so a port that answers HTTP at all passed, the collector walked
+# the entire filesystem, and every upload failed at the end. On a real host that is hours of I/O
+# for nothing. The Go collector settles this before it reads anything (CheckThunderstormUp ->
+# os.Exit(1)), and UAC does the same with a test transfer; this is that gate.
+#
+# It is a REACHABILITY gate, not an identity check: any service answering 2xx on /api/status
+# passes. Proving the peer is really Thunderstorm needs the upload acknowledgement, which is a
+# separate question and deliberately out of scope here.
+# location_from_headers -- the LAST Location header value in file $1, or "", into LOCATION_OUT.
+LOCATION_OUT=""
+location_from_headers() {
+    LOCATION_OUT=""
+    local _line _v
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line#"${_line%%[![:space:]]*}"}"
+        case "$_line" in [Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:*) ;; *) continue ;; esac
+        _v="${_line#*:}"; _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
+        LOCATION_OUT="$_v"
+    done < "$1"
+}
+
+PREFLIGHT_ERR_OUT=""
+PREFLIGHT_ANSWERED=0   # 1 when a status line was read: the fatal says "no usable server", not "cannot reach"
+server_preflight() {
+    PREFLIGHT_ERR_OUT=""
+    PREFLIGHT_ANSWERED=0
+    local _url="$1/api/status"
+    local _hdr _err _rc=1 _tool="" _attempt=0 _answered=0 _wait _detail
+
+    _hdr="$(mktemp_portable)" || { PREFLIGHT_ERR_OUT="could not create a temp file"; return 1; }
+    _err="$(mktemp_portable)" || { PREFLIGHT_ERR_OUT="could not create a temp file"; return 1; }
+
+    # Two attempts, but only for what every other request in this file already treats as
+    # transient (5xx from a restarting server or its proxy, 408, 429), honouring Retry-After.
+    while [ "$_attempt" -lt 2 ]; do
+        _attempt=$((_attempt + 1))
+        : > "$_hdr"
+        if [ "$UPLOAD_TOOL" = "curl" ]; then
+            _tool="curl"
+            : > "$_err"
+            curl -q -sS -D "$_hdr" -o /dev/null "${CURL_EXTRA_OPTS[@]}" \
+                --connect-timeout 10 \
+                --max-time 15 \
+                "$_url" 2>"$_err"
+            _rc=$?
+        elif [ "$UPLOAD_TOOL" = "wget" ]; then
+            _tool="wget"
+            wget -S -O /dev/null "${WGET_EXTRA_OPTS[@]}" \
+                --tries=1 \
+                --dns-timeout=10 --connect-timeout=10 --read-timeout=15 \
+                "$_url" 2>"$_hdr"
+            _rc=$?
+            _err="$_hdr"
+        else
+            PREFLIGHT_ERR_OUT="no upload tool available"
+            return 1
+        fi
+        http_status_from_headers "$_hdr"
+        # "Answered" means a status line AND a transport that did not fail -- except wget's exit 8,
+        # which it uses for every HTTP error response. curl -D keeps a proxy's "200 Connection
+        # established" in the same file, so after a failed tunnel (exit 35/56) that 200 is all
+        # there is, and the origin never spoke: not an answer.
+        _answered=0
+        if [ -n "$HTTP_STATUS_OUT" ]; then
+            if [ "$_rc" -eq 0 ] || { [ "$_tool" = "wget" ] && [ "$_rc" -eq 8 ]; }; then _answered=1; fi
+        fi
+        if [ "$_answered" -eq 1 ]; then
+            case "$HTTP_STATUS_OUT" in
+                2[0-9][0-9]) return 0 ;;
+                500|502|503|504|408|429)
+                    if [ "$_attempt" -lt 2 ]; then
+                        retry_after_seconds "$_hdr"
+                        _wait="${RETRY_AFTER_OUT:-2}"; [ "$_wait" -gt 120 ] && _wait=120
+                        log_msg warn "Server answered HTTP $HTTP_STATUS_OUT on /api/status; retrying once in ${_wait}s"
+                        sleep "$_wait"
+                        continue
+                    fi ;;
+            esac
+        fi
+        break
+    done
+
+    if [ "$_answered" -eq 0 ]; then
+        if [ "$_rc" -ne 0 ]; then
+            transport_error_reason "$_tool" "$_rc"
+            PREFLIGHT_ERR_OUT="$TRANSPORT_ERR_OUT"
+            if [ "$_tool" = "wget" ]; then
+                last_diagnostic_line "$_err"; _detail="$DIAG_LINE_OUT"
+            else
+                _detail="$(cat "$_err" 2>/dev/null)"
+            fi
+            _detail="${_detail//$'\r'/ }"
+            _detail="${_detail//$'\n'/ }"
+            redact_detail "$_detail"
+            [ -n "$REDACTED_OUT" ] && PREFLIGHT_ERR_OUT="$PREFLIGHT_ERR_OUT: $REDACTED_OUT"
+            return 1
+        fi
+        PREFLIGHT_ANSWERED=1
+        PREFLIGHT_ERR_OUT="the peer answered on /api/status but produced no readable HTTP status line"
+        return 1
+    fi
+    PREFLIGHT_ANSWERED=1
+    case "$HTTP_STATUS_OUT" in
+        3[0-9][0-9])
+            location_from_headers "$_hdr"
+            PREFLIGHT_ERR_OUT="the server redirected /api/status (HTTP ${HTTP_STATUS_OUT}${LOCATION_OUT:+ to $LOCATION_OUT}); this collector never follows redirects — use the scheme and port the redirect names (e.g. --ssl --port 443)" ;;
+        401|403)
+            PREFLIGHT_ERR_OUT="the peer requires authentication (HTTP $HTTP_STATUS_OUT) that this collector cannot supply; a Thunderstorm must be reachable without credentials, or exempted on the proxy" ;;
+        407)
+            PREFLIGHT_ERR_OUT="the proxy at ${EFFECTIVE_PROXY_OUT:-<unknown>} refused the request (HTTP 407 Proxy Authentication Required)" ;;
+        *)
+            PREFLIGHT_ERR_OUT="the server answered HTTP $HTTP_STATUS_OUT on /api/status; this is usually the wrong port, or a different service listening on it" ;;
+    esac
+    return 1
+}
+
 # prepare_run -- everything that must be true before the first directory is touched: open the log
 # file sink, validate the configuration, announce the run, build the endpoint URLs, create the
 # private work directory, send the begin marker and settle the progress display. Exits the script
 # on a condition that makes collecting pointless (missing upload tool, unusable work directory,
 # unreachable server) — those are runtime errors, not partial results.
-# Writes: scheme, endpoint_name, query_source, base_url, api_endpoint, CURL/WGET_EXTRA_OPTS,
+# Writes: scheme, endpoint_name, query_source, base_url, api_endpoint, UPLOAD_TOOL, CURL/WGET_EXTRA_OPTS,
 # SHOW_PROGRESS, SCAN_ID, LOG_FILE_READY, TS_WORK_DIR.
 prepare_run() {
-    LOG_FILE_READY=1
     detect_source_name
+    # validate_config runs BEFORE the file sink is armed. A usage error must not leave a file
+    # behind in whatever directory the operator happened to run from: '--port abc' used to create
+    # ./thunderstorm.log while '--port' with no value (rejected earlier, in parse_args) did not --
+    # two usage errors, both exit 2, one with an on-disk side effect. die() still forces the
+    # terminal when no sink is ready, so the operator sees the message either way.
     validate_config
+    # Configuration is good; from here every runtime error is logged to the configured file.
+    LOG_FILE_READY=1
+    # Deferred out of validate_config so it lands in the log rather than only on the terminal.
+    if [ -n "$CA_CERT" ] && [ "$INSECURE" -eq 1 ]; then
+        log_msg warn "--ca-cert and --insecure are both set; --insecure takes precedence"
+    fi
     print_banner
 
     if [ "$(id -u 2>/dev/null || printf '%s\n' 1)" != "0" ]; then
@@ -3009,7 +3606,9 @@ prepare_run() {
         scheme="https"
     fi
     CURL_EXTRA_OPTS=()
-    WGET_EXTRA_OPTS=()
+    # A followed redirect turns wget's POST into a GET with no body, and the 200 that comes back
+    # was read as a submitted file. curl never follows (no -L); make wget match it.
+    WGET_EXTRA_OPTS=(--max-redirect=0)
     if [ "$INSECURE" -eq 1 ]; then
         CURL_EXTRA_OPTS+=("-k")
         WGET_EXTRA_OPTS+=("--no-check-certificate")
@@ -3021,21 +3620,58 @@ prepare_run() {
     if [ "$ASYNC_MODE" -eq 1 ]; then
         endpoint_name="checkAsync"
     fi
+    # Detected here rather than at first use so the run can RECORD which transport it had.
+    # curl and wget do not agree about a wrong port -- their TLS stacks disagree about a
+    # protocol-sniffing listener, so the same command line exits 4 under one and 1 under the
+    # other -- and the log previously never said which one ran. The fatal "neither is installed"
+    # check stays where it was, below, so its message and exit code are unchanged.
+    detect_upload_tool || true
 
     query_source="$(build_query_source "$SOURCE_NAME")"
-    base_url="${scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
-    # Strip any trailing slash from base_url
-    base_url="${base_url%/}"
+    build_base_url
+    base_url="$BASE_URL_OUT"
     api_endpoint="${base_url}/api/${endpoint_name}${query_source}"
 
-    if [ "$DRY_RUN" -eq 1 ]; then
-        detect_upload_tool || true
-    fi
 
     log_msg info "Started Thunderstorm Collector - Version $VERSION"
     log_msg info "Server: $THUNDERSTORM_SERVER"
     log_msg info "Port: $THUNDERSTORM_PORT"
     log_msg info "API endpoint: $api_endpoint"
+    local _tls_mode="off"
+    if [ "$USE_SSL" -eq 1 ]; then
+        _tls_mode="on"
+        if [ -n "$CA_CERT" ]; then
+            # curl --cacert REPLACES the trust store; wget --ca-certificate only ADDS to the
+            # system store (its OpenSSL and GnuTLS backends both load the default paths first).
+            if [ "$UPLOAD_TOOL" = "wget" ]; then
+                _tls_mode="on (--ca-cert $CA_CERT, added to the system trust store — wget cannot replace it)"
+            else
+                _tls_mode="on (--ca-cert $CA_CERT replaces the trust store)"
+            fi
+        fi
+        [ "$INSECURE" -eq 1 ] && _tls_mode="on, certificate NOT verified (--insecure)"
+    fi
+    log_msg info "Transport: ${UPLOAD_TOOL:-none detected} | TLS: $_tls_mode"
+    # The version costs an extra invocation of the transport, so it is only asked for when
+    # someone is actually diagnosing. That is not just fork economy: probing it unconditionally
+    # ran the transport once per run for a cosmetic string, and any test double that counts its
+    # invocations -- several in this repo's own suite do -- counted the probe as an upload.
+    [ "$DEBUG" -eq 1 ] && [ -n "$UPLOAD_TOOL" ] && \
+        log_msg debug "Transport version: $(transport_version "$UPLOAD_TOOL")"
+    effective_proxy "$scheme" "$UPLOAD_TOOL"
+    if [ -n "$EFFECTIVE_PROXY_OUT" ]; then
+        log_msg info "Proxy: $EFFECTIVE_PROXY_OUT (from the environment as ${UPLOAD_TOOL:-curl} reads it; the endpoint above is the request target, not the peer)"
+    else
+        log_msg debug "Proxy: none"
+    fi
+    # An exported THUNDERSTORM_PORT is deliberately ignored -- letting the environment redirect
+    # evidence is wrong for a forensic collector -- but silently ignoring it is worse than saying so.
+    if [ -n "${THUNDERSTORM_PORT_ENV:-}" ] && [ "$THUNDERSTORM_PORT_ENV" != "$THUNDERSTORM_PORT" ]; then
+        log_msg warn "THUNDERSTORM_PORT='$THUNDERSTORM_PORT_ENV' is set in the environment and was IGNORED; the port is $THUNDERSTORM_PORT (use --port)"
+    fi
+    if [ -n "${THUNDERSTORM_SERVER_ENV:-}" ] && [ "$THUNDERSTORM_SERVER_ENV" != "$THUNDERSTORM_SERVER" ]; then
+        log_msg warn "THUNDERSTORM_SERVER='$THUNDERSTORM_SERVER_ENV' is set in the environment and was IGNORED; the server is $THUNDERSTORM_SERVER (use --server)"
+    fi
     log_msg info "Source: $SOURCE_NAME"
     # Each folder quoted: an unquoted, space-joined list is ambiguous once a name has a space.
     _folders=""
@@ -3048,14 +3684,12 @@ prepare_run() {
     # otherwise its absence surfaces as a generic "cannot create temp file" runtime error
     # instead of a named missing dependency).
     if ! command -v mkdir >/dev/null 2>&1; then
-        log_msg error "'mkdir' is not available; cannot create the private work directory"
-        exit 3
+        die_runtime 3 "'mkdir' is not available; cannot create the private work directory"
     fi
     # find does the entire discovery; without it every root would fail the same way and be
     # reported as "could not be read" — a named missing dependency (exit 3) instead.
     if ! command -v find >/dev/null 2>&1; then
-        log_msg error "'find' is not available; cannot enumerate files"
-        exit 3
+        die_runtime 3 "'find' is not available; cannot enumerate files"
     fi
     # Fast policy counting: counting NUL separators with tr|wc beats a per-record read loop by
     # several times, stays NUL-exact (a newline in a filename cannot inflate it), and is not a new
@@ -3073,26 +3707,48 @@ prepare_run() {
     # most common failure) left /tmp/thunderstorm.work.<pid> behind on the host, and a
     # --dry-run on an unusable TMPDIR reported "Found 0 candidates" with exit 0.
     if ! ensure_work_dir; then
-        log_msg error "Cannot create the private work directory under '${TMPDIR:-/tmp}' (not writable, or a directory of that name exists and is not ours)"
-        exit 1
+        die_runtime 1 "Cannot create the private work directory under '${TMPDIR:-/tmp}' (not writable, or a directory of that name exists and is not ours)"
     fi
+    # wget's rc files are switched off the way -q does it for curl: WGETRC names an EMPTY regular
+    # file (an unreadable target such as /dev/null makes wget exit 1). ~/.wgetrc is thereby ignored;
+    # /etc/wgetrc, the administrator's, still applies -- README says so.
+    WGETRC="$TS_WORK_DIR/wgetrc"
+    if : > "$WGETRC" 2>/dev/null; then
+        export WGETRC
+    else
+        unset WGETRC
+        log_msg warn "Could not create an empty WGETRC in the work directory; wget will read ~/.wgetrc"
+    fi
+    log_msg debug "Transport rc files are not read (curl -q; WGETRC${WGETRC:+=$WGETRC})"
 
     # Send collection begin marker; capture scan_id if server returns one
     if [ "$DRY_RUN" -eq 0 ]; then
-        if ! detect_upload_tool; then
-            log_msg error "Neither 'curl' nor 'wget' is installed; unable to upload samples"
-            exit 3
+        if [ -z "$UPLOAD_TOOL" ]; then
+            die_runtime 3 "Neither 'curl' nor 'wget' is installed; unable to upload samples"
         fi
+        if [ "$UPLOAD_TOOL" = "wget" ] && [ "$WGET_IS_MINIMAL" -eq 1 ]; then
+            # It cannot refuse redirects (--max-redirect) or stop its own retries (--tries), so it
+            # cannot keep this collector's guarantees; a raw usage dump is not an error message.
+            die_runtime 3 "the wget found is a minimal build (busybox?) that cannot refuse redirects or bound its own retries; install GNU wget or curl"
+        fi
+        # Settle whether the server is there BEFORE reading a single file.
+        if ! server_preflight "$base_url"; then
+            if [ "$PREFLIGHT_ANSWERED" -eq 1 ]; then
+                die_runtime 1 "No usable Thunderstorm server at ${base_url} — ${PREFLIGHT_ERR_OUT}"
+            fi
+            die_runtime 1 "Cannot reach a Thunderstorm server at ${base_url} — ${PREFLIGHT_ERR_OUT}"
+        fi
+        log_msg debug "Server answered on ${base_url}/api/status"
         local _begin_resp_file
         local _begin_rc=0
-        _begin_resp_file="$(mktemp_portable)" || { log_msg error "Cannot create temp file"; exit 1; }
+        _begin_resp_file="$(mktemp_portable)" || die_runtime 1 "Cannot create temp file"
         collection_marker "$base_url" "begin" "" "" > "$_begin_resp_file"
         _begin_rc=$?
         SCAN_ID="$(cat "$_begin_resp_file" 2>/dev/null)"
         # If the begin marker failed after retry, the server is unreachable — fatal error
         if [ "$_begin_rc" -ne 0 ]; then
-            log_msg error "Cannot connect to Thunderstorm server at ${base_url} (begin marker failed after retry)"
-            exit 1
+            # The preflight has already connected by now, so this is never "cannot connect".
+            die_runtime 1 "Thunderstorm server at ${base_url} answered on /api/status but the begin marker to /api/collection failed after retry${MARKER_ERR_OUT:+ — $MARKER_ERR_OUT}"
         fi
         BEGIN_MARKER_SENT=1
         if [ -n "$SCAN_ID" ]; then

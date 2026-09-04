@@ -799,6 +799,13 @@ while [ $# -gt 0 ]; do
 done
 
 case "$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+        [ -n "$outfile" ] && printf '{"scanned_samples":0}' > "$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "$hdr"
         [ -n "$outfile" ] && : > "$outfile"
@@ -1193,7 +1200,10 @@ EOF
 
     # Server unreachable is a RUNTIME error => 1; 2 is reserved for usage/config errors.
     assert_eq "exit code" "1" "$rc" || return 1
-    assert_contains "begin marker failure message" "begin marker failed after retry" "$out" || return 1
+    # The preflight reaches this before the begin marker does, so the message names the
+    # unreachable server and the transport's reason rather than the marker.
+    assert_contains "unreachable server is fatal" "Cannot reach a Thunderstorm server" "$out" || return 1
+    assert_contains "and the cause is named" "refused" "$out" || return 1
 }
 
 # ── 30. Wget 404 on /api/collection stays non-fatal ─────────────────────────
@@ -1204,6 +1214,13 @@ test_wget_collection_marker_404_nonfatal() {
     local fakebin; fakebin="$(create_fake_tool_path wget_marker_404)"
     cat > "$fakebin/wget" <<'EOF'
 #!/bin/sh
+# The collector asks for /api/status before it reads any file; answer it so this test still
+# reaches the collection marker it is about. Everything else still 404s.
+for a in "$@"; do
+    case "$a" in
+        */api/status) printf '  HTTP/1.1 200 OK\n' >&2; exit 0 ;;
+    esac
+done
 printf '  HTTP/1.1 404 Not Found\n' >&2
 exit 8
 EOF
@@ -1219,7 +1236,7 @@ EOF
 
     assert_eq "exit code" "0" "$rc" || return 1
     assert_contains "optional marker warning" "not supported (HTTP 404)" "$out" || return 1
-    assert_not_contains "marker not fatal" "begin marker failed after retry" "$out" || return 1
+    assert_not_contains "marker not fatal" "failed after retry" "$out" || return 1
 }
 
 # ── 31. Redirect upload responses are rejected ───────────────────────────────
@@ -1246,6 +1263,13 @@ while [ $# -gt 0 ]; do
 done
 
 case "$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+        [ -n "$outfile" ] && printf '{"scanned_samples":0}' > "$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "$hdr"
         [ -n "$outfile" ] && : > "$outfile"
@@ -1579,6 +1603,13 @@ while [ \$# -gt 0 ]; do
     esac
 done
 case "\$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"scanned_samples":0}' > "\$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
         [ -n "\$outfile" ] && : > "\$outfile"
@@ -1644,6 +1675,13 @@ while [ \$# -gt 0 ]; do
     esac
 done
 case "\$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"scanned_samples":0}' > "\$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
         [ -n "\$outfile" ] && : > "\$outfile"
@@ -1697,6 +1735,13 @@ while [ \$# -gt 0 ]; do
     esac
 done
 case "\$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"scanned_samples":0}' > "\$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
         [ -n "\$outfile" ] && : > "\$outfile"
@@ -1825,6 +1870,13 @@ while [ \$# -gt 0 ]; do
     esac
 done
 case "\$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"scanned_samples":0}' > "\$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
         [ -n "\$outfile" ] && : > "\$outfile"
@@ -2404,6 +2456,13 @@ while [ \$# -gt 0 ]; do
     esac
 done
 case "\$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"scanned_samples":0}' > "\$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
         [ -n "\$outfile" ] && : > "\$outfile"
@@ -2417,7 +2476,10 @@ case "\$endpoint" in
             rm -f "$d/aaa.bin" "$d/zzz.bin"
         fi
         [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
-        [ -n "\$outfile" ] && printf '{"id":1}' > "\$outfile"
+        # The upload path captures the response body with a shell redirect of THIS script's
+        # stdout, not with -o (only the marker and the preflight use -o). The acknowledgement
+        # the collector now requires must therefore be printed, not written to the -o target.
+        printf '{"id":1}'
         ;;
 esac
 exit 0
@@ -2780,6 +2842,13 @@ while [ \$# -gt 0 ]; do
     esac
 done
 case "\$endpoint" in
+    */api/status)
+        # The collector asks for this before it reads a single file; answer it so the
+        # test still reaches the upload path below.
+        [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+        [ -n "\$outfile" ] && printf '{"scanned_samples":0}' > "\$outfile"
+        exit 0
+        ;;
     */api/collection)
         [ -n "\$hdr" ] && printf 'HTTP/1.1 204 No Content\r\n\r\n' > "\$hdr"
         [ -n "\$outfile" ] && : > "\$outfile"
@@ -2794,7 +2863,10 @@ case "\$endpoint" in
             chmod 0111 "$d/sub"
         fi
         [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
-        [ -n "\$outfile" ] && printf '{"id":1}' > "\$outfile"
+        # The upload path captures the response body with a shell redirect of THIS script's
+        # stdout, not with -o (only the marker and the preflight use -o). The acknowledgement
+        # the collector now requires must therefore be printed, not written to the -o target.
+        printf '{"id":1}'
         ;;
 esac
 exit 0

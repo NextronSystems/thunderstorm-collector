@@ -99,6 +99,54 @@ Use this collector for incident response and triage on modern Linux or macOS sys
 - Symlink-aware collection: physical walk always; opt-in `--follow-symlinks` for file targets (see [Symbolic Links](#symbolic-links)).
 - Optional log file and syslog output.
 
+## Network Behaviour
+
+What the collector does on the wire, and what its log lines can and cannot vouch for.
+
+- **Reachability gate, not identity.** Before a single file is read the collector asks
+  `GET /api/status` and requires a 2xx from the transport itself (a 2xx status line left behind by
+  a proxy's `CONNECT` reply does not count). A 500/502/503/504, 408 or 429 there is retried once, honouring
+  `Retry-After`; a 3xx names the `Location` and says the collector never follows redirects; 401/403
+  say the peer wants credentials this collector cannot supply; 407 names the proxy. Passing the gate
+  proves only that *something* answers there.
+- **Every upload must be answered as a Thunderstorm answers.** `/api/checkAsync` acknowledges a
+  sample with `{"id":N}` (the reference stub spells the id as a string; both are accepted, an empty
+  id is not). `/api/check` (`--sync`) answers `null` for a clean file or a JSON array of assessments.
+  A 2xx carrying anything else -- `{}`, HTML, an empty body -- is **not** a submitted file. Neither
+  shape is in a published API contract, so a server change here fails **closed**: files are
+  withheld and the run exits 4; it never fails open.
+- **Withholding.** If the very first upload of a run is answered that way, the collector stops
+  transmitting: the one file whose bytes reached the peer is named in the run-level error line as
+  *transmitted and not acknowledged*, every later file is *withheld without transmitting*, all are
+  counted as failed, the end marker is still attempted, exit 4. A peer that has already acknowledged
+  uploads is **not** poisoned by one odd answer (a proxy's HTML error page); that attempt is retried
+  like any other failure.
+- **Redirects are never followed**, on either transport (`curl` has no `-L`; `wget` runs with
+  `--max-redirect=0`). A followed redirect turns the POST into a body-less GET.
+- **Configuration files are not read.** `curl` runs with `-q` (no `~/.curlrc`, `$CURL_HOME`,
+  `$XDG_CONFIG_HOME/curlrc`); `wget` runs with `WGETRC` pointing at an empty file in the private
+  work directory (`~/.wgetrc` ignored; the administrator's `/etc/wgetrc` still applies). A file on
+  the host must not decide where evidence goes -- the same rule under which an exported
+  `THUNDERSTORM_SERVER` or `THUNDERSTORM_PORT` is ignored and announced as ignored.
+- **The `Proxy:` line models the transport that actually runs.** `curl` reads `http_proxy` (lower
+  case only), `https_proxy`/`HTTPS_PROXY`, falls back to `all_proxy`/`ALL_PROXY`, and honours
+  `no_proxy`/`NO_PROXY` (`*` = everything, a leading dot is ignored, matching is case-insensitive);
+  `wget` reads `http_proxy`, `https_proxy` and `no_proxy` in lower case only and has no `*` rule.
+  Credentials in a proxy URL are redacted in every sink, including the transports' own diagnostics.
+  CIDR entries in `no_proxy` are not evaluated.
+- **TLS.** `--ca-cert` *replaces* the trust store under `curl` but only *adds* to the system store
+  under `wget`; the `Transport:` line says which applies. `--insecure` disables verification on both.
+- **Timeouts.** `curl`: 10 s connect, 300 s total per upload. `wget`: 10 s DNS, 10 s connect,
+  300 s idle read -- wget has no total-transfer bound, so a peer that trickles a byte every few
+  minutes can hold one upload open; that is the one place the two transports are not equivalent.
+- **Back-pressure.** A 503 is retried up to five times outside the normal retry budget. A numeric
+  `Retry-After` is honoured up to a cap of 120 s and the log states both the requested and the
+  applied value; an HTTP-date or a missing header is "unknown" and the ordinary exponential backoff
+  applies -- the body is never re-sent immediately.
+- **busybox `wget` is refused** with exit 3 and a named message: it cannot disable redirect
+  following or its own retries, so it cannot be made to keep the guarantees above. Install GNU
+  `wget` or `curl`.
+
 ## Limitations
 
 - Not compatible with plain `sh`, `dash`, or BusyBox `ash`; use the ash collector for those systems.
