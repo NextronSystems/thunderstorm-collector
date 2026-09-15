@@ -45,495 +45,21 @@ COLLECTOR="$REPO_ROOT/scripts/bash/thunderstorm-collector.sh"
 
 [ -r "$COLLECTOR" ] || { echo "ERROR: collector not readable at $COLLECTOR" >&2; exit 1; }
 
-# ── Live-tier configuration ───────────────────────────────────────────────────
 
-LIVE_HOST="${THUNDERSTORM_PORT_LIVE_HOST:-}"
-LIVE_PORT="${THUNDERSTORM_PORT_LIVE_PORT:-443}"
-LIVE_TLS="${THUNDERSTORM_PORT_LIVE_TLS:-1}"
-LIVE_INSECURE="${THUNDERSTORM_PORT_LIVE_INSECURE:-1}"
-LIVE_OPEN_WRONG="${THUNDERSTORM_PORT_LIVE_OPEN_WRONG:-80}"
-LIVE_REFUSED="${THUNDERSTORM_PORT_LIVE_REFUSED:-8080}"
-LIVE_FILTERED="${THUNDERSTORM_PORT_LIVE_FILTERED:-8443}"
-LIVE_READY=0
-
-# TLS flags as an array: an argument list is never a string (CLAUDE.md §2).
-declare -a LIVE_TLS_OPTS=()
-[ "$LIVE_TLS" = "1" ] && LIVE_TLS_OPTS+=("--ssl")
-[ "$LIVE_INSECURE" = "1" ] && LIVE_TLS_OPTS+=("--insecure")
-
-# ── Output ────────────────────────────────────────────────────────────────────
-
-if [ -t 1 ]; then
-    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
-    BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
-else
-    RED=""; GREEN=""; YELLOW=""; BOLD=""; DIM=""; RESET=""
-fi
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-TESTS_SKIPPED=0
-FAILED_NAMES=""
-
-# ── Scratch state ─────────────────────────────────────────────────────────────
-
-WORK=""
-FIXTURES=""
-ONEFILE=""
-declare -a LISTENER_PIDS=()
-LISTENER_PORT_OUT=""   # set by start_listener; never read it through $( )
-LISTENER_LOG_OUT=""    # that listener's stderr: "ready", then one "REQ <method> <path>" per request
-
-cleanup() {
-    local _rc=$?
-    local _pid
-    for _pid in ${LISTENER_PIDS[@]+"${LISTENER_PIDS[@]}"}; do
-        kill "$_pid" 2>/dev/null || :
-        wait "$_pid" 2>/dev/null || :
-    done
-    if [ -n "$WORK" ]; then
-        rm -rf -- "$WORK" 2>/dev/null || :
-    fi
-    exit "$_rc"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/ts-port-tests.XXXXXX")" || {
-    echo "ERROR: cannot create a work directory" >&2; exit 1; }
-
-# ── Assertions ────────────────────────────────────────────────────────────────
-
-assert_eq() {
-    local label="$1" expected="$2" actual="$3"
-    if [ "$expected" != "$actual" ]; then
-        printf "    ${RED}FAIL${RESET}: %s — expected '%s', got '%s'\n" "$label" "$expected" "$actual"
-        return 1
-    fi
-}
-
-assert_contains() {
-    local label="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) return 0 ;;
-    esac
-    printf "    ${RED}FAIL${RESET}: %s — output does not contain '%s'\n" "$label" "$needle"
-    printf "    ${DIM}got: %s${RESET}\n" "$(printf '%s' "$haystack" | head -3 | tr '\n' '|')"
-    return 1
-}
-
-assert_not_contains() {
-    local label="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*)
-            printf "    ${RED}FAIL${RESET}: %s — output unexpectedly contains '%s'\n" "$label" "$needle"
-            return 1
-            ;;
-    esac
-}
-
-# assert_le -- numeric upper bound, for the wall-clock budgets. A wrong port that
-# starts hanging must fail the suite, not merely make it slow.
-assert_le() {
-    local label="$1" max="$2" actual="$3"
-    case "$actual" in ''|*[!0-9]*)
-        printf "    ${RED}FAIL${RESET}: %s — expected a number, got '%s'\n" "$label" "$actual"; return 1 ;;
-    esac
-    if [ "$actual" -gt "$max" ]; then
-        printf "    ${RED}FAIL${RESET}: %s — expected <= %s, got %s\n" "$label" "$max" "$actual"
-        return 1
-    fi
-}
-
-# ── Test dispatch ─────────────────────────────────────────────────────────────
-
-run_test() {
-    local name="$1"
-    if [ -n "${TEST_FILTER:-}" ] && ! printf '%s\n' "$name" | grep -q "$TEST_FILTER"; then
-        return 0
-    fi
-    TESTS_RUN=$((TESTS_RUN + 1))
-    printf "  ${BOLD}%-58s${RESET}" "$name"
-    local _rc=0
-    "$name" || _rc=$?
-    # 77 = skipped. A test whose preconditions are absent must never report PASS:
-    # the live tier is unavailable on most machines, and a suite that turns that
-    # into a green tick is worse than one that does not run at all.
-    if [ "$_rc" -eq 77 ]; then
-        printf " ${YELLOW}SKIP${RESET}\n"
-        TESTS_RUN=$((TESTS_RUN - 1))
-        TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
-        return 0
-    fi
-    if [ "$_rc" -eq 0 ]; then
-        printf " ${GREEN}PASS${RESET}\n"
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    else
-        printf " ${RED}FAIL${RESET}\n"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        FAILED_NAMES="$FAILED_NAMES  - $name
-"
-    fi
-}
-
-section() {
-    printf "\n${BOLD}%s${RESET}\n" "$1"
-}
-
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-# make_fixtures -- the tree every upload case scans. Deliberately tiny: the
-# subject under test is the port, so the walk must not dominate the wall-clock
-# budgets. Every file is benign and generated here; nothing is committed.
-make_fixtures() {
-    FIXTURES="$WORK/fixtures"
-    mkdir -p "$FIXTURES/nested/deep" || return 1
-    printf 'benign port-audit fixture 0123456789 abcdefghijklmnopqrstuvwxyz\n' > "$FIXTURES/plain.txt"
-    printf 'fixture with spaces in the name\n' > "$FIXTURES/name with spaces.txt"
-    printf 'fixture with a non-ascii name\n' > "$FIXTURES/unicode-\xc3\xbc\xc3\xaf.txt"
-    printf 'nested fixture, proves the walk actually ran\n' > "$FIXTURES/nested/deep/file.txt"
-    # A byte-exact binary part, so the happy path proves multipart is binary-safe
-    # on the wire and not merely that the exit code was 0.
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import sys; sys.stdout.buffer.write(bytes(range(256)))' > "$FIXTURES/binary.bin"
-    else
-        head -c 256 /dev/urandom > "$FIXTURES/binary.bin" 2>/dev/null || printf 'binary\n' > "$FIXTURES/binary.bin"
-    fi
-
-    # Single-file tree for the timing cases: wall-clock must measure the port
-    # behaviour, never the walk.
-    ONEFILE="$WORK/onefile"
-    mkdir -p "$ONEFILE" || return 1
-    printf 'single fixture for the timing cases\n' > "$ONEFILE/only.txt"
-}
-
-FIXTURE_COUNT=5
-
-# ── Collector runner ──────────────────────────────────────────────────────────
-
-# Results of the last run_collector, as globals rather than a parsed string: the
-# output is multi-line and command substitution would strip trailing newlines.
-CO_OUT=""
-CO_RC=0
-CO_SECS=0
-
-# run_collector -- run the collector from a private CWD (so a run that writes
-# ./thunderstorm.log cannot litter the repo) and record output, status and
-# elapsed seconds.
-run_collector() {
-    local _t0 _t1
-    _t0="$(date +%s)"
-    CO_OUT="$( cd "$WORK/cwd" && bash "$COLLECTOR" "$@" 2>&1 )" && CO_RC=0 || CO_RC=$?
-    _t1="$(date +%s)"
-    CO_SECS=$(( _t1 - _t0 ))
-}
-
-# co_stat -- read one key=value counter off the run summary. Anchored on a word
-# boundary: an unanchored 'skipped=' also matches inside 'links_skipped='.
-co_stat() {
-    printf '%s\n' "$CO_OUT" | grep -oE "(^|[[:space:]])$1=[0-9]+" | tail -1 | cut -d= -f2
-}
-
-# co_endpoint -- the API endpoint the run actually built.
-co_endpoint() {
-    printf '%s\n' "$CO_OUT" | grep -m1 'API endpoint:' | sed 's/.*API endpoint: //'
-}
-
-# ── Local listeners ───────────────────────────────────────────────────────────
-
-# pick_port -- a free TCP port. Same approach as run_tests.sh:114-128.
-pick_port() {
-    local port
-    if command -v python3 >/dev/null 2>&1; then
-        port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || true)"
-        if [ -n "$port" ] && [ "$port" -ge 1 ] 2>/dev/null; then
-            printf '%s\n' "$port"
-            return 0
-        fi
-    fi
-    if command -v shuf >/dev/null 2>&1; then
-        shuf -i 10000-60000 -n 1
-    else
-        printf '%s\n' "$(( RANDOM % 50000 + 10000 ))"
-    fi
-}
-
-have_python3() { command -v python3 >/dev/null 2>&1; }
-
-LISTENER_SRC=""
-
-# write_listener_src -- one python3 helper serving every shape the real server
-# cannot provide. Written once, into the work directory.
-write_listener_src() {
-    LISTENER_SRC="$WORK/listener.py"
-    cat > "$LISTENER_SRC" <<'PY'
-"""Test listeners for the collector's port suite. One mode per network shape."""
-import socket
-import sys
-import threading
-
-MODE = sys.argv[1]
-PORT = int(sys.argv[2])
-ARG = sys.argv[3] if len(sys.argv) > 3 else ""
-STATE = {"uploads": 0, "status": 0}
-LOCK = threading.Lock()
-
-
-def send(conn, status, body=b"", extra=b""):
-    conn.sendall(b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\n" + extra
-                 + b"Content-Length: %d\r\n\r\n" % len(body) + body)
-
-HTTP_404 = (b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n"
-            b"Content-Length: 19\r\n\r\n404 page not found\n")
-
-
-def handle(conn):
-    try:
-        if MODE == "silent":
-            # Accept and never answer: bounded by --max-time, not --connect-timeout.
-            while conn.recv(65536):
-                pass
-            return
-        if MODE == "nonhttp":
-            # An SSH banner, then hold. Does the HTTP status parser misread it?
-            conn.sendall(b"SSH-2.0-OpenSSH_9.2p1\r\n")
-            conn.recv(65536)
-            return
-        req = conn.recv(65536)
-        first = req.split(b"\r\n")[0].decode("latin-1", "replace")
-        sys.stderr.write("REQ " + first + "\n")
-        sys.stderr.flush()
-        # Modes that are meant to be REACHABLE answer the collector's /api/status preflight, so
-        # the test can still exercise the upload path behind it. http404 deliberately does not:
-        # it is the "open port, wrong application" case, and failing the preflight is the point.
-        if MODE in ("upload404", "redirect", "hdrforge", "nostatus", "ackstr", "ackempty", "syncnull",
-                    "ackthenhtml", "radate", "ackpretty", "up500") and b"/api/status" in req.split(b"\r\n")[0]:
-            body = b'{"scanned_samples":0,"queued_async_requests":0}'
-            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                         b"Content-Length: %d\r\n\r\n" % len(body) + body)
-            return
-        if MODE in ("http404", "upload404"):
-            conn.sendall(HTTP_404)
-        elif MODE == "yes200":
-            body = b"{}"
-            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                         b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        elif MODE == "hdrforge":
-            # A healthy Thunderstorm-shaped answer whose HEADER VALUE contains a status line.
-            # An unanchored status parser read this as a 500.
-            if b"/api/collection" in req.split(b"\r\n")[0]:
-                conn.sendall(HTTP_404)
-            else:
-                body = b'{"id":7}'
-                conn.sendall(b"HTTP/1.1 200 OK\r\nX-Upstream: HTTP/1.1 500 Internal Server Error\r\n"
-                             b"Content-Type: application/json\r\n"
-                             b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        elif MODE == "ackstr":
-            # The reference Go stub's spelling: {"id":"<uuid>"}. Requiring digits here rejected
-            # every upload against CI while passing against production.
-            if b"/api/collection" in req.split(b"\r\n")[0]:
-                conn.sendall(HTTP_404)
-            else:
-                body = b'{"status":"ok","id":"3f2a9c1e"}'
-                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                             b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        elif MODE == "ackempty":
-            # Present but empty: not an acknowledgement.
-            if b"/api/collection" in req.split(b"\r\n")[0]:
-                conn.sendall(HTTP_404)
-            else:
-                body = b'{"id":""}'
-                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                             b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        elif MODE == "nostatus":
-            # Reachable (status answers 200, the marker 404s), but a sample upload gets bytes
-            # with no status line at all: the collector must fail closed, never count it sent.
-            if b"/api/collection" in req.split(b"\r\n")[0]:
-                conn.sendall(HTTP_404)
-            else:
-                conn.sendall(b'{"id":1}\n')
-        elif MODE == "connect200":
-            # A forward proxy that accepts CONNECT and then drops the tunnel. curl -D keeps this
-            # status line in the same file as the origin's; the origin never speaks.
-            conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
-        elif MODE == "status407":
-            send(conn, b"407 Proxy Authentication Required", b"", b"Proxy-Authenticate: Basic realm=\"corp\"\r\n")
-        elif MODE == "redirectstatus":
-            send(conn, b"302 Found", b"", b"Location: https://127.0.0.1:443/api/status\r\n")
-        elif MODE == "syncnull":
-            # /api/check on the real server: `null` for a clean file.
-            if b"/api/collection" in first.encode():
-                conn.sendall(HTTP_404)
-            else:
-                send(conn, b"200 OK", b"null")
-        elif MODE == "ackpretty":
-            if b"/api/collection" in first.encode():
-                conn.sendall(HTTP_404)
-            else:
-                send(conn, b"200 OK", b'\n{\n  "id": 5\n}\n')
-        elif MODE == "up500":
-            if b"/api/collection" in first.encode():
-                conn.sendall(HTTP_404)
-            else:
-                send(conn, b"500 Internal Server Error", b"boom")
-        elif MODE == "radate":
-            # 503 with an HTTP-date Retry-After: allowed by RFC 9110, not a number.
-            if b"/api/collection" in first.encode():
-                conn.sendall(HTTP_404)
-            else:
-                send(conn, b"503 Service Unavailable", b"", b"Retry-After: Fri, 04 Sep 2026 10:00:00 GMT\r\n")
-        elif MODE == "ackthenhtml":
-            # Acknowledges every upload except the THIRD, which gets a 200 HTML error page.
-            if b"/api/collection" in first.encode():
-                conn.sendall(HTTP_404)
-            else:
-                with LOCK:
-                    STATE["uploads"] += 1
-                    k = STATE["uploads"]
-                if k == 3:
-                    send(conn, b"200 OK", b"<html>Service temporarily unavailable</html>")
-                else:
-                    send(conn, b"200 OK", b'{"id":%d}' % k)
-        elif MODE == "status503once":
-            # The first /api/status is a 503 with Retry-After: 1; everything after is healthy.
-            if b"/api/status" in first.encode():
-                with LOCK:
-                    STATE["status"] += 1
-                    n = STATE["status"]
-                if n == 1:
-                    send(conn, b"503 Service Unavailable", b"", b"Retry-After: 1\r\n")
-                else:
-                    send(conn, b"200 OK", b"{}")
-            elif b"/api/collection" in first.encode():
-                conn.sendall(HTTP_404)
-            else:
-                send(conn, b"200 OK", b'{"id":1}')
-        elif MODE == "redirect":
-            body = b"moved\n"
-            conn.sendall(
-                b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:" + ARG.encode()
-                + b"/api/checkAsync\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
-    except OSError:
-        pass
-    finally:
-        try:
-            conn.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        conn.close()
-
-
-srv = socket.socket()
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("127.0.0.1", PORT))
-srv.listen(16)
-sys.stderr.write("ready\n")
-sys.stderr.flush()
-while True:
-    try:
-        c, _ = srv.accept()
-    except OSError:
-        break
-    threading.Thread(target=handle, args=(c,), daemon=True).start()
-PY
-}
-
-# start_listener -- launch one listener and wait until the port answers.
-# Prints the port it is on. Returns 1 if it never came up.
-start_listener() {
-    local mode="$1" extra="${2:-}"
-    local port pid waited
-    LISTENER_PORT_OUT=""
-    port="$(pick_port)"
-    # A fresh log per listener: the same mode may run several times in one suite, and the
-    # readiness grep must not read an earlier instance's "ready". The log also records every
-    # request line, so a test can assert how many requests actually reached the peer.
-    LISTENER_LOG_OUT="$WORK/listener.$mode.$port.log"
-    : > "$LISTENER_LOG_OUT"
-    python3 "$LISTENER_SRC" "$mode" "$port" "$extra" >/dev/null 2>"$LISTENER_LOG_OUT" &
-    pid=$!
-    # Appended in THIS shell: callers must not wrap start_listener in $( ), or the pid lands in
-    # a subshell's copy of the array and the cleanup trap kills nothing.
-    LISTENER_PIDS+=("$pid")
-    waited=0
-    while [ "$waited" -lt 15 ]; do
-        if grep -q ready "$LISTENER_LOG_OUT" 2>/dev/null; then
-            LISTENER_PORT_OUT="$port"
-            return 0
-        fi
-        kill -0 "$pid" 2>/dev/null || return 1
-        sleep 0.2
-        waited=$(( waited + 1 ))
-    done
-    return 1
-}
-
-# wget_only_path -- build a PATH containing the collector's tools but no curl, so
-# the wget transport can be exercised. Uses `type -P` (a real binary) rather than
-# `command -v`, which also resolves functions, aliases and builtins.
-WGET_ONLY_DIR=""
-wget_only_path() {
-    local b t
-    if [ -n "$WGET_ONLY_DIR" ]; then printf '%s\n' "$WGET_ONLY_DIR"; return 0; fi
-    type -P wget >/dev/null 2>&1 || return 1
-    WGET_ONLY_DIR="$WORK/nocurl"
-    mkdir -p "$WGET_ONLY_DIR" || return 1
-    # 'od' is not optional: urlencode (build_query_source -> urlencode) shells out to
-    # 'od -An -tx1' for every character outside the unreserved set, and without it the
-    # character is silently DROPPED from the query string -- so a shim missing od would
-    # test a collector whose --source is quietly mangled.
-    for b in wget find mkdir tr wc date grep sed awk cat rm mv cp id hostname sleep \
-             head tail cut sort uniq stat uname readlink dirname basename mktemp ls \
-             sh bash env touch chmod du seq expr logger od openssl timeout; do
-        t="$(type -P "$b" 2>/dev/null || true)"
-        [ -n "$t" ] && [ -x "$t" ] && ln -sf "$t" "$WGET_ONLY_DIR/$b"
-    done
-    [ -x "$WGET_ONLY_DIR/wget" ] && [ -x "$WGET_ONLY_DIR/find" ] || return 1
-    printf '%s\n' "$WGET_ONLY_DIR"
-}
-
-# posix_grep_path -- a PATH whose `grep` rejects -o, as a non-GNU grep would. The
-# collector's status parser WAS `grep -oE` at three call sites, and `grep` was never
-# detected; it is now pure parameter expansion (http_status_from_headers). This shim pins
-# that a POSIX grep without -o can no longer turn a wrong port into a green run.
-POSIX_GREP_DIR=""
-posix_grep_path() {
-    local b t
-    if [ -n "$POSIX_GREP_DIR" ]; then printf '%s\n' "$POSIX_GREP_DIR"; return 0; fi
-    POSIX_GREP_DIR="$WORK/nogrepo"
-    mkdir -p "$POSIX_GREP_DIR" || return 1
-    for b in bash find mkdir tr wc date sed awk cat rm mv cp id hostname sleep head tail \
-             cut sort uniq stat uname readlink dirname basename mktemp ls sh env touch \
-             chmod du seq expr od curl wget; do
-        t="$(type -P "$b" 2>/dev/null || true)"
-        [ -n "$t" ] && [ -x "$t" ] && ln -sf "$t" "$POSIX_GREP_DIR/$b"
-    done
-    t="$(type -P grep)" || return 1
-    { printf '#!/bin/sh\n'
-      printf '# A POSIX grep: -o is a GNU extension and is refused here.\n'
-      printf 'for a in "$@"; do case "$a" in -*o*) exit 2 ;; esac; done\n'
-      printf 'exec %s "$@"\n' "$t"
-    } > "$POSIX_GREP_DIR/grep.tmp" || return 1
-    # rm before mv: every other entry here is a symlink to a REAL binary, and writing through
-    # one would truncate the system tool (that accident is on record for /usr/bin/find).
-    rm -f "$POSIX_GREP_DIR/grep"
-    mv "$POSIX_GREP_DIR/grep.tmp" "$POSIX_GREP_DIR/grep" || return 1
-    chmod +x "$POSIX_GREP_DIR/grep" || return 1
-    printf '%s\n' "$POSIX_GREP_DIR"
-}
-
-# refused_port -- a port nothing listens on. Bind then close, so the number is
-# known free and loopback answers RST immediately.
-refused_port() {
-    pick_port
-}
+# ── Shared harness ────────────────────────────────────────────────────────────
+# Listeners, assertions, dispatch and fixtures live in one place so that this suite and
+# run_server_tests.sh cannot drift apart. See scripts/tests/lib/harness.sh.
+# shellcheck disable=SC2034  # read by lib/harness.sh when it is sourced below
+HARNESS_NAME="ts-port-tests"
+# shellcheck source=lib/harness.sh
+. "$TESTS_DIR/lib/harness.sh"
 
 # ── Shared expectations ───────────────────────────────────────────────────────
 
-# offline_port -- a dry run against the one-file tree. No socket is opened, so
-# these cases are about parsing, validation and URL composition only.
+# offline_port -- a dry run against the one-file tree, for parsing, validation
+# and URL composition. A REFUSED value never reaches the network. An ACCEPTED
+# one does: a dry run still checks the destination, so 127.0.0.1 is probed and
+# the refusal is reported without being fatal.
 offline_port() {
     run_collector --server 127.0.0.1 --no-log-file --dry-run --no-progress --dir "$ONEFILE" "$@"
 }
@@ -673,8 +199,13 @@ test_c_endpoint_plain()       { run_collector --server ts.example --source SRC -
                                 assert_eq "endpoint" "http://ts.example:8080/api/checkAsync?source=SRC" "$(co_endpoint)"; }
 test_c_endpoint_ssl()         { run_collector --server ts.example --source SRC --no-log-file --dry-run --no-progress --dir "$ONEFILE" --port 443 --ssl
                                 assert_eq "endpoint" "https://ts.example:443/api/checkAsync?source=SRC" "$(co_endpoint)"; }
-test_c_endpoint_sync()        { run_collector --server ts.example --source SRC --no-log-file --dry-run --no-progress --dir "$ONEFILE" --port 443 --ssl --sync
-                                assert_eq "endpoint" "https://ts.example:443/api/check?source=SRC" "$(co_endpoint)"; }
+test_c_endpoint_always_async(){ # There is ONE endpoint. --sync used to select /api/check; the flag is
+                                # gone and the path is a constant, so no combination of flags can move it.
+                                run_collector --server ts.example --source SRC --no-log-file --dry-run --no-progress --dir "$ONEFILE" --port 443 --ssl
+                                assert_eq "endpoint" "https://ts.example:443/api/checkAsync?source=SRC" "$(co_endpoint)" || return 1
+                                run_collector --sync --server ts.example --source SRC --no-log-file --dry-run --no-progress --dir "$ONEFILE"
+                                assert_eq "and --sync is refused outright" 2 "$CO_RC" || return 1
+                                assert_contains "as an unknown option" "Unknown option: --sync" "$CO_OUT"; }
 test_c_endpoint_canonical()   { # The URL carries the canonical port, not the typed spelling.
                                 run_collector --server ts.example --source SRC --no-log-file --dry-run --no-progress --dir "$ONEFILE" --port 08080
                                 assert_eq "endpoint" "http://ts.example:8080/api/checkAsync?source=SRC" "$(co_endpoint)"; }
@@ -686,7 +217,6 @@ test_c_port_always_appended() { # --ssl does NOT imply 443: the port is appended
 
 # ── Axis E — network shape (local listeners) ──────────────────────────────────
 
-require_python3() { have_python3 || return 77; }
 
 test_e_refused_is_fast()      { local p
                                 p="$(refused_port)"
@@ -700,12 +230,21 @@ test_e_refused_is_fast()      { local p
                                 # Aborting at the preflight means no scan and no summary line at all.
                                 assert_not_contains "never reached the scan" "Run completed" "$CO_OUT"; }
 
-test_e_dry_run_never_connects() { local p
+test_e_dry_run_checks_the_destination() { # INVERTED, deliberately. This test used to assert that a
+                                # dry run makes "no connection attempt" -- which meant
+                                # `--dry-run --server <unreachable>` exited 0 having said nothing
+                                # about the destination the operator had just named. A dry run is now
+                                # a real run minus the TRANSMISSION: the check is a GET that carries
+                                # no evidence, so it runs, and its verdict is reported.
+                                local p
                                 p="$(refused_port)"
                                 run_collector --server 127.0.0.1 --port "$p" --no-log-file --dry-run --no-progress --dir "$ONEFILE"
-                                assert_eq "dry-run ignores an unreachable port" 0 "$CO_RC" || return 1
-                                assert_not_contains "no connection attempt" "Cannot reach" "$CO_OUT" || return 1
-                                assert_contains "says so" "Dry-run mode: skipping server connection" "$CO_OUT"; }
+                                assert_contains "the unreachable port is reported" "Cannot reach" "$CO_OUT" || return 1
+                                assert_contains "with what a real run would have done" "a real run would stop here" "$CO_OUT" || return 1
+                                # Reported, not fatal: a dry run that aborts cannot show what would
+                                # have been sent, which is the question it is asked.
+                                assert_eq "and the preview still completes" 0 "$CO_RC" || return 1
+                                assert_contains "with the preview" "would submit" "$CO_OUT"; }
 
 test_e_wrong_app_fails_fast()   { # REGRESSION for H1 (was a characterisation test).
                                 # A port that is open but serves a different application used to
@@ -763,9 +302,18 @@ test_e_permissive_service_passes() { # (was a CHARACTERISATION test for P0; now 
                                 # every upload with {"id":N}; a peer that does not is not a
                                 # Thunderstorm, and after its first unacknowledged 2xx nothing more
                                 # is sent to it.
+                                #
+                                # ROUND 5 CHANGED THE PEER, not the claim. The crude impostor --
+                                # 2xx to literally everything, i.e. yes200 -- is now stopped one
+                                # layer earlier, by the preflight requiring /api/status to be a
+                                # Thunderstorm status document, so it never reaches an upload.
+                                # ackempty is the impostor that still gets past that gate: a
+                                # correct status page, then {"id":""} to uploads. This test is the
+                                # SECOND layer, and it is still needed -- the two together are the
+                                # point.
                                 require_python3 || return 77
                                 local p log
-                                start_listener yes200 || return 1; p="$LISTENER_PORT_OUT"; log="$LISTENER_LOG_OUT"
+                                start_listener ackempty || return 1; p="$LISTENER_PORT_OUT"; log="$LISTENER_LOG_OUT"
                                 run_collector --server 127.0.0.1 --port "$p" --no-log-file --no-progress --dir "$FIXTURES"
                                 assert_eq "a run against an impostor is a partial failure" 4 "$CO_RC" || return 1
                                 assert_eq "nothing is counted submitted" 0 "$(co_stat submitted)" || return 1
@@ -775,27 +323,42 @@ test_e_permissive_service_passes() { # (was a CHARACTERISATION test for P0; now 
                                 # the peer. It names that file, and counts the rest as withheld without transmitting.
                                 assert_contains "the transmitted file is named as transmitted" "was transmitted to it and not acknowledged" "$CO_OUT" || return 1
                                 assert_contains "and the rest as withheld" "$((FIXTURE_COUNT - 1)) further file(s) were withheld without transmitting" "$CO_OUT" || return 1
-                                assert_eq "exactly ONE upload reached the impostor" 1 "$(grep -c 'REQ POST /api/checkAsync' "$log")"; }
+                                assert_eq "exactly ONE upload reached the impostor" 1 "$(grep -c 'REQ POST /api/checkAsync' "$log")" || return 1
+                                # Withholding used to be half-applied: the file BODIES were withheld
+                                # and then the END MARKER handed the same peer the host's source
+                                # name (the hostname, by default) and the run's full statistics.
+                                # Either the peer is a Thunderstorm or it is not.
+                                assert_contains "the withheld end marker is reported" "The end marker was NOT sent" "$CO_OUT" || return 1
+                                assert_eq "and exactly one marker reached it -- the begin marker, sent before it was judged" \
+                                    1 "$(grep -c 'REQ POST /api/collection' "$log")"; }
 
-test_e_dry_run_counts_unsent()  { # CHARACTERISATION TEST for an OPEN finding (report: P4).
-                                # CLAUDE.md §3 requires a dry-run summary to be unmistakably distinct
-                                # from a real one and forbids incrementing success counters when
-                                # nothing was sent. The summary line reports submitted=N regardless.
+test_e_dry_run_never_claims_a_submission() { # WAS a characterisation test for OPEN finding P4,
+                                # now pins its fix. CLAUDE.md 3 requires a dry-run summary to be
+                                # unmistakably distinct from a real one and forbids claiming a
+                                # success when nothing was sent; the line reported submitted=N
+                                # regardless, so a dry run's log was byte-identical to a real
+                                # collection's. The COUNT is unchanged -- a dry run must show what a
+                                # real run would send -- and the KEY and the headline now say what
+                                # actually happened.
                                 run_collector --server 127.0.0.1 --port 8080 --no-log-file --no-progress --dry-run --dir "$FIXTURES"
                                 assert_eq "dry run is clean" 0 "$CO_RC" || return 1
-                                assert_eq "counts files it never sent" "$FIXTURE_COUNT" "$(co_stat submitted)" || return 1
-                                # The only thing that marks the run is a separate header line.
-                                assert_contains "only the header says so" "Dry-run mode enabled" "$CO_OUT"; }
+                                assert_eq "the same count the operator came for" "$FIXTURE_COUNT" "$(co_stat would_submit)" || return 1
+                                assert_eq "and nothing is called submitted" "" "$(co_stat submitted)" || return 1
+                                assert_contains "the summary cannot be mistaken for a real run" "Dry-run completed" "$CO_OUT"; }
 
-test_c_trailing_slash_drops_port() { # CHARACTERISATION TEST for an OPEN finding (report: P2).
-                                # A trailing slash on --server puts the port in the URL PATH, so the
-                                # transport falls back to the scheme's default port and --port is
-                                # silently ignored. Fixing this belongs to the --server audit; the
-                                # consequence is squarely --port's, so it is pinned here.
+test_c_trailing_slash_refused() { # WAS a characterisation test for an open finding (report: P2),
+                                # now pins its fix. A trailing slash on --server used to put the port
+                                # in the URL PATH, so the transport fell back to the scheme's default
+                                # port while the log printed "Port: 8080" as fact. Measured before the
+                                # fix: with --port 41791 a listener on port 80 received the evidence
+                                # and the run exited 0 submitted=1. --server now takes a host only.
                                 run_collector --server ts.example/ --source SRC --no-log-file --dry-run --no-progress --dir "$ONEFILE" --port 8080
-                                assert_eq "port lands in the path" "http://ts.example/:8080/api/checkAsync?source=SRC" "$(co_endpoint)" || return 1
-                                # ...and the run log still claims the port was honoured.
-                                assert_contains "log still claims the port" "Port: 8080" "$CO_OUT"; }
+                                assert_eq "a trailing slash is a usage error" 2 "$CO_RC" || return 1
+                                assert_contains "and the cause names the character" "contains '/'" "$CO_OUT" || return 1
+                                assert_contains "and says what happens" "the path would silently replace --port" "$CO_OUT" || return 1
+                                # The old bug's signature must be gone: no endpoint is ever built.
+                                assert_not_contains "no endpoint is announced" "ts.example/:8080" "$CO_OUT" || return 1
+                                assert_not_contains "and the port is not claimed" "Port: 8080" "$CO_OUT"; }
 
 test_e_wget_follows_redirect()  { # (was a CHARACTERISATION test for P0; now pins the fix.)
                                 # A followed redirect turns wget's POST into a GET with no body, and
@@ -899,35 +462,31 @@ test_g_ack_accepts_both_id_spellings() { # The acknowledgement's TYPE must not b
                                 assert_contains "the answer is named" "did not answer as a Thunderstorm would" "$CO_OUT"; }
 
 # ---------------------------------------------------------------------------------------------
-# h. Pre-push review round: identity under --sync, rc files, proxy truth, false statements.
+# h. Pre-push review round: upload identity, rc files, proxy truth, false statements.
 # ---------------------------------------------------------------------------------------------
 
-test_h_sync_impostor_refused() { # C1. The acknowledgement check covered /api/checkAsync only; under
-                                # --sync any 2xx counted. A 200-to-everything peer now fails closed on
-                                # both transports, and exactly one upload reaches it.
+test_h_impostor_refused()     { # C1, re-pointed when --sync was removed. A peer that answers the
+                                # status page but not the upload fails closed on BOTH transports, and
+                                # exactly one upload reaches it. (Round 5: the cruder
+                                # 2xx-to-everything peer is refused at the preflight now, so
+                                # ackempty is what exercises this layer -- see
+                                # test_e_permissive_service_passes.) The acknowledgement rule is now
+                                # UNCONDITIONAL, so this is the only shape it has to police.
                                 require_python3 || return 77
                                 local p log shim wout wrc
-                                start_listener yes200 || return 1; p="$LISTENER_PORT_OUT"; log="$LISTENER_LOG_OUT"
-                                run_collector --sync --server 127.0.0.1 --port "$p" --retries 1 --no-log-file --no-progress --dir "$FIXTURES"
+                                start_listener ackempty || return 1; p="$LISTENER_PORT_OUT"; log="$LISTENER_LOG_OUT"
+                                run_collector --server 127.0.0.1 --port "$p" --retries 1 --no-log-file --no-progress --dir "$FIXTURES"
                                 assert_eq "fails closed" 4 "$CO_RC" || return 1
                                 assert_eq "nothing counted submitted" 0 "$(co_stat submitted)" || return 1
-                                assert_contains "the answer is named" "carried no Thunderstorm scan result" "$CO_OUT" || return 1
-                                assert_eq "exactly ONE sync upload reached the impostor" 1 "$(grep -c 'REQ POST /api/check?' "$log")" || return 1
+                                assert_contains "the answer is named" "carried no Thunderstorm acknowledgement" "$CO_OUT" || return 1
+                                assert_eq "exactly ONE upload reached the impostor" 1 "$(grep -c 'REQ POST /api/checkAsync?' "$log")" || return 1
                                 shim="$(wget_only_path)" || return 77
-                                wout="$( cd "$WORK/cwd" && env PATH="$shim" "$(type -P bash)" "$COLLECTOR" --sync \
+                                wout="$( cd "$WORK/cwd" && env PATH="$shim" "$(type -P bash)" "$COLLECTOR" \
                                     --server 127.0.0.1 --port "$p" --retries 1 --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" && wrc=0 || wrc=$?
                                 assert_eq "and under wget" 4 "$wrc"; }
 
-test_h_sync_real_shape_accepted() { # The live /api/check answers `null` (clean) or a JSON array.
-                                require_python3 || return 77
-                                local p
-                                start_listener syncnull || return 1; p="$LISTENER_PORT_OUT"
-                                run_collector --sync --server 127.0.0.1 --port "$p" --no-log-file --no-progress --dir "$FIXTURES"
-                                assert_eq "a real sync answer is accepted" 0 "$CO_RC" || return 1
-                                assert_eq "every file submitted" "$FIXTURE_COUNT" "$(co_stat submitted)"; }
-
 test_h_rc_files_are_not_read() { # C2. ~/.curlrc could set proxy= (evidence elsewhere, log says
-                                # 'Proxy: none') or location (POST->GET, zero-byte uploads under --sync),
+                                # 'Proxy: none') or location (POST->GET, a body-less upload),
                                 # ~/.wgetrc the same. curl runs with -q, wget with WGETRC=<empty file>.
                                 require_python3 || return 77
                                 local target impostor redir tlog ilog shim out rc
@@ -941,9 +500,9 @@ test_h_rc_files_are_not_read() { # C2. ~/.curlrc could set proxy= (evidence else
                                     --server 127.0.0.1 --port "$target" --no-log-file --no-progress --dir "$FIXTURES" 2>&1 )" && rc=0 || rc=$?
                                 assert_eq ".curlrc proxy= is ignored: the run succeeds directly" 0 "$rc" || return 1
                                 assert_eq "and the rc-file proxy saw nothing" 0 "$(grep -c '^REQ ' "$ilog")" || return 1
-                                start_listener syncnull || return 1; tlog="$LISTENER_LOG_OUT"
+                                start_listener ackempty || return 1; tlog="$LISTENER_LOG_OUT"
                                 start_listener redirect "$LISTENER_PORT_OUT" || return 1; redir="$LISTENER_PORT_OUT"
-                                out="$( cd "$WORK/cwd" && env HOME="$WORK/home_loc" bash "$COLLECTOR" --sync \
+                                out="$( cd "$WORK/cwd" && env HOME="$WORK/home_loc" bash "$COLLECTOR" \
                                     --server 127.0.0.1 --port "$redir" --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" && rc=0 || rc=$?
                                 assert_eq ".curlrc location is ignored: the redirect is refused" 1 "$rc" || return 1
                                 assert_eq "and the redirect target never saw a request" 0 "$(grep -c '^REQ ' "$tlog")" || return 1
@@ -953,24 +512,6 @@ test_h_rc_files_are_not_read() { # C2. ~/.curlrc could set proxy= (evidence else
                                 assert_eq ".wgetrc http_proxy is ignored under wget" 0 "$rc" || return 1
                                 assert_contains "which really was wget" "Transport: wget" "$out" || return 1
                                 assert_eq "and the rc-file proxy still saw nothing" 0 "$(grep -c '^REQ ' "$ilog")"; }
-
-test_h_proxy_line_models_the_transport() { # H1. curl ignores upper-case HTTP_PROXY and honours
-                                # all_proxy; wget reads lower case only and has no NO_PROXY. The Proxy:
-                                # line must say what the tool that runs will do.
-                                local out shim
-                                out="$( cd "$WORK/cwd" && env -u http_proxy HTTP_PROXY=http://127.0.0.1:1 bash "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "curl: upper-case HTTP_PROXY is not a proxy" "Proxy: none" "$out" || return 1
-                                out="$( cd "$WORK/cwd" && env all_proxy=http://127.0.0.1:1 bash "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "curl: all_proxy is" "Proxy: http://127.0.0.1:1 (from the environment as curl reads it" "$out" || return 1
-                                out="$( cd "$WORK/cwd" && env http_proxy=http://127.0.0.1:1 NO_PROXY=TS.EXAMPLE bash "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "curl: NO_PROXY exempts case-insensitively" "Proxy: none" "$out" || return 1
-                                shim="$(wget_only_path)" || return 77
-                                out="$( cd "$WORK/cwd" && env PATH="$shim" http_proxy=http://127.0.0.1:1 NO_PROXY=ts.example "$(type -P bash)" "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "wget: NO_PROXY means nothing to wget, so the proxy stands" "Proxy: http://127.0.0.1:1 (from the environment as wget reads it" "$out"; }
 
 test_h_schemeless_proxy_credential_redacted() { # H2. curl accepts user:pass@host:port with no
                                 # scheme; the redaction keyed on '://' and printed the password.
@@ -1005,7 +546,7 @@ test_h_407_names_the_proxy() {  # H4. 407 is a proxy-only status; it was reporte
                                     --server 127.0.0.1 --port "$t" --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" && rc=0 || rc=$?
                                 assert_eq "fails" 1 "$rc" || return 1
                                 assert_contains "as an answered, unusable peer" "No usable Thunderstorm server" "$out" || return 1
-                                assert_contains "blaming the proxy" "the proxy at http://127.0.0.1:$p refused the request (HTTP 407" "$out"; }
+                                assert_contains "blaming a proxy, not the server" "a proxy refused the request (HTTP 407" "$out"; }
 
 test_h_one_odd_answer_after_acks_is_retried() { # H5. A peer that acknowledged uploads and then
                                 # returns one 2xx HTML page used to poison the run: every later file
@@ -1129,6 +670,56 @@ test_h_retry_after_cap_is_stated() { # H7's other half, without the 120 s sleep:
                                 assert_contains "a plain value is honoured as sent (case-insensitive header)" "waiting 7s (Retry-After)" "$out" || return 1
                                 assert_contains "and slept" "SLEPT=7" "$out"; }
 
+test_h_url_globbing_refused() { # curl expands {a,b} and [1-2] in a URL by default, and --server is
+                                # interpolated into that URL, so ONE invocation performed one transfer
+                                # PER expansion: measured, the preflight, both markers and the sample
+                                # all went to two hosts, the evidence reached a host the operator never
+                                # named, and the run then reported the file FAILED because the second
+                                # transfer found stdin (the streamed file) at EOF. curl now runs with
+                                # -g, so the value is refused before a packet leaves.
+                                require_python3 || return 77
+                                local p log
+                                start_listener ackstr || return 1; p="$LISTENER_PORT_OUT"; log="$LISTENER_LOG_OUT"
+                                # A range whose FIRST expansion is the listener's own address: pre-fix it
+                                # answered the preflight, so a zero-request assertion is meaningful.
+                                run_collector --server '127.0.0.[1-2]' --port "$p" --retries 1 --no-log-file --no-progress --dir "$ONEFILE"
+                                # Now refused as a usage error by validate_config, BEFORE any
+                                # transport runs -- so this is no longer curl's exit 3 (which the
+                                # -g flag produces and which is still mapped for a value that
+                                # reaches curl some other way), but exit 2 naming the character.
+                                assert_eq "a globbed --server is a usage error" 2 "$CO_RC" || return 1
+                                # Round 8 split the arm: '[' and ']' are refused as the wrong spelling
+                                # of an IPv6 address (one spelling per host), and the glob arm now owns
+                                # '{' and '}' alone -- which is the value driven a few lines below.
+                                assert_contains "and the cause names the character" "contains '[' or ']'" "$CO_OUT" || return 1
+                                # '127.0.0.[1-2]' is a RANGE, not a bracketed IPv6 address, so the
+                                # accurate diagnosis is the range one -- telling this operator how to
+                                # write IPv6 would be advice for a mistake they did not make.
+                                assert_contains "and says why it matters" "does not name one host" "$CO_OUT" || return 1
+                                assert_not_contains "nothing was collected" "Run completed" "$CO_OUT" || return 1
+                                assert_eq "and NOT ONE request reached the peer" 0 "$(grep -c '^REQ ' "$log")" || return 1
+                                run_collector --server '{127.0.0.1,127.0.0.2}' --port "$p" --retries 1 --no-log-file --no-progress --dir "$ONEFILE"
+                                assert_eq "a brace list fails too" 2 "$CO_RC" || return 1
+                                assert_eq "still no request reached the peer" 0 "$(grep -c '^REQ ' "$log")" || return 1
+                                # Since round 8 the collector refuses a bracketed literal itself -- one
+                                # spelling per host -- so it never reaches curl and -g cannot be blamed
+                                # for it. What is pinned here is that the refusal is OUR diagnosis, not
+                                # curl's glob complaint: the operator is told how to write the address.
+                                run_collector --server '[::1]' --port "$p" --retries 1 --no-log-file --no-progress --dir "$ONEFILE"
+                                assert_eq "a bracketed literal is a usage error" 2 "$CO_RC" || return 1
+                                assert_contains "and the refusal tells them how to write it" "is bracketed" "$CO_OUT" || return 1
+                                assert_not_contains "never blamed on curl's URL globbing" "URL range" "$CO_OUT" || return 1
+                                assert_not_contains "and never on a malformed URL" "URL was malformed" "$CO_OUT" || return 1
+                                # The bare form is accepted too and is bracketed for the URL, which is
+                                # the only spelling RFC 3986 allows. Same peer, same failure class.
+                                run_collector --server '::1' --port "$p" --retries 1 --no-log-file --no-progress --dir "$ONEFILE"
+                                assert_contains "a bare IPv6 literal is bracketed for the URL" "http://[::1]:$p" "$CO_OUT" || return 1
+                                assert_not_contains "and is not refused" "the port belongs to --port" "$CO_OUT" || return 1
+                                # Control: the same peer, named plainly, still receives the file.
+                                run_collector --server 127.0.0.1 --port "$p" --no-log-file --no-progress --dir "$ONEFILE"
+                                assert_eq "the control run succeeds" 0 "$CO_RC" || return 1
+                                assert_eq "and delivers" 1 "$(co_stat submitted)"; }
+
 test_g_causes_and_transport_local() { # REGRESSION for H3 and N4 in the default tiers: the live
                                 # tier was the only place either was asserted, and it is skipped by
                                 # default. Two wrong-port shapes must produce two different sentences,
@@ -1148,21 +739,6 @@ test_g_causes_and_transport_local() { # REGRESSION for H3 and N4 in the default 
                                     --server 127.0.0.1 --port "$dead" --no-log-file --no-progress \
                                     --dir "$ONEFILE" 2>&1 )" && wrc=0 || wrc=$?
                                 assert_contains "wget is recorded as the transport" "Transport: wget" "$wout"; }
-
-test_g_no_proxy_wildcard_goes_direct() { # REGRESSION for the no_proxy arm. Its wildcard pattern was
-                                # a quoting artifact that could never match, so no_proxy=* (the usual
-                                # container form) left the run logging a proxy that curl and wget
-                                # never used -- the exact false statement N3 exists to prevent.
-                                local out
-                                out="$( cd "$WORK/cwd" && env no_proxy='*' http_proxy='http://127.0.0.1:1' bash "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --port 8080 --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "no_proxy=* means direct" "Proxy: none" "$out" || return 1
-                                out="$( cd "$WORK/cwd" && env no_proxy='.example' http_proxy='http://127.0.0.1:1' bash "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --port 8080 --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "a domain suffix means direct" "Proxy: none" "$out" || return 1
-                                out="$( cd "$WORK/cwd" && env no_proxy='other.example' http_proxy='http://127.0.0.1:1' bash "$COLLECTOR" \
-                                    --dry-run --debug --server ts.example --port 8080 --no-log-file --no-progress --dir "$ONEFILE" 2>&1 )" || true
-                                assert_contains "an unrelated no_proxy still records the proxy" "Proxy: http://127.0.0.1:1" "$out"; }
 
 test_a_env_port_is_announced_ignored() { # An exported THUNDERSTORM_PORT is deliberately not
                                 # honoured -- the environment must not redirect evidence -- but it is
@@ -1315,7 +891,6 @@ test_f_quiet_nolog_still_reports() { # REGRESSION for N2 (was a characterisation
 
 # ── Live tier ─────────────────────────────────────────────────────────────────
 
-require_live() { [ "$LIVE_READY" -eq 1 ] || return 77; }
 
 live_collector() {
     run_collector --server "$LIVE_HOST" --no-log-file --no-progress \
@@ -1395,19 +970,6 @@ test_live_causes_distinguish() { # REGRESSION for H3 (was a characterisation tes
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
-# probe_live -- is the live tier usable? Asks the server's own status endpoint, so
-# an unset host, a firewall, or a server that is down all land on SKIP rather than
-# on a wall of red.
-probe_live() {
-    [ -n "$LIVE_HOST" ] || return 1
-    local scheme="http"
-    [ "$LIVE_TLS" = "1" ] && scheme="https"
-    local -a opts=(-sS -o /dev/null --connect-timeout 8 --max-time 20)
-    [ "$LIVE_INSECURE" = "1" ] && opts+=(-k)
-    command -v curl >/dev/null 2>&1 || return 1
-    curl "${opts[@]}" "$scheme://$LIVE_HOST:$LIVE_PORT/api/status" 2>/dev/null
-}
-
 main() {
     mkdir -p "$WORK/cwd" || { echo "ERROR: cannot create the run directory" >&2; exit 1; }
     make_fixtures || { echo "ERROR: cannot create fixtures" >&2; exit 1; }
@@ -1416,6 +978,7 @@ main() {
     printf "${BOLD}Port-flag suite${RESET} — collector: %s\n" "$COLLECTOR"
     printf "  work dir: %s\n" "$WORK"
     if probe_live; then
+        # shellcheck disable=SC2034  # read by require_live() in lib/harness.sh
         LIVE_READY=1
         printf "  live tier: ${GREEN}%s:%s${RESET} (api reachable)\n" "$LIVE_HOST" "$LIVE_PORT"
     elif [ -n "$LIVE_HOST" ]; then
@@ -1458,32 +1021,30 @@ main() {
     section "C — URL composition"
     run_test test_c_endpoint_plain
     run_test test_c_endpoint_ssl
-    run_test test_c_endpoint_sync
+    run_test test_c_endpoint_always_async
     run_test test_c_endpoint_canonical
     run_test test_c_port_always_appended
-    run_test test_c_trailing_slash_drops_port
+    run_test test_c_trailing_slash_refused
     run_test test_c_no_leading_zero_in_url
     run_test test_c_source_encoding_needs_od
 
     section "E — network shape (local)"
     run_test test_e_refused_is_fast
-    run_test test_e_dry_run_never_connects
+    run_test test_e_dry_run_checks_the_destination
     run_test test_e_wrong_app_fails_fast
     run_test test_e_nonhttp_listener
     run_test test_e_redirect_not_followed
     run_test test_e_silent_listener
     run_test test_e_permissive_service_passes
-    run_test test_e_dry_run_counts_unsent
+    run_test test_e_dry_run_never_claims_a_submission
     run_test test_e_wget_follows_redirect
     run_test test_g_proxy_env_records
     run_test test_g_sentinels_do_not_leak
     run_test test_g_status_anchored_to_line_start
     run_test test_g_no_status_fails_closed
     run_test test_g_ack_accepts_both_id_spellings
-    run_test test_h_sync_impostor_refused
-    run_test test_h_sync_real_shape_accepted
+    run_test test_h_impostor_refused
     run_test test_h_rc_files_are_not_read
-    run_test test_h_proxy_line_models_the_transport
     run_test test_h_schemeless_proxy_credential_redacted
     run_test test_h_connect_tunnel_failure_is_not_an_answer
     run_test test_h_407_names_the_proxy
@@ -1497,8 +1058,8 @@ main() {
     run_test test_h_server_env_announced_ignored
     run_test test_h_wget_transport_end_to_end
     run_test test_h_retry_after_cap_is_stated
+    run_test test_h_url_globbing_refused
     run_test test_g_causes_and_transport_local
-    run_test test_g_no_proxy_wildcard_goes_direct
     run_test test_a_env_port_is_announced_ignored
     run_test test_e_transports_agree_plain
     run_test test_g_posix_grep_survives
@@ -1526,6 +1087,10 @@ main() {
         printf "${RED}%d failed:${RESET}\n%b" "$TESTS_FAILED" "$FAILED_NAMES"
         exit 1
     fi
+    # This suite had no floor at all: 34 of its 80 tests are skip-gated, so a runner that lost
+    # python3 could execute a handful, exit 0, and read as a clean run. A full local run executes
+    # 74; 60 leaves room for the live tier and the environment skips.
+    assert_tests_floor 60 || exit 1
     printf "${GREEN}All port tests passed.${RESET}\n"
     exit 0
 }

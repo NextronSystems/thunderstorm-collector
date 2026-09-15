@@ -8,7 +8,6 @@
 #  2.  Interrupted marker — SIGINT sends interrupted marker before exit
 #  3.  Dry-run mode — no uploads, no server contact (bash/ash/python/perl)
 #  4.  Source identifier — --source sets source field in collection markers
-#  5.  Sync mode — --sync uses /api/check instead of /api/checkAsync
 #  6.  Multiple scan directories — scanning multiple dirs in one run
 #  7.  503 back-pressure — server returns 503, collector retries with Retry-After
 #  8.  Progress reporting — --progress flag doesn't crash, produces output
@@ -311,7 +310,7 @@ run_collector() {
 run_bash() {
     local dir="$1"; shift
     bash "$BASH_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
 
@@ -321,14 +320,14 @@ run_ash() {
     # Intentionally rely on shell word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
     $ASH_SHELL "$ASH_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
 
 run_python() {
     local dir="$1"; shift
     python3 "$PYTHON_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" -d "$dir" \
+        --server 127.0.0.1 --port "$STUB_PORT" -d "$dir" \
         "$@" 2>&1
 }
 
@@ -432,14 +431,14 @@ test_interrupted_marker() {
     case "$collector" in
         bash)
             bash "$BASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" --dir "$fixtures" \
+                --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" \
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
         ash)
             # shellcheck disable=SC2086
             $ASH_SHELL "$ASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" --dir "$fixtures" \
+                --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" \
                 --max-age 30 > /dev/null 2>&1 &
             echo $! > "$pid_file"
             ;;
@@ -623,43 +622,6 @@ print(s)
     rm -rf "$fixtures"
 }
 
-# ── 5. Sync mode ───────────────────────────────────────────────────────────
-test_sync_mode() {
-    local collector="$1"
-
-    # PS collectors don't support --sync flag
-    case "$collector" in
-        ps3|ps2)
-            skip "$collector/sync-mode: not supported (PS always uses checkAsync)"
-            return
-            ;;
-    esac
-
-    clear_log
-
-    local fixtures; fixtures="$(mktemp -d /tmp/oper-test-XXXXXX)"
-    echo "$MALICIOUS_CONTENT" > "$fixtures/sync-${collector}.exe"
-
-    case "$collector" in
-        bash)   run_bash "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-        ash)    run_ash "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-        python) run_python "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-        perl)   run_perl "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-    esac
-    sync_stub
-
-    # In sync mode, the stub logs the scan immediately (no async queue)
-    local entry; entry="$(query_log "sync-${collector}")"
-    if [ -n "$entry" ]; then
-        local score; score="$(echo "$entry" | head -1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('score',0))" 2>/dev/null)"
-        pass "$collector/sync-mode: file scanned synchronously (score=$score)"
-    else
-        fail "$collector/sync-mode: file not found in log"
-    fi
-
-    rm -rf "$fixtures"
-}
-
 # ── 6. Multiple scan directories ───────────────────────────────────────────
 test_multiple_dirs() {
     local collector="$1"
@@ -682,14 +644,14 @@ test_multiple_dirs() {
     case "$collector" in
         bash)
             bash "$BASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" \
+                --server 127.0.0.1 --port "$STUB_PORT" \
                 --dir "$dir1" --dir "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
             ;;
         ash)
             # shellcheck disable=SC2086
             $ASH_SHELL "$ASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" \
+                --server 127.0.0.1 --port "$STUB_PORT" \
                 --dir "$dir1" --dir "$dir2" \
                 --max-age 30 >/dev/null 2>&1 || true
             ;;
@@ -749,12 +711,12 @@ test_503_backpressure() {
     case "$collector" in
         bash)
             output="$(timeout 30 bash "$BASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
+                --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
         ash)
             # shellcheck disable=SC2086
             output="$(timeout 30 $ASH_SHELL "$ASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
+                --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --retries 5 2>&1)" || collector_exit=$?
             ;;
         python)
             output="$(timeout 30 python3 "$PYTHON_COLLECTOR" \
@@ -825,12 +787,12 @@ test_progress_reporting() {
     case "$collector" in
         bash)
             output="$(timeout 30 bash "$BASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
+                --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         ash)
             # shellcheck disable=SC2086
             output="$(timeout 30 $ASH_SHELL "$ASH_COLLECTOR" \
-                --server localhost --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
+                --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" --max-age 30 --progress 2>&1)" || true
             ;;
         python)
             output="$(timeout 30 python3 "$PYTHON_COLLECTOR" \
@@ -924,7 +886,13 @@ test_wget_fallback() {
     local fixtures; fixtures="$(mktemp -d /tmp/oper-test-XXXXXX)"
     echo "$MALICIOUS_CONTENT" > "$fixtures/wget-${collector}.exe"
 
-    local wget_path; wget_path="$(command -v wget 2>/dev/null)"
+    # type -P: a real binary, not a function or alias. The shim-dir check below matters more --
+    # if any shim directory already leads PATH, this resolves to THAT shim and the symlink made
+    # from it points a wget at a wget (see the recursion note in run_tests.sh's wget shim).
+    local wget_path; wget_path="$(type -P wget 2>/dev/null)"
+    case "$wget_path" in
+        */oper-wget-path-*|*/fake-tools-*|*/nocurl/*|*/oldcurl/*) wget_path="" ;;
+    esac
     if [ -z "$wget_path" ]; then
         skip "$collector/wget-fallback: wget not installed"
         rm -rf "$fixtures"
@@ -939,7 +907,7 @@ test_wget_fallback() {
     local output
     output="$(timeout 30 env PATH="$shim_dir:$PATH" \
         bash "$BASH_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" --dir "$fixtures" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$fixtures" \
         --max-age 30 2>&1)" || true
     sync_stub
 
@@ -1000,7 +968,6 @@ for collector in "${COLLECTORS[@]}"; do
     test_interrupted_marker "$collector"
     test_dry_run "$collector"
     test_source_identifier "$collector"
-    test_sync_mode "$collector"
     test_multiple_dirs "$collector"
     test_503_backpressure "$collector"
     test_progress_reporting "$collector"

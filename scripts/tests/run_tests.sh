@@ -428,15 +428,17 @@ test_basic_async_upload() {
     assert_ge "stub scanned" 3 "$(stub_scanned)" || return 1
 }
 
-# ── 2. Basic upload (sync) ──────────────────────────────────────────────────
+# ── 2. One file uploads exactly once ────────────────────────────────────────
 
-test_basic_sync_upload() {
-    has_stub_verification || { echo "    (skipped: sync scan too slow on external server)"; return 77; }
+# --sync is gone (there is one endpoint), but the upload_count assertion below is unique to this
+# test and is real coverage: it fails if one file is ever transmitted twice.
+test_single_file_uploads_exactly_once() {
+    has_stub_verification || { echo "    (skipped: needs the stub upload counters)"; return 77; }
     restart_stub
-    local d; d="$(create_sample_dir basic_sync)"
+    local d; d="$(create_sample_dir single_upload)"
     create_file "$d/sample.bin"
 
-    local out; out="$(run_collector --dir "$d" --sync --source sync-test --max-age 30)"
+    local out; out="$(run_collector --dir "$d" --source one-upload --max-age 30)"
     local submitted; submitted="$(parse_collector_stat "$out" submitted)"
 
     assert_eq "submitted" "1" "$submitted" || return 1
@@ -452,9 +454,13 @@ test_dry_run_no_uploads() {
     create_file "$d/b.txt"
 
     local out; out="$(run_collector --dir "$d" --dry-run --max-age 30)"
-    local submitted; submitted="$(parse_collector_stat "$out" submitted)"
 
-    assert_eq "submitted" "2" "$submitted" || return 1
+    # would_submit, not submitted. This test used to assert submitted=2 in the same breath as
+    # upload_count=0 -- i.e. it encoded the contradiction: the run claimed two submissions and the
+    # stub had received none. The COUNT is unchanged, because a dry run must show what a real run
+    # would send; the KEY now says what actually happened.
+    assert_eq "would_submit" "2" "$(parse_collector_stat "$out" would_submit)" || return 1
+    assert_eq "and nothing is called submitted" "" "$(parse_collector_stat "$out" submitted)" || return 1
     if has_stub_verification; then
         assert_eq "upload_count" "0" "$(upload_count)" || return 1
         assert_eq "stub_scanned" "0" "$(stub_scanned)" || return 1
@@ -566,7 +572,7 @@ test_source_parameter_received() {
     local d; d="$(create_sample_dir source_test)"
     create_file "$d/s.bin"
 
-    run_collector --dir "$d" --source "my-test-source" --sync --max-age 30 >/dev/null
+    run_collector --dir "$d" --source "my-test-source" --max-age 30 >/dev/null
     sleep 0.3
 
     # Check the JSONL audit log for the source
@@ -583,7 +589,7 @@ test_file_content_integrity() {
     create_file "$d/check.bin" "$content"
     local expected_sha; expected_sha="$(sha256sum "$d/check.bin" | awk '{print $1}')"
 
-    run_collector --dir "$d" --sync --max-age 30 >/dev/null
+    run_collector --dir "$d" --max-age 30 >/dev/null
     sleep 0.3
 
     # Verify the uploaded file has the same hash
@@ -713,13 +719,91 @@ test_invalid_max_size_rejected() {
 
 # ── 18. Validation: missing server ───────────────────────────────────────────
 
-test_missing_server_rejected() {
-    local out; out="$(bash "$COLLECTOR" \
-        --server "" --port 8080 --no-log-file \
-        --dir /tmp 2>&1)" || true
+# server_fixture -- a stable one-file tree for the --server exit-code assertions. /tmp is NOT
+# usable here: on a live host files vanish under the walk, the run exits 5 ("partial: files
+# vanished") and the assertion measures the fixture instead of the flag.
+server_fixture() {
+    local d="$TEST_TMP/server-fixture"
+    mkdir -p "$d" 2>/dev/null || return 1
+    printf 'server flag fixture\n' > "$d/only.txt" 2>/dev/null || return 1
+    printf '%s\n' "$d"
+}
 
-    # An empty value is reported distinctly from a forgotten one (require_value)
-    assert_contains "server validation" "Empty value for --server" "$out" || return 1
+test_missing_server_rejected() {
+    # This test used to assert only require_value's "Empty value for --server", i.e. the EMPTY
+    # case, while its name claimed to cover the FORGOTTEN one. The forgotten case could not be
+    # covered, because the collector carried a compiled-in default: a run with no --server did not
+    # fail, it uploaded to a Nextron-internal host that resolves. The check that looked like the
+    # coverage (`[ -n "$THUNDERSTORM_SERVER" ]`) was unreachable dead code. Both cases are now real
+    # and they are DIFFERENT mistakes, so each is asserted on its own message.
+    local out rc fx
+    fx="$(server_fixture)" || return 1
+
+    # 1. Forgotten entirely -> validate_config, and the message must name the flag.
+    out="$(bash "$COLLECTOR" --port 8080 --no-log-file --dir "$fx" --no-progress 2>&1)" && rc=0 || rc=$?
+    assert_eq "a forgotten --server is a usage error" 2 "$rc" || return 1
+    assert_contains "and names the flag" "pass -s/--server <host>" "$out" || return 1
+    assert_contains "and says when it is optional" "required unless --dry-run" "$out" || return 1
+    # No destination may be announced, and the removed vendor host must not come back.
+    assert_not_contains "no endpoint is announced" "API endpoint: http" "$out" || return 1
+    assert_not_contains "and no vendor-internal default" "nextron" "$out" || return 1
+
+    # 2. Given but empty -> require_value, at parse time, with its own message.
+    out="$(bash "$COLLECTOR" --server "" --port 8080 --no-log-file --dir "$fx" --no-progress 2>&1)" && rc=0 || rc=$?
+    assert_eq "an empty value is also a usage error" 2 "$rc" || return 1
+    assert_contains "reported distinctly from a forgotten one" "Empty value for --server" "$out" || return 1
+    assert_not_contains "and not with the forgotten-flag message" "pass -s/--server" "$out" || return 1
+
+    # 3. --dry-run is the documented exemption (go/main.go:134), and it must say so rather than
+    #    printing a URL that names no host.
+    out="$(bash "$COLLECTOR" --dry-run --no-log-file --dir "$fx" --no-progress --max-age 1 2>&1)" && rc=0 || rc=$?
+    assert_eq "a dry run needs no server" 0 "$rc" || return 1
+    assert_contains "and says there is none" "Server: none given (--dry-run)" "$out" || return 1
+    assert_not_contains "and invents no hostless URL" "http://:" "$out" || return 1
+}
+
+test_invalid_server_rejected() {
+    # --server decides WHERE evidence goes, and it had no reachable validation at all: every shape
+    # below DELIVERED to a host the operator never named and reported submitted=1 failed=0 exit 0.
+    # Full coverage, including the wire, is in run_server_tests.sh; this pins the contract in the
+    # suite CI always runs.
+    local out rc v msg fx
+    fx="$(server_fixture)" || return 1
+    # value                        expected fragment of the reason
+    set -- \
+        'ts.example@127.0.0.1'     "contains '@'" \
+        'https://ts.example'       "is a URL, not a host" \
+        'ts.example/'              "contains '/'" \
+        'ts.example#f'             "contains '#'" \
+        'ts.example:8080'          "contains ':'" \
+        '010.0.0.9'                "not four decimal octets" \
+        '127.0.0.[1-2]'            "does not name one host"
+    while [ "$#" -gt 0 ]; do
+        v="$1"; msg="$2"; shift 2
+        out="$(bash "$COLLECTOR" --server "$v" --port 8080 --no-log-file --dry-run \
+            --dir "$fx" --no-progress 2>&1)" && rc=0 || rc=$?
+        assert_eq "'$v' is a usage error" 2 "$rc" || return 1
+        assert_contains "'$v' says why" "$msg" "$out" || return 1
+        assert_not_contains "'$v' never reaches URL composition" "API endpoint: http" "$out" || return 1
+    done
+
+    # A credential in the value must not be logged: this message is the one place the rejected
+    # value reaches the terminal, the log file and syslog at once.
+    out="$(bash "$COLLECTOR" --server 'operator:s3cr3t-do-not-log@127.0.0.1' --port 8080 \
+        --no-log-file --dry-run --dir "$fx" --no-progress 2>&1)" || true
+    assert_not_contains "a credential in --server is not logged" "s3cr3t-do-not-log" "$out" || return 1
+    assert_contains "it is redacted" "<redacted>@127.0.0.1" "$out" || return 1
+
+    # ...and the legitimate forms still work, including a bare IPv6 literal, which used to build
+    # "http://::1:8080" and be reported as an unreachable server.
+    out="$(bash "$COLLECTOR" --server '::1' --port 8080 --no-log-file --dry-run \
+        --dir "$fx" --no-progress --max-age 1 2>&1)" && rc=0 || rc=$?
+    assert_eq "a bare IPv6 literal is accepted" 0 "$rc" || return 1
+    assert_contains "and bracketed for the URL" "API endpoint: http://[::1]:8080/api/" "$out" || return 1
+    out="$(bash "$COLLECTOR" --server 'ts.example' --port 8080 --no-log-file --dry-run \
+        --dir "$fx" --no-progress --max-age 1 2>&1)" && rc=0 || rc=$?
+    assert_eq "and an ordinary host name is accepted" 0 "$rc" || return 1
+    assert_contains "unchanged" "API endpoint: http://ts.example:8080/api/" "$out" || return 1
 }
 
 # ── 19. Unknown option rejected ──────────────────────────────────────────────
@@ -768,7 +852,7 @@ test_source_url_encoding() {
     local d; d="$(create_sample_dir urlenc)"
     create_file "$d/a.bin"
 
-    run_collector --dir "$d" --source "host with spaces" --sync --max-age 30 >/dev/null
+    run_collector --dir "$d" --source "host with spaces" --max-age 30 >/dev/null
     sleep 0.3
 
     # The source should arrive at the server (URL-decoded)
@@ -1216,9 +1300,24 @@ test_wget_collection_marker_404_nonfatal() {
 #!/bin/sh
 # The collector asks for /api/status before it reads any file; answer it so this test still
 # reaches the collection marker it is about. Everything else still 404s.
+#
+# The status answer must carry a BODY, and the body must be a Thunderstorm status document: the
+# preflight now requires that, not merely a 2xx. A double that emits only a status line stopped
+# modelling a Thunderstorm the moment the collector started reading the body -- the same trap as
+# the curl double that only worked while the collector avoided '-o'. The body goes to the file
+# named by -O, because that is where real wget puts it.
+out=""
+prev=""
+for a in "$@"; do
+    [ "$prev" = "-O" ] && out="$a"
+    prev="$a"
+done
 for a in "$@"; do
     case "$a" in
-        */api/status) printf '  HTTP/1.1 200 OK\n' >&2; exit 0 ;;
+        */api/status)
+            [ -n "$out" ] && printf '{"scanned_samples":0,"queued_async_requests":0}' > "$out"
+            printf '  HTTP/1.1 200 OK\n' >&2
+            exit 0 ;;
     esac
 done
 printf '  HTTP/1.1 404 Not Found\n' >&2
@@ -1918,9 +2017,30 @@ test_wget_vanished_file_is_not_reported_collected() {
     local fakebin; fakebin="$(create_fake_tool_path wget_vanish)"
     rm -f "$fakebin/curl"                       # force the wget path
     rm -f "$fakebin/wget"
+    # This shim delegates to the REAL wget. Two guards, because getting this wrong once cost a
+    # container 46,000 processes: `wget` inside a shim whose own directory leads PATH resolves back
+    # to the shim, and `exec` then replaces the shell with it forever -- a chain that shows up as
+    # pure "wget -> wget -> wget" in ps because a shebang script reports its OWN name as comm.
+    #   1. Resolve with `type -P` (a real binary, never a function/alias) and REJECT a result that
+    #      lives inside the shim directory. Note `type -P` alone is NOT enough: it happily returns
+    #      the shim when the shim dir is first on PATH.
+    #   2. A depth guard inside the shim, so even a wrong resolution exits instead of looping.
+    local _real_wget; _real_wget="$(type -P wget 2>/dev/null || true)"
+    case "$_real_wget" in
+        ""|"$fakebin"/*)
+            printf 'FAIL wget_vanished: cannot resolve a real wget outside the shim dir (got %s)\n' \
+                "${_real_wget:-<none>}" >&2
+            return 1 ;;
+    esac
     cat > "$fakebin/wget" <<EOF
 #!/bin/sh
-exec $(command -v wget) "\$@"
+if [ -n "\${TS_SHIM_WGET_ACTIVE:-}" ]; then
+    printf 'wget shim recursion refused\\n' >&2
+    exit 127
+fi
+TS_SHIM_WGET_ACTIVE=1
+export TS_SHIM_WGET_ACTIVE
+exec $_real_wget "\$@"
 EOF
     chmod +x "$fakebin/wget"
 
@@ -2476,10 +2596,13 @@ case "\$endpoint" in
             rm -f "$d/aaa.bin" "$d/zzz.bin"
         fi
         [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
-        # The upload path captures the response body with a shell redirect of THIS script's
-        # stdout, not with -o (only the marker and the preflight use -o). The acknowledgement
-        # the collector now requires must therefore be printed, not written to the -o target.
-        printf '{"id":1}'
+        # Model real curl: the response body goes to the -o target when one is given, and to
+        # stdout otherwise. This shim used to print the acknowledgement to stdout unconditionally,
+        # under a comment asserting that the upload path never passes -o. It does now -- the
+        # collector needs stdout free for '-w %{remote_ip}', which is the only way curl before
+        # 7.63 will report the peer address -- and a double that only works while the caller
+        # avoids a standard option is a double that hides the next change.
+        if [ -n "\$outfile" ]; then printf '{"id":1}' > "\$outfile"; else printf '{"id":1}'; fi
         ;;
 esac
 exit 0
@@ -2863,10 +2986,13 @@ case "\$endpoint" in
             chmod 0111 "$d/sub"
         fi
         [ -n "\$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
-        # The upload path captures the response body with a shell redirect of THIS script's
-        # stdout, not with -o (only the marker and the preflight use -o). The acknowledgement
-        # the collector now requires must therefore be printed, not written to the -o target.
-        printf '{"id":1}'
+        # Model real curl: the response body goes to the -o target when one is given, and to
+        # stdout otherwise. This shim used to print the acknowledgement to stdout unconditionally,
+        # under a comment asserting that the upload path never passes -o. It does now -- the
+        # collector needs stdout free for '-w %{remote_ip}', which is the only way curl before
+        # 7.63 will report the peer address -- and a double that only works while the caller
+        # avoids a standard option is a double that hides the next change.
+        if [ -n "\$outfile" ]; then printf '{"id":1}' > "\$outfile"; else printf '{"id":1}'; fi
         ;;
 esac
 exit 0
@@ -3046,11 +3172,12 @@ run_test test_invalid_port_rejected
 run_test test_invalid_max_age_rejected
 run_test test_invalid_max_size_rejected
 run_test test_missing_server_rejected
+run_test test_invalid_server_rejected
 run_test test_unknown_option_rejected
 
 # Functional tests (need stub server)
 run_test test_basic_async_upload
-run_test test_basic_sync_upload
+run_test test_single_file_uploads_exactly_once
 run_test test_dry_run_no_uploads
 run_test test_max_file_size_filter
 run_test test_max_age_filter

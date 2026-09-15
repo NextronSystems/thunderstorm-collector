@@ -387,7 +387,7 @@ run_bash() {
     local dir="$1"; shift
     # Extra args can override --max-age, --max-size-kb, etc.
     bash "$BASH_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
 
@@ -397,14 +397,14 @@ run_ash() {
     # Intentionally rely on shell word splitting so "busybox sh" works.
     # shellcheck disable=SC2086
     $ASH_SHELL "$ASH_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" --dir "$dir" \
+        --server 127.0.0.1 --port "$STUB_PORT" --dir "$dir" \
         "$@" 2>&1
 }
 
 run_python() {
     local dir="$1"; shift
     python3 "$PYTHON_COLLECTOR" \
-        --server localhost --port "$STUB_PORT" -d "$dir" \
+        --server 127.0.0.1 --port "$STUB_PORT" -d "$dir" \
         "$@" 2>&1
 }
 
@@ -1072,18 +1072,18 @@ test_retry_on_late_server() {
     case "$collector" in
         bash)
             timeout 30 bash "$BASH_COLLECTOR" \
-                --server localhost --port "$retry_port" --dir "$fixtures/retry" \
+                --server 127.0.0.1 --port "$retry_port" --dir "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         ash)
             # shellcheck disable=SC2086
             timeout 30 $ASH_SHELL "$ASH_COLLECTOR" \
-                --server localhost --port "$retry_port" --dir "$fixtures/retry" \
+                --server 127.0.0.1 --port "$retry_port" --dir "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         python)
             timeout 30 python3 "$PYTHON_COLLECTOR" \
-                --server localhost --port "$retry_port" -d "$fixtures/retry" \
+                --server 127.0.0.1 --port "$retry_port" -d "$fixtures/retry" \
                 --max-age 30 --retries 5 > "$collector_out" 2>&1 || true
             ;;
         perl)
@@ -1158,18 +1158,18 @@ test_server_unreachable() {
     case "$collector" in
         bash)
             timeout 20 bash "$BASH_COLLECTOR" \
-                --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
+                --server 127.0.0.1 --port "$dead_port" --dir "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         ash)
             # shellcheck disable=SC2086
             timeout 20 $ASH_SHELL "$ASH_COLLECTOR" \
-                --server localhost --port "$dead_port" --dir "$fixtures/unreachable" \
+                --server 127.0.0.1 --port "$dead_port" --dir "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         python)
             timeout 20 python3 "$PYTHON_COLLECTOR" \
-                --server localhost --port "$dead_port" -d "$fixtures/unreachable" \
+                --server 127.0.0.1 --port "$dead_port" -d "$fixtures/unreachable" \
                 --max-age 30 --retries 1 > "$collector_out" 2>&1 || exit_code=$?
             ;;
         perl)

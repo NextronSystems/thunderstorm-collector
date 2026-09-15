@@ -12,13 +12,36 @@ Use this collector for incident response and triage on modern Linux or macOS sys
 |---|---|
 | Runtime | Bash |
 | Upload tool | `curl` or `wget` |
+| Discovery | `find`, `mkdir` |
+| wget transport only | `cat` (assembles the multipart body; `curl -F` needs nothing) |
 | OS | Linux, macOS, WSL, and Unix-like systems |
+
+Each row above is **checked before the run does any work** and refused by name with exit 3 if it is
+missing, rather than surfacing as a wall of unrelated errors. `find` and `mkdir` were already
+enforced and simply were not documented here.
+
+These are **optional** — each has a fallback and none is a new requirement:
+
+| Optional | Used for | Without it |
+|---|---|---|
+| `tr` + `wc` | fast policy counting (NUL separators) | a per-record read loop, identical counts |
+| `timeout` | bounding a `wget` request | the collector reaps the transport itself |
+| `rm` | removing the private work directory | the directory is left behind, and the run says so |
+
+The collector no longer calls `od`, or `tr` outside the optional counting path: percent-encoding, the
+ASCII lowercase used by the proxy rules, the control-character filters, `--help` and every short
+diagnostic read are done with shell builtins. That is not cosmetic — each of those was an
+**undetected** external command, and a missing one failed silently rather than loudly: without `od`,
+a character of `--source` was dropped, so the run printed one source name and the server recorded
+another; without `tr`, the `no_proxy` comparison emptied both of its operands and the run announced
+"answered through the proxy" for a host the proxy never saw; without `cat`, `--help` printed the
+shell's own error and still **exited 0**.
 
 ## Capabilities
 
 - Recursive directory scanning. Without `--dir`, the defaults are `/root /tmp /home /var /usr /dev/shm /run` — the last two are tmpfs (memory-backed) staging areas that malware uses and that leave nothing on disk; `/dev` and `/run` remain excluded when reached from above. A default directory that does not exist on the platform is skipped quietly; a default that lies on a network filesystem (for example `/home` on NFS) is skipped with a warning and is collected only when named with `--dir`. A network filesystem here means storage on another machine mounted into this host's tree — NFS and SMB/CIFS shares, SSHFS, cluster and S3/cloud FUSE mounts; walking one would submit that machine's files as this host's evidence and can hang on a dead share, so the collector never walks them by default (see the next point). Overlapping directories (`--dir /a --dir /a/b`) are scanned once: each file is collected one time, the first directory wins — decided by where the directories really are, so two spellings of one directory (`/data/link/sub` and `/data/real/sub`) are also collected once.
 - Filesystem exclusions are decided from the mount table by exact filesystem-type name (`nfs`, `nfs4`, `cifs`, `sshfs`, `fuse.sshfs`, `fuse.rclone`, `fuse.s3fs`, … — deliberately no `fuse.*` prefix rule, so local FUSE filesystems such as gocryptfs, bindfs or ntfs-3g stay collectable) and applied to the path as a string before the location is touched, so a dead share or an autofs trigger cannot hang the run. Explicit scope wins: a directory you name on a network filesystem is collected, and the log names its filesystem type before the first access; kernel pseudo-filesystems (`proc`, `sysfs`, `autofs`, …) are refused even when named. (The Go collector decides by statfs magic number, does not skip FUSE mounts, and refuses a named root on a skipped filesystem — the two collectors are not identical here.)
-- Honest accounting: policy exclusions are reported, not silent — `age_filtered=` and `size_filtered=` count the regular files the age and size gates removed at discovery (disjoint: a file that is both oversize and too old counts once, as size), so a run whose whole tree was out of policy is no longer indistinguishable from a complete collection of an empty directory. Each count is measured by matching the files in that category, never by subtracting one walk from another — walks taken at different moments would otherwise publish ordinary churn as a policy exclusion (a directory gaining files mid-run once reported 4710 files "outside the age window" when every file in it was new). `age_ctime_only=` reports how many files matched at discovery by ctime alone, so the cost of the default `any` policy is visible rather than inferred from the server's sample count. Because those walks run after the discovery walk they are not atomic: a tree that changes in between makes the counts a snapshot, which is now detected (`discovered + age_filtered + size_filtered` must equal the regular files present) and labelled rather than presented as fact. `future=` counts collected files whose mtime is ahead of the host clock at the moment of measurement — it carries the full discovery policy, so a future-dated file dropped for size is not claimed as collected, and its reference instant is stamped at counting time rather than at run start, so files merely written *during* the scan are no longer reported as future. The counting walks cover the regular files under each root, so symlink targets collected through `--follow-symlinks` are not attributed to `age_filtered=`/`size_filtered=`/`age_ctime_only=` — a link the two gates removed is counted once in the symlink breakdown, which now names the gate responsible: `filtered_size=` and `filtered_age=`. Those keys are deliberately not spelled `size_filtered=`/`age_filtered=` — those already appear on the summary line, and a scraper taking the last match would read a link count where it wanted a file count. Attribution costs at most one extra `find`, and only for a link that was actually filtered: with one gate disabled the reason follows by elimination and no second walk is spelled. The churn allowance behind that snapshot label is derived from `--max-age` alone, and a size-only run (`--max-age 0`) therefore gets the minimum allowance of one file, so it takes the label more readily. That is deliberate: the allowance exists because the age predicates are *relative* and re-evaluated per walk, so files crossing the window mid-walk are arithmetic rather than churn — a byte bound is absolute and nothing crosses it because time passed. The label is true whenever it fires (the tree really did change), and widening it with an invented churn model would risk masking real drift. `--no-count-filtered` skips every one of those walks — all four counters then read 0 because nothing was measured, which the run states on its own line. Counting is done by deleting everything but the NUL separators from each walk's output and measuring the result, rather than reading it record by record in Bash — a per-record loop cost several times more than the walk that produced it, and two of the walks match nearly every file. It needs `tr` (already used elsewhere in the script) and `wc`; when `wc` is absent the read loop still runs and produces identical counts, so this is not a new hard dependency. Cost of the counting walks, measured on this host: `/usr` (9 080 files) 176 → **105 ms**, a 50 000-file tree 595 → **344 ms**, a 156 625-file tree 2 880 → **534 ms** — the saving grows with the tree because the old cost was per matched record. `failed=` counts every discovered file that was not collected — unreadable (including a symlink target under `--follow-symlinks`), vanished or changed type mid-run, or upload failed — and a `File breakdown:` line names the reason; directories that could not be read in full are counted in `unreadable_dirs=` — **one count per directory**, measured over the directories themselves. It is not derived from `find`'s diagnostics, which cannot be counted or parsed: a directory that is readable but not *searchable* (mode 0444 — an ordinary non-root situation) emits one diagnostic per **file** inside it, so four files in one directory once read as `unreadable_dirs=4`, while a directory that cannot be opened at all emits one line naming the directory. Two different losses share the one shape `find: <path>: <strerror>`, and the text is not recoverable anyway (GNU quotes with `'` in the C locale and U+2018/U+2019 in a UTF-8 one and ignores `QUOTING_STYLE`, busybox never quotes and splits a newline-bearing path across lines, real paths contain colons, and the prefix is `argv[0]`). The run names both classes apart, because they are different facts: what an unlistable directory held is unknown, while an unsearchable one yields its entries' names and nothing else. Those entries are counted in `unstatable=` — they are **known to exist**, their type, size and age could not be read, so no discovery filter could ever be applied to them and they were silently not collected. `unstatable=` is measured per unsearchable directory only, so a clean run costs nothing; where `find` cannot list an entry it cannot stat (busybox does not) the run says the number is unmeasured rather than printing a bare zero. A walk error that neither probe can attribute sets no count at all — the run says so and stays partial, rather than inventing the one directory the old code fabricated. Explicitly named directories that could not be scanned at all are counted in `unusable_dirs=`. Two limits are worth stating: the probes run only when a walk actually reported an error, so an unsearchable directory that did not make `find` fail — which happens when both discovery gates are off, since nothing then needs a `stat` — is surfaced through `failed=`/`unreadable=` on the individual entries instead of through `unreadable_dirs=`; and a denied directory *inside* another denied directory cannot be seen by the walk at all, so it is counted as one hidden entry rather than as a directory, and what lies beneath it is unknown and uncountable. Both are the same underlying truth: what an unreadable directory contains cannot be enumerated from outside it. Entries hidden by an unsearchable directory are also not counted twice — when both gates are off they are discovered normally and accounted as unreadable files, so the `unstatable=` probe stands down. Anything the collector or the host got wrong — unreadable file, unreadable directory, failed upload, unusable named target — makes the run a partial failure (**exit 4**), rsync's "partial transfer due to error" (23); a non-root run therefore often exits 4 while still uploading everything it could read. When the *only* losses are files that vanished or changed type mid-run — ordinary churn on a live host — the run exits **5** instead, rsync's "partial transfer due to vanished source files" (24), so routine churn is distinguishable from a real problem. Exit 4 wins when both occurred. A run ended by a signal exits **128 + the signal number** — **129** SIGHUP, **130** SIGINT, **131** SIGQUIT, **143** SIGTERM — and each first sends an `interrupted` marker naming the signal in `interrupted_by`, then removes its private work directory. That distinction matters on the server: infrastructure cutting a collection off (a dropped ssh session sends SIGHUP, the most likely way a long remote run ends) is a different event from an operator stopping one, and previously neither was reported at all — HUP and QUIT were left at their default disposition, so the server was left holding a begin marker and nothing else, indistinguishable from a scan still in progress. Under `nohup` the signal arrives already ignored and cannot be trapped; that is benign, because such a run is not killed either and ends normally. A second SIGQUIT during the handler still terminates immediately, so the operator keeps their escalation. On **bash 5.2** a trapped signal can still be lost outright: if it arrives while the shell is expanding a `$( )`, bash fails to re-parse the trap string (`trap: unexpected EOF while looking for matching ')'`) and that firing is discarded — the trap itself stays installed. This is an upstream bug (bug-bash 2023-09 and 2024-02; fixed in the development tree in September 2023, so it ships in **5.3**, and it was not backported to the 5.2 patch series). The collector reduces its exposure by removing most command substitutions from the per-file upload path (three remain: the HTTP-status extraction, the error-tail read on a failed transfer, and the wget boundary seed) — the three scratch-file lookups and the filename sanitiser now return through globals rather than `$( )` — and the exit trap sends the interrupted marker if the run dies without the handler having run. Neither is a cure: if the signal is lost and the run then *completes*, it ends normally and nothing can tell that an interrupt was ever delivered. On 5.3 and later the bug is absent. SIGKILL cannot be trapped, so it can still orphan a work directory — which is why a stale one from a crashed run is deliberately collected by a later scan rather than skipped.
+- Honest accounting: policy exclusions are reported, not silent — `age_filtered=` and `size_filtered=` count the regular files the age and size gates removed at discovery (disjoint: a file that is both oversize and too old counts once, as size), so a run whose whole tree was out of policy is no longer indistinguishable from a complete collection of an empty directory. Each count is measured by matching the files in that category, never by subtracting one walk from another — walks taken at different moments would otherwise publish ordinary churn as a policy exclusion (a directory gaining files mid-run once reported 4710 files "outside the age window" when every file in it was new). `age_ctime_only=` reports how many files matched at discovery by ctime alone, so the cost of the default `any` policy is visible rather than inferred from the server's sample count. Because those walks run after the discovery walk they are not atomic: a tree that changes in between makes the counts a snapshot, which is now detected (`discovered + age_filtered + size_filtered` must equal the regular files present) and labelled rather than presented as fact. `future=` counts collected files whose mtime is ahead of the host clock at the moment of measurement — it carries the full discovery policy, so a future-dated file dropped for size is not claimed as collected, and its reference instant is stamped at counting time rather than at run start, so files merely written *during* the scan are no longer reported as future. The counting walks cover the regular files under each root, so symlink targets collected through `--follow-symlinks` are not attributed to `age_filtered=`/`size_filtered=`/`age_ctime_only=` — a link the two gates removed is counted once in the symlink breakdown, which now names the gate responsible: `filtered_size=` and `filtered_age=`. Those keys are deliberately not spelled `size_filtered=`/`age_filtered=` — those already appear on the summary line, and a scraper taking the last match would read a link count where it wanted a file count. Attribution costs at most one extra `find`, and only for a link that was actually filtered: with one gate disabled the reason follows by elimination and no second walk is spelled. The churn allowance behind that snapshot label is derived from `--max-age` alone, and a size-only run (`--max-age 0`) therefore gets the minimum allowance of one file, so it takes the label more readily. That is deliberate: the allowance exists because the age predicates are *relative* and re-evaluated per walk, so files crossing the window mid-walk are arithmetic rather than churn — a byte bound is absolute and nothing crosses it because time passed. The label is true whenever it fires (the tree really did change), and widening it with an invented churn model would risk masking real drift. `--no-count-filtered` skips every one of those walks — all four counters then read 0 because nothing was measured, which the run states on its own line. Counting is done by deleting everything but the NUL separators from each walk's output and measuring the result, rather than reading it record by record in Bash — a per-record loop cost several times more than the walk that produced it, and two of the walks match nearly every file. It needs `tr` and `wc`, and it is the only place either is used; when either is absent the read loop runs instead and produces identical counts, so this is not a hard dependency. Cost of the counting walks, measured on this host: `/usr` (9 080 files) 176 → **105 ms**, a 50 000-file tree 595 → **344 ms**, a 156 625-file tree 2 880 → **534 ms** — the saving grows with the tree because the old cost was per matched record. `failed=` counts every discovered file that was not collected — unreadable (including a symlink target under `--follow-symlinks`), vanished or changed type mid-run, or upload failed — and a `File breakdown:` line names the reason; directories that could not be read in full are counted in `unreadable_dirs=` — **one count per directory**, measured over the directories themselves. It is not derived from `find`'s diagnostics, which cannot be counted or parsed: a directory that is readable but not *searchable* (mode 0444 — an ordinary non-root situation) emits one diagnostic per **file** inside it, so four files in one directory once read as `unreadable_dirs=4`, while a directory that cannot be opened at all emits one line naming the directory. Two different losses share the one shape `find: <path>: <strerror>`, and the text is not recoverable anyway (GNU quotes with `'` in the C locale and U+2018/U+2019 in a UTF-8 one and ignores `QUOTING_STYLE`, busybox never quotes and splits a newline-bearing path across lines, real paths contain colons, and the prefix is `argv[0]`). The run names both classes apart, because they are different facts: what an unlistable directory held is unknown, while an unsearchable one yields its entries' names and nothing else. Those entries are counted in `unstatable=` — they are **known to exist**, their type, size and age could not be read, so no discovery filter could ever be applied to them and they were silently not collected. `unstatable=` is measured per unsearchable directory only, so a clean run costs nothing; where `find` cannot list an entry it cannot stat (busybox does not) the run says the number is unmeasured rather than printing a bare zero. A walk error that neither probe can attribute sets no count at all — the run says so and stays partial, rather than inventing the one directory the old code fabricated. Explicitly named directories that could not be scanned at all are counted in `unusable_dirs=`. Two limits are worth stating: the probes run only when a walk actually reported an error, so an unsearchable directory that did not make `find` fail — which happens when both discovery gates are off, since nothing then needs a `stat` — is surfaced through `failed=`/`unreadable=` on the individual entries instead of through `unreadable_dirs=`; and a denied directory *inside* another denied directory cannot be seen by the walk at all, so it is counted as one hidden entry rather than as a directory, and what lies beneath it is unknown and uncountable. Both are the same underlying truth: what an unreadable directory contains cannot be enumerated from outside it. Entries hidden by an unsearchable directory are also not counted twice — when both gates are off they are discovered normally and accounted as unreadable files, so the `unstatable=` probe stands down. Anything the collector or the host got wrong — unreadable file, unreadable directory, failed upload, unusable named target — makes the run a partial failure (**exit 4**), rsync's "partial transfer due to error" (23); a non-root run therefore often exits 4 while still uploading everything it could read. When the *only* losses are files that vanished or changed type mid-run — ordinary churn on a live host — the run exits **5** instead, rsync's "partial transfer due to vanished source files" (24), so routine churn is distinguishable from a real problem. Exit 4 wins when both occurred. A run ended by a signal exits **128 + the signal number** — **129** SIGHUP, **130** SIGINT, **131** SIGQUIT, **143** SIGTERM — and each first sends an `interrupted` marker naming the signal in `interrupted_by`, then removes its private work directory. That distinction matters on the server: infrastructure cutting a collection off (a dropped ssh session sends SIGHUP, the most likely way a long remote run ends) is a different event from an operator stopping one, and previously neither was reported at all — HUP and QUIT were left at their default disposition, so the server was left holding a begin marker and nothing else, indistinguishable from a scan still in progress. Under `nohup` the signal arrives already ignored and cannot be trapped; that is benign, because such a run is not killed either and ends normally. A second SIGQUIT during the handler still terminates immediately, so the operator keeps their escalation. On **bash 5.2** a trapped signal can still be lost outright: if it arrives while the shell is expanding a `$( )`, bash fails to re-parse the trap string (`trap: unexpected EOF while looking for matching ')'`) and that firing is discarded — the trap itself stays installed. This is an upstream bug (bug-bash 2023-09 and 2024-02; fixed in the development tree in September 2023, so it ships in **5.3**, and it was not backported to the 5.2 patch series). The collector reduces its exposure by removing most command substitutions from the per-file upload path (three remain: the HTTP-status extraction, the error-tail read on a failed transfer, and the wget boundary seed) — the three scratch-file lookups and the filename sanitiser now return through globals rather than `$( )` — and the exit trap sends the interrupted marker if the run dies without the handler having run. Neither is a cure: if the signal is lost and the run then *completes*, it ends normally and nothing can tell that an interrupt was ever delivered. On 5.3 and later the bug is absent. SIGKILL cannot be trapped, so it can still orphan a work directory — which is why a stale one from a crashed run is deliberately collected by a later scan rather than skipped.
 - File age and file size filtering. `--max-age N` keeps files strictly younger than N 24-hour
   periods (not calendar days), measured when each directory is reached; a file aged exactly
   N×24 h is **not** collected, and the window is evaluated to the minute. Where `find` has no
@@ -103,31 +126,118 @@ Use this collector for incident response and triage on modern Linux or macOS sys
 
 What the collector does on the wire, and what its log lines can and cannot vouch for.
 
-- **Reachability gate, not identity.** Before a single file is read the collector asks
+- **The destination is the operator's to name: `--server` is required and has no default.** It takes
+  a **host**, and only a host, in exactly **one spelling per host**: a DNS name (RFC 1123 labels,
+  `_` tolerated, one trailing root dot allowed), an IPv4 address as four decimal octets, or an IPv6
+  address written **plainly** — `::1`, never `[::1]`. The brackets belong to the URL and the
+  collector adds them; the bracketed form is refused, with a message naming the plain one, because
+  two spellings of one host is one more thing to know and `[`/`]` are glob characters that always
+  needed shell quoting. The scheme comes from `--ssl`, the port from `--port`. Anything that
+  could name a second thing is refused with **exit 2**, before a packet leaves, and the message
+  names the host the value would really have reached -- there is no silent normalisation, because a
+  collector must not decide where evidence goes on the operator's behalf. Refused, with the reason:
+  a **dotless name** (`thunderstorm`, `localhost` — the collected host's own `search` list would
+  complete it, so one command line can reach a different server on every host it runs on while
+  every log reads the same; a trailing root dot such as `thunderstorm.` is absolute and is
+  accepted), a scheme (`http://`, `https://` — the value is a URL, not a host; `--ssl` selects
+  https and `--port` the port), `@` (userinfo: what follows it is the real host, and what precedes it is
+  transmitted to that host as an HTTP Basic credential), `/` `?` `#` (each ends the URL authority,
+  so `--port` lands in the path, query or fragment and the request goes to the scheme's default
+  port), `:` (the port belongs to `--port`), `%` (percent-encoding, and an IPv6 zone id such as `fe80::1%eth0`, which curl
+  connects with and wget refuses outright as an "Invalid IPv6 numeric address"), `[` `]` `{` `}`
+  (curl reads those as a range or list and transfers once per expansion), whitespace, non-ASCII (curl resolves IDN through libidn2 and wget does not, so the
+  same value would name different hosts on the two transports -- pass the punycode form), and any
+  all-numeric value that is not a strict dotted quad. That last rule is not pedantry:
+  `getaddrinfo(3)` still honours `inet_aton`'s legacy forms, so **`010.0.0.9` reaches 8.0.0.9** and
+  `127.1`, `2130706433` and `0x7f000001` all reach 127.0.0.1 -- a leading-zero octet copied out of a
+  ticket used to send a collection to a different host while the log printed the value as typed.
+  The one mechanical step is bracketing an IPv6 address for the URL, which is the only spelling
+  RFC 3986 allows and cannot change which host is named — and it is the collector's step, not the
+  operator's. An **address** reaches only a server that answers without being sent a host name: a
+  Thunderstorm behind name-based virtual hosting answers such a request from a different site
+  (measured: 200 by name, 404 by that host's own address), so the run says so when an address was
+  given and the peer did not answer as a Thunderstorm. Under `--dry-run` nothing is sent, so
+  `--server` is not required and the run says so rather than printing a hostless URL.
+- **Reachability gate, and a minimum of identity.** Before a single file is read the collector asks
   `GET /api/status` and requires a 2xx from the transport itself (a 2xx status line left behind by
-  a proxy's `CONNECT` reply does not count). A 500/502/503/504, 408 or 429 there is retried once, honouring
+  a proxy's `CONNECT` reply does not count), **and requires the body to be Thunderstorm's own status
+  document** -- it must carry at least one of Thunderstorm's own top-level counter keys, and the
+  refusal names the exact set it tested. A 200 carrying `{}` or an HTML page is a
+  service, not a Thunderstorm, and the run stops there instead of walking the filesystem for it.
+  Any one field is enough on purpose: requiring all of them would turn a single server-side rename
+  into "no collection anywhere". The request carries `Cache-Control: no-cache`, so a cached or
+  intermediary-served 200 cannot satisfy a gate whose job is to prove the destination is answering
+  now. A 500/502/503/504, 408 or 429 there is retried once, honouring
   `Retry-After`; a 3xx names the `Location` and says the collector never follows redirects; 401/403
   say the peer wants credentials this collector cannot supply; 407 names the proxy. Passing the gate
-  proves only that *something* answers there.
+  still does not prove the peer is *your* Thunderstorm -- only that it answers like one.
+- **There is exactly one flag for the destination: `--server`.** `--server-addr`, which dialled one
+  address while naming another host on the wire, was **removed by decision**. A Thunderstorm server
+  is reached by an address or by a name, and that flag was the only one asserting both at once. The
+  case it served — dead or poisoned DNS in front of a name-based deployment — is fixed once on the
+  server, by giving it a default virtual host so its address answers, rather than by a flag every
+  client has to carry. Do not re-add it as an oversight.
+
+- **`--dry-run` is a real run minus the transmission.** One rule, and there is no second flag for
+  it: the destination is checked, the tree is walked, every filter and per-file decision is the same,
+  the results are reported with the same numbers — and nothing is sent. Specifically:
+  - **The destination is contacted** when `--server` is given (a `GET /api/status`, which carries no
+    evidence), so a dry run tells you whether the host you named is actually there. It used to skip
+    that check along with the transmission, and `--dry-run --server <dead host>` exited 0 having said
+    nothing about it. A failed check is reported, and the run says what a real run would have done —
+    it does **not** abort, because a dry run that aborts cannot show you what would be sent.
+  - **No collection marker is sent**, on any path including a signal: a marker is data about the run,
+    which is transmission.
+  - **Nothing claims a delivery.** The summary reads `Dry-run completed: … would_submit=N …` rather
+    than `submitted=N`, so the count is the number you came for and the key is still true — and a
+    dry run's log can never be mistaken for a real collection's. The same key appears in
+    the log.
+  - **`--server` is optional**, and only here. Without it there is no destination to check and the
+    run says so, reporting what it would collect locally.
+  - `--ssl` and `--ca-cert` both take effect, because the preflight is a real request.
+- **A destination that dies mid-run stops the run.** Three consecutive uploads that fail to *reach*
+  the destination (a transport failure, not a file the server refused) trigger one fresh
+  `/api/status` check, jittered; if that fails too, every remaining file is counted as failed
+  **without being transmitted**, and the run says so once instead of once per file. Nothing is
+  lost from the accounting -- the discovered-versus-accounted reconciliation still balances.
 - **Every upload must be answered as a Thunderstorm answers.** `/api/checkAsync` acknowledges a
   sample with `{"id":N}` (the reference stub spells the id as a string; both are accepted, an empty
-  id is not). `/api/check` (`--sync`) answers `null` for a clean file or a JSON array of assessments.
-  A 2xx carrying anything else -- `{}`, HTML, an empty body -- is **not** a submitted file. Neither
-  shape is in a published API contract, so a server change here fails **closed**: files are
-  withheld and the run exits 4; it never fails open.
+  id is not). There is no second endpoint and no flag to select one, so this rule is
+  **unconditional**: a 2xx carrying anything else -- `{}`, HTML, an empty body -- is **not** a
+  submitted file. That shape is not in a published API contract, so a server change here fails
+  **closed**: files are withheld and the run exits 4; it never fails open.
 - **Withholding.** If the very first upload of a run is answered that way, the collector stops
   transmitting: the one file whose bytes reached the peer is named in the run-level error line as
   *transmitted and not acknowledged*, every later file is *withheld without transmitting*, all are
-  counted as failed, the end marker is still attempted, exit 4. A peer that has already acknowledged
+  counted as failed, both collection markers are WITHHELD from that peer and the run exits 4. A peer that has already acknowledged
   uploads is **not** poisoned by one odd answer (a proxy's HTML error page); that attempt is retried
   like any other failure.
 - **Redirects are never followed**, on either transport (`curl` has no `-L`; `wget` runs with
   `--max-redirect=0`). A followed redirect turns the POST into a body-less GET.
+- **URL globbing is off.** `curl` runs with `-g`, so a `--server` containing `[ ]` or `{ }` cannot make one
+  invocation transfer to several hosts. Without it, `--server '10.0.0.[1-3]'` delivered the samples, the begin
+  marker and the end marker to every address in the range.
 - **Configuration files are not read.** `curl` runs with `-q` (no `~/.curlrc`, `$CURL_HOME`,
-  `$XDG_CONFIG_HOME/curlrc`); `wget` runs with `WGETRC` pointing at an empty file in the private
-  work directory (`~/.wgetrc` ignored; the administrator's `/etc/wgetrc` still applies). A file on
-  the host must not decide where evidence goes -- the same rule under which an exported
-  `THUNDERSTORM_SERVER` or `THUNDERSTORM_PORT` is ignored and announced as ignored.
+  `$XDG_CONFIG_HOME/curlrc`); `wget` runs with `--no-config`, which reads **no** rc file at all --
+  neither `~/.wgetrc` nor the administrator's `/etc/wgetrc` (nor wherever `$SYSTEM_WGETRC` points).
+  A file on the host must not decide where evidence goes -- the same rule under which an exported
+  `THUNDERSTORM_SERVER` or `THUNDERSTORM_PORT` is ignored and announced as ignored. Measured: with
+  a proxy defined only in the system rc and no proxy variable set at all, every request of a
+  collection went to that proxy while the run reported `Proxy: none` and named the proxy's address
+  as the server's. `WGETRC` alone could not close that channel, because wget reads the system file
+  first.
+- **`--no-config` needs wget 1.19 or newer, and this is a behaviour change.** On an older wget only
+  the *user* rc can be suppressed (`WGETRC` points at an empty file in the private work directory),
+  the system rc still applies, and the run says so rather than guessing: the `Proxy:` line reports
+  the verdict as undecidable instead of claiming none. Where `--no-config` *is* accepted, a
+  deployment that relied on `/etc/wgetrc` for something the collector does not set itself loses it
+  -- most importantly `ca_certificate`: an internal CA trusted only through the system rc is no
+  longer trusted, and TLS then fails with the ordinary untrusted-certificate message. Pass it as
+  `--ca-cert` instead. Also lost, and with no flag to restore them: `header`, `user_agent`,
+  `bind_address` and `http_user`/`http_password` -- none of which can change *whether* the evidence
+  arrives, only how the request looks or which local address it leaves from. Redirects and timeouts
+  are unaffected, because the collector already sets those on the command line where they override
+  any rc value.
 - **The `Proxy:` line models the transport that actually runs.** `curl` reads `http_proxy` (lower
   case only), `https_proxy`/`HTTPS_PROXY`, falls back to `all_proxy`/`ALL_PROXY`, and honours
   `no_proxy`/`NO_PROXY` (`*` = everything, a leading dot is ignored, matching is case-insensitive);
@@ -137,8 +247,11 @@ What the collector does on the wire, and what its log lines can and cannot vouch
 - **TLS.** `--ca-cert` *replaces* the trust store under `curl` but only *adds* to the system store
   under `wget`; the `Transport:` line says which applies. `--insecure` disables verification on both.
 - **Timeouts.** `curl`: 10 s connect, 300 s total per upload. `wget`: 10 s DNS, 10 s connect,
-  300 s idle read -- wget has no total-transfer bound, so a peer that trickles a byte every few
-  minutes can hold one upload open; that is the one place the two transports are not equivalent.
+  300 s idle read, and a **total** wall-clock bound the collector imposes itself -- 300 s per
+  upload, 10 s per collection marker, 15 s for the reachability check -- because wget has no
+  `--max-time` of its own. A peer that trickles a byte every few minutes cannot hold an upload
+  open on either transport. The bound uses `timeout(1)` when the host has it and the collector's
+  own reap when it does not.
 - **Back-pressure.** A 503 is retried up to five times outside the normal retry budget. A numeric
   `Retry-After` is honoured up to a cap of 120 s and the log states both the requested and the
   applied value; an HTTP-date or a missing header is "unknown" and the ordinary exponential backoff
@@ -223,7 +336,7 @@ Acceptance criteria:
 
 Run these after the basic acceptance test. They are intended for human review of expected failure handling, not for upload-volume validation.
 
-### Dry-run does not contact the server
+### Dry-run checks the server but sends nothing
 
 ```bash
 bash scripts/bash/thunderstorm-collector.sh \
@@ -236,9 +349,12 @@ bash scripts/bash/thunderstorm-collector.sh \
 
 Expected result:
 
-- The command exits successfully.
-- No upload is visible in Thunderstorm.
-- The output lists files that would be submitted.
+- The destination **is** contacted: a `GET /api/status`, which carries no evidence. With `--port 1`
+  nothing answers, so the run reports it unreachable and adds that a real run would stop there.
+- The command still exits successfully, and the file preview is still produced -- that preview is
+  the point of a dry run.
+- No upload is visible in Thunderstorm, and no collection marker is sent.
+- The counter is spelled `would_submit=`, never `submitted=`.
 
 ### Thunderstorm service unreachable
 
