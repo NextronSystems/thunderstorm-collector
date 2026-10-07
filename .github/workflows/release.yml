@@ -62,14 +62,14 @@ jobs:
       - name: Verify required legacy package and prepare release metadata
         env:
           VERSION: ${{ github.ref_name }}
-        run: python3 .github/scripts/prepare-release.py release "$VERSION" go/config.yml
+        run: |
+          python3 .github/scripts/prepare-release.py release "$VERSION" go/config.yml
+          mv release/release-notes.md "$RUNNER_TEMP/netscaler-release-notes.md"
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: true
           generate_release_notes: true
-          body_path: release/release-notes.md
-          files: |
-            release/*
-            !release/release-notes.md
+          body_path: ${{ runner.temp }}/netscaler-release-notes.md
+          files: release/*
