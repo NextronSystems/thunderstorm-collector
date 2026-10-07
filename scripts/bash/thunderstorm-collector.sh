@@ -4,11 +4,16 @@
 # Florian Roth / Nextron Systems
 #
 # Goals:
-# - work on old and new Bash versions (Bash 3+)
+# - work on Bash 3.2 and newer
 # - handle missing dependencies with fallbacks
 # - degrade gracefully on partial failures
 
 VERSION="0.5.0"
+
+if (( BASH_VERSINFO[0] < 3 || (BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] < 2) )); then
+    printf 'ERROR: This collector requires Bash 3.2 or newer.\n' >&2
+    exit 2
+fi
 
 # Defaults --------------------------------------------------------------------
 
@@ -32,7 +37,7 @@ DRY_RUN=0
 RETRIES=3
 
 UPLOAD_TOOL=""
-declare -a TMP_FILES_ARR=()
+WORK_DIR=""
 declare -a CURL_EXTRA_OPTS=()
 declare -a WGET_EXTRA_OPTS=()
 
@@ -43,6 +48,7 @@ FILES_SCANNED=0
 FILES_SUBMITTED=0
 FILES_SKIPPED=0
 FILES_FAILED=0
+SCAN_ERRORS=0
 TOTAL_FILES=0
 SCAN_ID=""
 
@@ -130,19 +136,14 @@ timestamp() {
 }
 
 cleanup_tmp_files() {
-    local f
-    for f in "${TMP_FILES_ARR[@]}"; do
-        [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
-    done
-    # Remove fallback temp directory if it exists (created by mktemp_portable)
-    local _fallback_dir="${TMPDIR:-/tmp}/thunderstorm.$$"
-    [ -d "$_fallback_dir" ] && rm -rf "$_fallback_dir"
+    [ -n "$WORK_DIR" ] && rm -rf -- "$WORK_DIR"
+    return 0
 }
 
 INTERRUPTED=0
 
 send_interrupted_marker() {
-    if [ "$DRY_RUN" -eq 0 ] && [ -n "$THUNDERSTORM_SERVER" ]; then
+    if [ "$DRY_RUN" -eq 0 ] && [ -n "$WORK_DIR" ] && [ -n "$UPLOAD_TOOL" ]; then
         local _elapsed=0
         local _now
         _now="$(date +%s 2>/dev/null || echo "$START_TS")"
@@ -260,8 +261,8 @@ Options:
   -k, --insecure             Skip TLS certificate verification
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
   --sync                     Use /api/check (default: /api/checkAsync)
-  --retries <num>            Retry attempts per file (default: 3)
-            --dry-run                  Do not upload or contact the server; only show what would be submitted
+  --retries <num>            Normal attempts per file, 1..10 (default: 3)
+  --dry-run                  Do not upload or contact the server; only show what would be submitted
   --progress                 Force progress reporting
   --no-progress              Disable progress reporting
   --debug                    Enable debug log messages
@@ -282,11 +283,6 @@ is_integer() {
         ''|*[!0-9]*) return 1 ;;
         *) return 0 ;;
     esac
-}
-
-is_positive_integer() {
-    is_integer "$1" || return 1
-    [ "$1" -gt 0 ] 2>/dev/null || return 1
 }
 
 detect_source_name() {
@@ -346,13 +342,9 @@ sanitize_filename_for_multipart() {
 }
 
 file_size_kb() {
-    # Use wc for portability across GNU/BSD and older systems.
     local bytes
-    bytes="$(wc -c < "$1" 2>/dev/null)"
-    # Intentionally split on whitespace to normalize wc output ("   123\n" -> "123").
-    # shellcheck disable=SC2086
-    set -- $bytes
-    bytes="$1"
+    bytes="$(stat -c '%s' -- "$1" 2>/dev/null)" ||
+        bytes="$(stat -f '%z' "$1" 2>/dev/null)" || { echo -1; return 1; }
     case "$bytes" in
         ''|*[!0-9]*) echo -1; return 1 ;;
     esac
@@ -360,21 +352,17 @@ file_size_kb() {
 }
 
 mktemp_portable() {
-    local t
-    t="$(mktemp "${TMPDIR:-/tmp}/thunderstorm.XXXXXX" 2>/dev/null)"
-    if [ -n "$t" ] && [ -f "$t" ]; then
-        echo "$t"
-        return 0
-    fi
-    # Fallback: create a private directory first (mkdir is atomic), then a file inside it.
-    # This avoids the TOCTOU race of creating a predictable file in a shared /tmp.
-    local _dir="${TMPDIR:-/tmp}/thunderstorm.$$"
-    if [ ! -d "$_dir" ]; then
-        ( umask 077 && mkdir "$_dir" ) 2>/dev/null || return 1
-    fi
-    t="$_dir/${RANDOM:-0}.$(date +%N 2>/dev/null || echo 0)"
-    : > "$t" 2>/dev/null || return 1
-    echo "$t"
+    [ -n "$WORK_DIR" ] || return 1
+    mktemp "$WORK_DIR/list.XXXXXX"
+}
+
+escape_find_path() {
+    local path="$1"
+    path="${path//\\/\\\\}"
+    path="${path//\*/\\*}"
+    path="${path//\?/\\?}"
+    path="${path//\[/\\[}"
+    printf '%s' "$path"
 }
 
 detect_upload_tool() {
@@ -401,24 +389,20 @@ upload_with_curl() {
 
     safe_filename="$(sanitize_filename_for_multipart "$filename")"
 
-    resp_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$resp_file")
-    header_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$header_file")
+    resp_file="$WORK_DIR/upload.response"
+    header_file="$WORK_DIR/upload.headers"
+    local err_file="$WORK_DIR/upload.stderr"
+    : > "$header_file" || return 91
 
-    # Build form argument safely — curl handles @path internally
-    local form_arg="file=@${filepath};filename=${safe_filename}"
-
-    local err_file
-    err_file="$(mktemp_portable)" || return 91
-    TMP_FILES_ARR+=("$err_file")
+    # Read through stdin so curl never interprets delimiters in the local path.
+    local form_arg="file=@-;filename=\"${safe_filename}\""
 
     curl -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
-        --max-time 300 \
+        --connect-timeout 10 --max-time 300 \
         -D "$header_file" \
         "$endpoint" \
         -F "$form_arg" \
-        > "$resp_file" 2>"$err_file"
+        < "$filepath" > "$resp_file" 2>"$err_file"
     code=$?
 
     if [ $code -ne 0 ]; then
@@ -428,7 +412,7 @@ upload_with_curl() {
     fi
 
     # Extract HTTP status code from headers
-    http_code="$(grep -oE 'HTTP/[0-9.]+ [0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+    http_code="$(grep -oE '^HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
 
     # Handle 503 back-pressure
     if [ "$http_code" = "503" ]; then
@@ -447,19 +431,17 @@ upload_with_curl() {
     fi
 
     # Only 2xx responses count as a successful submission.
-    if [ -n "$http_code" ]; then
-        case "$http_code" in
-            2[0-9][0-9]) ;;
-            *)
-                local body
-                body="$(cat "$resp_file" 2>/dev/null)"
-                body="${body//$'\r'/ }"
-                body="${body//$'\n'/ }"
-                log_msg error "Server returned HTTP $http_code for '$filepath': $body"
-                return 92
-                ;;
-        esac
-    fi
+    case "$http_code" in
+        2[0-9][0-9]) ;;
+        *)
+            local body
+            body="$(cat "$resp_file" 2>/dev/null)"
+            body="${body//$'\r'/ }"
+            body="${body//$'\n'/ }"
+            log_msg error "Server returned HTTP ${http_code:-unknown} for '$filepath': $body"
+            return 92
+            ;;
+    esac
 
     return 0
 }
@@ -483,7 +465,7 @@ upload_with_wget() {
     local _boundary_attempts=0
     boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}$(date +%s%N 2>/dev/null || echo 0)"
     while [ "$_boundary_attempts" -lt 10 ]; do
-        if ! LC_ALL=C grep -qF "$boundary" "$filepath" 2>/dev/null; then
+        if ! LC_ALL=C grep -qF -- "$boundary" "$filepath" 2>/dev/null; then
             # Also check it doesn't appear in metadata fields
             case "${SOURCE_NAME}${filepath}" in
                 *"$boundary"*) ;;
@@ -494,25 +476,23 @@ upload_with_wget() {
         boundary="----ThunderstormBoundary${$}${RANDOM}${RANDOM}${_boundary_attempts}$(date +%s%N 2>/dev/null || echo 0)"
     done
     if [ "$_boundary_attempts" -ge 10 ]; then
-        log_msg warn "Could not find safe multipart boundary for '$filepath', upload may be malformed"
+        log_msg error "Could not find safe multipart boundary for '$filepath'"
+        return 95
     fi
-    body_file="$(mktemp_portable)" || return 93
-    TMP_FILES_ARR+=("$body_file")
-    resp_file="$(mktemp_portable)" || return 94
-    TMP_FILES_ARR+=("$resp_file")
-    header_file="$(mktemp_portable)" || return 94
-    TMP_FILES_ARR+=("$header_file")
+    body_file="$WORK_DIR/upload.body"
+    resp_file="$WORK_DIR/upload.response"
+    header_file="$WORK_DIR/upload.headers"
 
     {
         printf -- "--%s\r\n" "$boundary"
         printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' "$safe_filename"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
-        cat "$filepath"
+        cat -- "$filepath" || return 95
         printf '\r\n--%s--\r\n' "$boundary"
     } > "$body_file" 2>/dev/null || return 95
 
     wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
-        --timeout=300 \
+        --tries=1 --max-redirect=0 --connect-timeout=10 --read-timeout=300 \
         --header="Content-Type: multipart/form-data; boundary=${boundary}" \
         --post-file="$body_file" \
         "$endpoint" 2>"$header_file"
@@ -520,7 +500,7 @@ upload_with_wget() {
 
     # Extract HTTP status code from headers (wget -S writes headers to stderr with leading spaces)
     local http_code
-    http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+    http_code="$(grep -oE '^[[:space:]]*HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
 
     # Handle 503 back-pressure
     if [ "$http_code" = "503" ]; then
@@ -539,17 +519,15 @@ upload_with_wget() {
     fi
 
     # Only 2xx responses count as a successful submission.
-    if [ -n "$http_code" ]; then
-        case "$http_code" in
-            2[0-9][0-9]) ;;
-            *)
-                local body
-                body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
-                log_msg error "Server returned HTTP $http_code for '$filepath': $body"
-                return 96
-                ;;
-        esac
-    fi
+    case "$http_code" in
+        2[0-9][0-9]) ;;
+        *)
+            local body
+            body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
+            log_msg error "Server returned HTTP ${http_code:-unknown} for '$filepath': $body"
+            return 96
+            ;;
+    esac
 
     return 0
 }
@@ -584,10 +562,8 @@ collection_marker() {
     local marker_url="${base_url}/api/collection"
     local body scan_id_out resp_file header_file
 
-    resp_file="$(mktemp_portable)" || return 1
-    TMP_FILES_ARR+=("$resp_file")
-    header_file="$(mktemp_portable)" || return 1
-    TMP_FILES_ARR+=("$header_file")
+    resp_file="$WORK_DIR/marker.response"
+    header_file="$WORK_DIR/marker.headers"
 
     # Build JSON body with proper escaping
     local safe_source safe_scan_id
@@ -614,29 +590,30 @@ collection_marker() {
         _attempt=$((_attempt + 1))
         _marker_rc=1
         : > "$header_file"
+        : > "$resp_file"
         # Attempt POST — capture HTTP status to detect server-side errors
         if command -v curl >/dev/null 2>&1; then
             curl -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
                 -H "Content-Type: application/json" \
                 -d "$body" \
-                --max-time 10 \
+                --connect-timeout 10 --max-time 10 \
                 "$marker_url" 2>/dev/null
             _marker_rc=$?
         elif command -v wget >/dev/null 2>&1; then
             wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
                 --header "Content-Type: application/json" \
                 --post-data "$body" \
-                --timeout=10 \
+                --tries=1 --max-redirect=0 --timeout=10 \
                 "$marker_url" 2>"$header_file"
             _marker_rc=$?
         fi
         # Validate the HTTP status code even when wget exits non-zero on 4xx/5xx.
         # 404/501 means the server doesn't implement marker endpoint; continue without scan_id.
-        _http_code="$(grep -oE 'HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+        _http_code="$(grep -oE '^[[:space:]]*HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
         if [ -n "$_http_code" ]; then
             case "$_http_code" in
                 2[0-9][0-9])
-                    _marker_rc=0
+                    # Keep a transport failure even if 2xx headers were received.
                     ;;
                 404|501)
                     log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
@@ -647,9 +624,8 @@ collection_marker() {
                     _marker_rc=1
                     ;;
             esac
-        elif [ "$_marker_rc" -eq 0 ]; then
-            # Some clients may succeed without exposing a parseable status line.
-            _marker_rc=0
+        else
+            _marker_rc=1
         fi
         if [ "$_marker_rc" -eq 0 ]; then
             break
@@ -659,6 +635,8 @@ collection_marker() {
             sleep 2
         fi
     done
+
+    [ "$_marker_rc" -eq 0 ] || return "$_marker_rc"
 
     # Extract scan_id from response, handling JSON escapes (e.g. \" and \\ inside the value).
     # Uses awk to find the "scan_id" key and parse the JSON string value properly.
@@ -877,6 +855,7 @@ parse_args() {
             --log-file)
                 [ -n "${2:-}" ] || die "Missing value for $arg"
                 LOGFILE="$2"
+                LOG_TO_FILE=1
                 shift
                 ;;
             --no-log-file)
@@ -896,6 +875,12 @@ parse_args() {
                 ;;
             --)
                 shift
+                if [ $# -gt 0 ]; then
+                    if [ "$add_dir_mode" -eq 0 ]; then
+                        SCAN_FOLDERS=()
+                    fi
+                    SCAN_FOLDERS+=("$@")
+                fi
                 break
                 ;;
             -*)
@@ -921,9 +906,11 @@ validate_config() {
     is_integer "$RETRIES" || die "retries must be numeric: '$RETRIES'"
 
     [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0"
+    [ "$THUNDERSTORM_PORT" -le 65535 ] || die "Port must be <= 65535"
     [ "$MAX_AGE" -ge 0 ] || die "max-age must be >= 0"
     [ "$MAX_FILE_SIZE_KB" -gt 0 ] || die "max-size-kb must be > 0"
     [ "$RETRIES" -ge 1 ] || die "retries must be >= 1"
+    [ "$RETRIES" -le 10 ] || die "retries must be <= 10"
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Server must not be empty"
     if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
@@ -947,13 +934,16 @@ main() {
     local file_path
     local size_kb
     local elapsed=0
-    local find_mtime
     local find_results_file
 
     parse_args "$@"
     detect_source_name
     validate_config
     print_banner
+
+    WORK_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/thunderstorm.XXXXXX")" ||
+        die "Cannot create private temporary directory"
+    WORK_DIR="$(cd -- "$WORK_DIR" && pwd -P)" || die "Cannot access temporary directory"
 
     if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
         log_msg warn "Running without root privileges; some files may be inaccessible"
@@ -1004,8 +994,7 @@ main() {
         fi
         local _begin_resp_file
         local _begin_rc=0
-        _begin_resp_file="$(mktemp_portable)" || { log_msg error "Cannot create temp file"; exit 2; }
-        TMP_FILES_ARR+=("$_begin_resp_file")
+        _begin_resp_file="$WORK_DIR/begin.response"
         collection_marker "$base_url" "begin" "" "" > "$_begin_resp_file"
         _begin_rc=$?
         SCAN_ID="$(cat "$_begin_resp_file" 2>/dev/null)"
@@ -1038,6 +1027,15 @@ main() {
 
     # Build find exclusions once (shared across all scan dirs)
     local find_excludes=()
+    find_excludes+=(-path "$(escape_find_path "$WORK_DIR")" -prune -o)
+    if [ "$LOG_TO_FILE" -eq 1 ]; then
+        local log_dir log_path
+        log_dir="$(dirname -- "$LOGFILE")"
+        if log_dir="$(cd -- "$log_dir" && pwd -P)"; then
+            log_path="$log_dir/$(basename -- "$LOGFILE")"
+            find_excludes+=(-path "$(escape_find_path "$log_path")" -prune -o)
+        fi
+    fi
     local _ep
     for _ep in "${EXCLUDE_PATHS[@]}"; do
         [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
@@ -1073,20 +1071,31 @@ main() {
     for scandir in "${SCAN_FOLDERS[@]}"; do
         if [ ! -d "$scandir" ]; then
             log_msg warn "Skipping non-directory path '$scandir'"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
+            continue
+        fi
+
+        if ! scandir="$(cd -- "$scandir" && pwd -P)"; then
+            log_msg warn "Cannot access scan directory"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
             continue
         fi
 
         log_msg info "Scanning '$scandir'"
         find_results_file="$(mktemp_portable)" || {
             log_msg error "Could not create temporary file list for '$scandir'"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
             continue
         }
-        TMP_FILES_ARR+=("$find_results_file")
         if [ "$MAX_AGE" -gt 0 ]; then
-            find "$scandir" "${find_excludes[@]}" -type f -mtime "-${MAX_AGE}" -print0 > "$find_results_file" 2>/dev/null || true
+            find "$scandir" "${find_excludes[@]}" -type f -mtime "-${MAX_AGE}" -print0 > "$find_results_file" 2> "$WORK_DIR/find.stderr"
         else
             # MAX_AGE=0 means no age filter — collect all files regardless of modification time
-            find "$scandir" "${find_excludes[@]}" -type f -print0 > "$find_results_file" 2>/dev/null || true
+            find "$scandir" "${find_excludes[@]}" -type f -print0 > "$find_results_file" 2> "$WORK_DIR/find.stderr"
+        fi
+        if [ "$?" -ne 0 ]; then
+            log_msg warn "Incomplete scan of '$scandir': $(cat "$WORK_DIR/find.stderr")"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
         fi
         all_find_files+=("$find_results_file")
 
@@ -1117,9 +1126,12 @@ main() {
                 printf '\r[%d/%d] %d%%' "$_processed" "$TOTAL_FILES" "$(( _processed * 100 / TOTAL_FILES ))" >&2
             fi
 
-            [ -f "$file_path" ] || continue
-
             FILES_SCANNED=$((FILES_SCANNED + 1))
+            if [ ! -f "$file_path" ] || [ -L "$file_path" ] || [ ! -r "$file_path" ]; then
+                FILES_FAILED=$((FILES_FAILED + 1))
+                log_msg warn "File disappeared, changed type, or is unreadable: '$file_path'"
+                continue
+            fi
 
             # Skip files inside cloud storage folders
             if is_cloud_path "$file_path"; then
@@ -1130,8 +1142,8 @@ main() {
 
             size_kb="$(file_size_kb "$file_path")"
             if [ "$size_kb" -lt 0 ]; then
-                FILES_SKIPPED=$((FILES_SKIPPED + 1))
-                log_msg debug "Skipping unreadable file '$file_path'"
+                FILES_FAILED=$((FILES_FAILED + 1))
+                log_msg warn "Cannot determine size of '$file_path'"
                 continue
             fi
 
@@ -1161,15 +1173,18 @@ main() {
         printf '\r\033[K' >&2
     fi
 
-    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$elapsed"
+    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$elapsed"
 
     # Send collection end marker with run statistics
     if [ "$DRY_RUN" -eq 0 ]; then
         local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${elapsed}}"
-        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null
+        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null || {
+            log_msg warn "Collection end marker failed; uploads may still have succeeded"
+            return 1
+        }
     fi
 
-    if [ "$FILES_FAILED" -gt 0 ]; then
+    if [ "$FILES_FAILED" -gt 0 ] || [ "$SCAN_ERRORS" -gt 0 ]; then
         return 1
     fi
     return 0

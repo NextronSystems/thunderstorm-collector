@@ -82,9 +82,9 @@ FAILED_NAMES=""
 
 # Colours (disabled if not a terminal)
 if [ -t 1 ]; then
-    GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'; BOLD='\033[1m'; RESET='\033[0m'
+    GREEN='\033[0;32m'; RED='\033[0;31m'; BOLD='\033[1m'; RESET='\033[0m'
 else
-    GREEN=''; RED=''; YELLOW=''; BOLD=''; RESET=''
+    GREEN=''; RED=''; BOLD=''; RESET=''
 fi
 
 setup_tmp() {
@@ -101,7 +101,9 @@ cleanup() {
         rm -rf "$TEST_TMP"
     fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Pick an available port
 pick_port() {
@@ -127,7 +129,7 @@ start_stub() {
     fi
     STUB_PORT="$(pick_port)"
     # Clean state for each test
-    rm -rf "$UPLOADS_DIR"/* "$AUDIT_LOG" 2>/dev/null || true
+    rm -rf "${UPLOADS_DIR:?}"/* "$AUDIT_LOG"
     "$STUB_BIN" \
         --port "$STUB_PORT" \
         --uploads-dir "$UPLOADS_DIR" \
@@ -136,8 +138,10 @@ start_stub() {
     STUB_PID=$!
     # Wait for server readiness
     local i
-    for i in $(seq 1 30); do
-        if curl -fsS "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
+    for ((i = 0; i < 30; i++)); do
+        kill -0 "$STUB_PID" 2>/dev/null || break
+        if curl -fsS --connect-timeout 1 --max-time 2 \
+            "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.2
@@ -160,7 +164,7 @@ stop_stub() {
 
 restart_stub() {
     stop_stub
-    start_stub
+    start_stub || exit 1
 }
 
 # Whether stub-side verification (audit log, uploads dir) is available
@@ -288,7 +292,7 @@ create_fake_tool_path() {
     local dir="$TEST_TMP/fake-tools-$1"
     mkdir -p "$dir"
     local cmd path
-    for cmd in bash awk cat date find grep head hostname id mktemp od rm sed sleep tail tr uname wc; do
+    for cmd in bash awk basename cat date dirname find grep head hostname id mktemp od rm sed sleep stat tail tr uname wc; do
         path="$(command -v "$cmd" 2>/dev/null || true)"
         [ -n "$path" ] && ln -sf "$path" "$dir/$cmd"
     done
@@ -329,7 +333,9 @@ test_basic_async_upload() {
     assert_eq "failed" "0" "$failed" || return 1
     # Wait briefly for async processing, then check server
     sleep 0.5
-    assert_ge "stub scanned" 3 "$(stub_scanned)" || return 1
+    if has_stub_verification; then
+        assert_ge "stub scanned" 3 "$(stub_scanned)" || return 1
+    fi
 }
 
 # ── 2. Basic upload (sync) ──────────────────────────────────────────────────
@@ -424,10 +430,11 @@ test_nonexistent_directory_warning() {
     create_file "$d/a.txt"
 
     # Also pass a non-existent dir — collector should warn but continue
-    local out; out="$(bash "$COLLECTOR" \
+    local out rc=0; out="$(bash "$COLLECTOR" \
         --server "$(server_host)" --port "$STUB_PORT" --no-log-file \
-        --dir /nonexistent_path_$RANDOM --dir "$d" --max-age 30 2>&1)"
+        --dir "$TEST_TMP/nonexistent_path" --dir "$d" --max-age 30 2>&1)" || rc=$?
 
+    assert_eq "incomplete scan exit code" "1" "$rc" || return 1
     assert_contains "warn about missing dir" "non-directory" "$out" || return 1
     local submitted; submitted="$(parse_collector_stat "$out" submitted)"
     assert_eq "submitted" "1" "$submitted" || return 1
@@ -454,7 +461,8 @@ test_file_content_integrity() {
     has_stub_verification || { echo "    (skipped: needs stub server)"; return 0; }
     restart_stub
     local d; d="$(create_sample_dir integrity)"
-    local content="THUNDERSTORM_INTEGRITY_TEST_$(date +%s)"
+    local content
+    content="THUNDERSTORM_INTEGRITY_TEST_$(date +%s)"
     create_file "$d/check.bin" "$content"
     local expected_sha; expected_sha="$(sha256sum "$d/check.bin" | awk '{print $1}')"
 
@@ -551,9 +559,7 @@ test_symlinks_not_followed() {
     local submitted; submitted="$(parse_collector_stat "$out" submitted)"
 
     # find -type f only returns regular files, not symlink targets
-    # But find does follow symlinked directories by default on some systems.
-    # The key thing: real.txt should always be submitted.
-    assert_ge "submitted at least real.txt" 1 "$submitted" || return 1
+    assert_eq "only real.txt submitted" 1 "$submitted" || return 1
 }
 
 # ── 15. Validation: invalid port ────────────────────────────────────────────
@@ -628,7 +634,7 @@ test_log_file_written() {
     bash "$COLLECTOR" \
         --server "$(server_host)" --port "$STUB_PORT" \
         --dir "$d" --max-age 30 --source log-test \
-        --log-file "$log_path" --quiet 2>&1 >/dev/null
+        --log-file "$log_path" --quiet >/dev/null 2>&1
 
     [ -f "$log_path" ] || { printf "    ${RED}FAIL${RESET}: log file not created\n"; return 1; }
     assert_contains "log has collector info" "Thunderstorm Collector" "$(cat "$log_path")" || return 1
@@ -743,12 +749,7 @@ test_max_age_zero_includes_all() {
     local out; out="$(run_collector --dir "$d" --max-age 0)"
     local scanned; scanned="$(parse_collector_stat "$out" scanned)"
 
-    # -mtime -0 matches files modified in the last 0 days (i.e., today or
-    # the last 24h, which depends on find implementation). This is tricky.
-    # With max-age 0, the collector uses find -mtime -0. On GNU find this
-    # matches files modified in the last 24h. The old file should be excluded.
-    # This test documents the actual behavior.
-    assert_ge "scanned at least 1" 1 "$scanned" || return 1
+    assert_eq "no age filter includes old and recent files" 2 "$scanned" || return 1
 }
 
 # ── 27. Max-age CLI override actually takes effect ───────────────────────────
@@ -947,6 +948,10 @@ run_test test_wget_collection_marker_404_nonfatal
 run_test test_redirect_upload_rejected
 
 # Summary
+if [ "$TESTS_RUN" -eq 0 ]; then
+    printf 'ERROR: No Bash tests matched TEST_FILTER.\n' >&2
+    exit 2
+fi
 printf "\n${BOLD}Results:${RESET} %d/%d passed" "$TESTS_PASSED" "$TESTS_RUN"
 if [ "$TESTS_FAILED" -gt 0 ]; then
     printf ", ${RED}%d failed${RESET}\n" "$TESTS_FAILED"
