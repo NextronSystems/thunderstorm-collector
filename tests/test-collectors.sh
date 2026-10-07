@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # test-collectors.sh - Test Thunderstorm collector scripts
 #

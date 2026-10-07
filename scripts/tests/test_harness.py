@@ -106,6 +106,19 @@ class ShellSafeguardTests(unittest.TestCase):
         return subprocess.run(["bash", "-c", "set -euo pipefail\n" + body],
                               capture_output=True, text=True, check=False)
 
+    def test_legacy_suite_rejects_an_unsupported_bash(self):
+        entrypoint = TESTS_DIR.parent.parent / "tests" / "test-collectors.sh"
+        for interpreter in dict.fromkeys((shutil.which("bash"), "/bin/bash")):
+            supported = subprocess.run(
+                [interpreter, "-c", "(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) ))"],
+                check=False,
+            ).returncode == 0
+            result = subprocess.run([interpreter, str(entrypoint), "--help"],
+                                    capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0 if supported else 1, result.stderr)
+            if not supported:
+                self.assertIn("require Bash 4.3 or newer", result.stderr)
+
     def test_failed_dry_run_is_not_a_pass(self):
         with tempfile.TemporaryDirectory(prefix="harness-dry-run-") as directory:
             result = self.run_shell(

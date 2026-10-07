@@ -8,6 +8,7 @@ import shutil
 import sys
 
 
+# Interface probes distinguish old/new scripts during rollout, not their full capabilities.
 SHELL_FLAGS = ("--server", "--port", "--dir", "--max-age", "--source", "--dry-run")
 PYTHON_FLAGS = ("--server", "--port", "--dirs", "--max-age", "--source", "--dry-run")
 PS_FLAGS = ("ThunderstormServer", "ThunderstormPort", "Folder", "Source", "MaxAge", "MaxSize", "AllExtensions")
