@@ -54,6 +54,6 @@ VERSION=validation-local bash .github/scripts/build-legacy-netscaler.sh
 python3 .github/scripts/test-legacy-release.py
 ```
 
-The build creates only its separate `go/dist/*-amd64-freebsd8-netscaler.tar.gz` and checksum. The publishing job downloads that required Actions artifact and verifies it before publishing the same tagged GitHub release as the regular packages. Missing/corrupt packages or checksums fail release preparation. Normal build flags, vendor layout and output paths remain intact.
+The build creates only its separate `go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz` and checksum. The publishing job downloads that required Actions artifact and verifies it before publishing the same tagged GitHub release as the regular packages. Missing/corrupt packages or checksums fail release preparation. Normal build flags, vendor layout and output paths remain intact.
 
 The artifact is a customer download after release; a local old toolchain is only an optional advanced build path. No tags or historical releases are changed to validate this pipeline.

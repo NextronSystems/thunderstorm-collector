@@ -8,7 +8,7 @@ from pathlib import Path
 
 repo = Path(__file__).resolve().parents[2]
 prepare = runpy.run_path(str(Path(__file__).with_name("prepare-release.py")))["prepare"]
-packages = list((repo / "go/dist").glob("*-amd64-freebsd8-netscaler.tar.gz"))
+packages = list((repo / "go/legacy/dist").glob("*-amd64-freebsd8-netscaler.tar.gz"))
 assert len(packages) == 1, "Expect exactly one legacy validation package"
 archive = packages[0]
 version = archive.name[len("thunderstorm-collector-"):-len("-amd64-freebsd8-netscaler.tar.gz")]

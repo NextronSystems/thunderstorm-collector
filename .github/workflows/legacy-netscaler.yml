@@ -52,7 +52,7 @@ jobs:
         with:
           name: netscaler-freebsd8
           path: |
-            go/dist/*-amd64-freebsd8-netscaler.tar.gz
-            go/dist/*-amd64-freebsd8-netscaler.tar.gz.sha256
+            go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz
+            go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14

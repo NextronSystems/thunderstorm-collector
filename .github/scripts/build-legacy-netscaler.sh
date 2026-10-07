@@ -30,7 +30,7 @@ GOOS=linux GOARCH=amd64 "$LEGACY_GO" test -v "$import_path"
 GOOS=linux GOARCH=amd64 "$LEGACY_GO" build -o "$work/linux-collector" "$import_path"
 python3 "$repo/.github/scripts/test-legacy-runtime.py" "$work/linux-collector" "$repo/go/config.yml"
 name="thunderstorm-collector-$version-amd64-freebsd8-netscaler"
-mkdir -p "$work/$name" "$repo/go/dist"
+mkdir -p "$work/$name" "$repo/go/legacy/dist"
 GOOS=freebsd GOARCH=amd64 "$LEGACY_GO" build -ldflags '-w -s' \
     -o "$work/$name/amd64-freebsd8-netscaler-thunderstorm-collector" "$import_path"
 chmod 755 "$work/$name/amd64-freebsd8-netscaler-thunderstorm-collector"
@@ -59,7 +59,7 @@ validation=Go 1.9.7 Linux/amd64 host tests and HTTP integration; FreeBSD ELF/pac
 FreeBSD_8.4_runtime=pending
 NetScaler_appliance_firmware=pending
 EOF
-tar -czf "$repo/go/dist/$name.tar.gz" -C "$work" "$name"
-(cd "$repo/go/dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-python3 "$repo/.github/scripts/verify-legacy-package.py" "$repo/go/dist/$name.tar.gz" "$repo/go/config.yml"
-echo "Created go/dist/$name.tar.gz"
+tar -czf "$repo/go/legacy/dist/$name.tar.gz" -C "$work" "$name"
+(cd "$repo/go/legacy/dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+python3 "$repo/.github/scripts/verify-legacy-package.py" "$repo/go/legacy/dist/$name.tar.gz" "$repo/go/config.yml"
+echo "Created go/legacy/dist/$name.tar.gz"
