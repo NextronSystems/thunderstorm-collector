@@ -103,6 +103,20 @@ You can find precompiled binaries for numerous platforms in the [releases](https
 
 **Note:** In general, Go 1.10 is used to build the binaries to ensure the broadest possible compatibility with older operating system versions. Additionally, this is complemented by builds with the latest stable Go version for targets that are not supported by Go 1.10.
 
+### Citrix NetScaler and FreeBSD 8.4
+
+For older Citrix NetScaler appliances based on **FreeBSD 8.4**, use a separate legacy collector built with **Go 1.9.7**, targeting **freebsd/amd64** with `CGO_ENABLED=0`. Confirm that your appliance is 64-bit amd64 before selecting it. The repository records historical use of Go 1.9.7 on FreeBSD 8.4 NetScaler gateways, but does not identify firmware versions or the architecture of those historical deployments. No 386 legacy package is promised without a verified target need.
+
+The dedicated package is planned as `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz`, containing the executable, `config.yml`, and compatibility/build information. It is **not yet a published download**. It will be available from the first tagged release containing the legacy build and packaging change; consult that release's assets and checksums. Until then, do not substitute the regular FreeBSD package or assume the historical binary matches today's source.
+
+**Testing status:** the current source and pinned vendored dependencies have been cross-compiled for freebsd/amd64 with Go 1.9.7, and the existing Go tests passed with that compiler on Linux/amd64. The release pipeline is under implementation. These Linux-hosted checks do not execute the FreeBSD binary. Runtime validation on FreeBSD 8.4 and on a named NetScaler appliance/firmware remains pending. The [official Go FreeBSD table](https://go.dev/wiki/FreeBSD) lists Go 1.9.7 as the final version supporting FreeBSD 8-STABLE; this supports the toolchain choice, not a claim that a particular collector binary works on your appliance.
+
+For other NetScaler versions, determine the actual OS version and CPU architecture and select a collector using verified compatibility information. Not every NetScaler requires Go 1.9.7, and not every regular FreeBSD binary is suitable. Keep firmware-specific validation evidence in this section rather than assuming universal NetScaler support.
+
+Go 1.9.7 is an **unsupported legacy toolchain** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its runtime and standard library, including networking and TLS code shipped in the binary, lack subsequent security fixes. An isolated build job does not remove these limitations. Retain certificate verification and server security settings; if secure interoperability fails, use a supported collector/platform rather than weakening them.
+
+Downloading the dedicated package is the intended path once published. Building from source with the exact legacy toolchain is an optional advanced path and requires verification of the source, vendored dependencies and resulting binary; the regular [build instructions](#build) use Go 1.10 or later and are not proof of Go 1.9.7 compatibility.
+
 ### Unsupported Versions
 
 The Go Collector does not run on:
@@ -120,7 +134,7 @@ If you need to check which Go version was used to build a specific binary, unfor
 
 The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
 
-The pre-compiled binaries for FreeBSD have been built with Go 1.10, which supports FreeBSD 10, 11 and 12. If you have to use the collector on older FreeBSD versions, visit [this page](https://github.com/golang/go/wiki/FreeBSD) to get information on the last supported Go version. E.g. to build a version of the Thunderstorm Collector that runs on old Citrix Netscaler gateways, we had to use Go 1.9.7 for the FreeBSD 8.4 used on these platforms.
+Regular FreeBSD packages follow the normal Go 1.10/stable build process. For FreeBSD 8.4 NetScaler gateways, see the [separate legacy package guidance](#citrix-netscaler-and-freebsd-84) above.
 
 Note: We haven't tested all compiled binaries on the respective platforms. Please report issues with the execution.
 

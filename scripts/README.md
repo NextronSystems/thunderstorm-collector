@@ -2,6 +2,34 @@
 
 The Thunderstorm collector script library is a library of script examples that you can use for sample collection purposes.
 
+## VMware ESXi: use the Python collector
+
+For VMware ESXi, use [the Python collector](thunderstorm-collector.py). Nextron has used this collector successfully on ESXi systems. The generic Bash collector is not the recommended starting point for ESXi.
+
+### Requirements and compatibility
+
+- Python **3.6 or later** is required by the current implementation (it uses f-strings). All imported modules are part of the Python standard library; no third-party packages are needed.
+- Check that your appliance already provides a suitable Python interpreter. This guidance does not recommend installing an unsupported runtime or changing ESXi security settings.
+- Exact tested ESXi firmware versions and collector revisions have not been supplied. Historical success is not a compatibility guarantee for every ESXi release or for later collector changes.
+
+### Download and quick start
+
+Download the Python file from [the published releases](https://github.com/NextronSystems/thunderstorm-collector/releases). Existing releases provide an individual versioned file, for example `thunderstorm-collector-1.0.1.py`; there is currently no released scripts ZIP package. The source linked above reflects this branch, while release files reflect their tagged version.
+
+Use an existing, explicitly selected directory containing only a few synthetic test files. Replace the directory and server placeholders, and adapt the filename to the downloaded release:
+
+```sh
+python3 ./thunderstorm-collector-1.0.1.py \
+  --server thunderstorm.example.internal --port 8080 \
+  --dirs /absolute/path/to/collector-test --source esxi-test
+```
+
+This **uploads** matching files; it is not a dry run. `python3` denotes an available compatible interpreter, not a guaranteed ESXi interpreter path. Always pass an absolute directory to `--dirs`; omitting it selects `/`. Explicitly pass `--port`: although the script's help mentions 8080, the current argument definition does not set that default.
+
+The script selects files modified within 14 days and no larger than 20 MiB, skips symlinks, `/proc`, `/dev`, `/sys` and its configured path patterns (including common virtual disk files). These filters are configured in the source; there is no YAML configuration or dry-run option. Supported arguments are `--dirs` (`-d`), `--server` (`-s`, required), `--port` (`-p`), `--tls` (`-t`), `--source` (`-S`), `--debug`, and `--insecure` (`-k`). For HTTPS, add `--tls` and the configured HTTPS port, retaining certificate verification.
+
+The current script has limited error handling: its submitted counter is not a reliable success count, and some HTTP error responses can cause repeated attempts without a fixed limit. Begin with a small controlled test and check server-side results. Improvements under review in separate script PRs are not assumed by these instructions.
+
 ## thunderstorm-collector Shell Script
 
 A shell script for Linux.
