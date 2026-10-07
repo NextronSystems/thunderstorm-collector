@@ -276,7 +276,7 @@ detect_source_name() {
 urlencode() {
     # POSIX-safe urlencode: no bash C-style for loop or ${var:i:1}
     # Process od hex output word by word via set --
-    _ue_hex="$(printf '%s' "$1" | od -An -tx1 | tr -d '\n')"
+    _ue_hex="$(printf '%s' "$1" | od -v -An -tx1 | tr -d '\n')"
     # shellcheck disable=SC2086
     set -- $_ue_hex
     _ue_result=""
@@ -625,7 +625,7 @@ upload_with_nc() {
 # Handles backslash, double-quote, and all control characters (0x00-0x1F)
 # Uses od + byte-by-byte rebuild for full POSIX portability
 json_escape() {
-    _je_hex="$(printf '%s' "$1" | od -An -tx1 | tr -d '\n')"
+    _je_hex="$(printf '%s' "$1" | od -v -An -tx1 | tr -d '\n')"
     _je_result=""
     # shellcheck disable=SC2086
     set -- $_je_hex

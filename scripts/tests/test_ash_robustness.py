@@ -134,7 +134,7 @@ class AshRobustnessTests(unittest.TestCase):
                  "back\\slash.txt", "-leading.txt", "unicode-\u00e4.txt"]
         for name in names:
             (self.samples / name).write_bytes(b"\x00\xff" + name.encode())
-        source = 'source \u00e4 & + " \\ \n\t'
+        source = 'a' * 96 + ' source \u00e4 & + " \\ \n\t'
         result = self.run_collector("--source", source)
         self.assertEqual(result.returncode, 0, self.output)
         self.assert_payloads([b"\x00\xff" + name.encode() for name in names])
