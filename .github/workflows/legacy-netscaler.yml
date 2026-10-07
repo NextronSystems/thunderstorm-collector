@@ -1,0 +1,58 @@
+name: Legacy NetScaler
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # A maintained Actions runtime prepares pinned modules; only the application
+      # compiler/runtime is old. No dependency versions are resolved dynamically.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: go/go.sum
+      - name: Prepare pinned dependencies
+        working-directory: go
+        env:
+          GOFLAGS: -mod=readonly
+        run: |
+          go mod download
+          go mod verify
+          go mod vendor
+          git diff --exit-code -- go.mod go.sum
+      - name: Install checksum-verified Go 1.9.7
+        env:
+          LEGACY_TOOLCHAIN_DIR: ${{ runner.temp }}/netscaler-toolchain
+        run: bash .github/scripts/install-legacy-go.sh
+      - name: Test, build and verify legacy package
+        env:
+          LEGACY_GO: ${{ runner.temp }}/netscaler-toolchain/go/bin/go
+          VERSION: ${{ github.ref_name }}
+        # PR refs contain a slash (e.g. 50/merge); use a safe validation version.
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            export VERSION="validation-${GITHUB_SHA:0:12}"
+          fi
+          bash .github/scripts/build-legacy-netscaler.sh
+      - name: Verify release staging fails when legacy package is absent
+        run: python3 .github/scripts/test-legacy-release.py
+      - name: Transfer package to release job
+        uses: actions/upload-artifact@v7
+        with:
+          name: netscaler-freebsd8
+          path: |
+            go/dist/*-amd64-freebsd8-netscaler.tar.gz
+            go/dist/*-amd64-freebsd8-netscaler.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -99,6 +99,8 @@ The default configuration file named `config.yml` is used by default. We provide
 
 ## Precompiled Binaries
 
+For FreeBSD 8.4 NetScaler targets, see the [dedicated legacy package and validation status](legacy/README.md). It will be attached automatically starting with the first tagged release containing that build change; regular FreeBSD packages are not interchangeable.
+
 You can find precompiled binaries for numerous platforms in the [releases](https://github.com/NextronSystems/thunderstorm-collector/releases) section.
 
 **Note:** In general, Go 1.10 is used to build the binaries to ensure the broadest possible compatibility with older operating system versions. Additionally, this is complemented by builds with the latest stable Go version for targets that are not supported by Go 1.10.

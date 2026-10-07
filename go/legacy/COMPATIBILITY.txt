@@ -1,0 +1,34 @@
+Legacy Citrix NetScaler collector: FreeBSD 8.4, amd64 (64-bit x86)
+
+Built from the shared collector source using exactly Go 1.9.7, with CGO_ENABLED=0.
+The official Go FreeBSD table lists Go 1.9.7 as the final supporting version for
+FreeBSD 8-STABLE: https://go.dev/wiki/FreeBSD
+The repository records historical Go 1.9.7 use on FreeBSD 8.4 NetScaler gateways,
+but does not identify their architecture, collector revision or firmware.
+The amd64 target is supported by that Go table; historical appliance architecture
+has not been independently established. Verify your own appliance architecture.
+
+Validation: compilation and ELF/package checks; shared source and HTTP submission
+executed with Go 1.9.7 on a Linux/amd64 test host. This does NOT execute the
+FreeBSD binary or prove operation against a real Thunderstorm service.
+Runtime testing on FreeBSD 8.4: pending.
+Runtime testing on a named NetScaler appliance/firmware: pending.
+No firmware/version matrix or customer validation is claimed for this artifact.
+
+Go 1.9.7 is unsupported. The shipped runtime and standard library, including TLS
+and HTTP code, lack later security fixes. Isolated CI does not modernize them.
+Keep TLS certificate verification and server security settings enabled. If secure
+interoperability fails, use a supported collector/platform instead of weakening
+security. Release policy: https://go.dev/doc/devel/release#policy
+
+Use this separate package only for the verified OS/architecture target.
+Regular FreeBSD packages are not interchangeable with this legacy build.
+No collector features are intentionally removed. Retries, including HTTP 503,
+are bounded to three retries (four total attempts). The packaged config.yml is
+the same configuration as regular builds and is validated with Go 1.9.7.
+FreeBSD filesystem exclusions retain the shared collector's existing behavior.
+
+Check BUILD-INFO.txt and the release SHA-256 checksum before use. Select a small,
+explicit test directory first. From the unpacked directory, preview selection:
+  ./amd64-freebsd8-netscaler-thunderstorm-collector --dry-run --debug -p /absolute/path/to/collector-test
+Then use the documented Go CLI and your Thunderstorm server configuration.

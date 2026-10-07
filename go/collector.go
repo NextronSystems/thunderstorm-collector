@@ -395,7 +395,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		if info.retries < maxRetries {
 			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, err)
 			info.retries++
-			time.Sleep(baseRetryDelay * time.Duration(1<<info.retries))
+			time.Sleep(baseRetryDelay * time.Duration(1<<(info.retries-1)))
 			return true
 		} else {
 			c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it.", info.path)
@@ -405,9 +405,15 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusServiceUnavailable {
+		if info.retries >= maxRetries {
+			c.logger.Printf("Thunderstorm has no free capacities for file '%s', canceling it after %d retries", info.path, maxRetries)
+			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+			return false
+		}
+		info.retries++
 		retryAfter := response.Header.Get("Retry-After")
 		retryTime, err := strconv.Atoi(retryAfter)
-		if err != nil {
+		if err != nil || retryTime < 0 {
 			retryTime = 30 // Default to 30 seconds cooldown time
 		}
 		c.logger.Printf("Thunderstorm has no free capacities for file '%s', retrying in %d seconds", info.path, retryTime)
