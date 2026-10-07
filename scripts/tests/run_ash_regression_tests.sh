@@ -11,8 +11,8 @@
 
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 COLLECTOR="$REPO_ROOT/scripts/ash/thunderstorm-collector-ash.sh"
 
 PASS=0
@@ -51,7 +51,9 @@ skip() {
 cleanup() {
     [ -n "${TMP_ROOT:-}" ] && [ -d "$TMP_ROOT" ] && rm -rf "$TMP_ROOT"
 }
-trap cleanup EXIT INT TERM
+trap cleanup 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 detect_ash_shell() {
     if command -v ash >/dev/null 2>&1; then
@@ -75,11 +77,12 @@ detect_ash_shell() {
 
 ASH_CMD="${ASH_SHELL:-$(detect_ash_shell 2>/dev/null || true)}"
 if [ -z "$ASH_CMD" ]; then
-    skip "no ash/dash/busybox sh available"
-    exit 0
+    fail "no ash/dash/busybox sh available"
+    exit 1
 fi
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ash-regression-tests.XXXXXX")
+mkdir "$TMP_ROOT/input"
 
 run_ash() {
     # Intentionally rely on word splitting so "<busybox-path> sh" works.
@@ -99,7 +102,7 @@ make_minimal_path() {
     _name=$1
     _dir="$TMP_ROOT/$_name"
     mkdir -p "$_dir"
-    for _tool in cat date grep head hostname id mktemp od rm sed tail tr uname wc sleep; do
+    for _tool in awk basename cat date dirname grep head hostname id mktemp od rm sed sh stat tail timeout tr uname wc sleep; do
         link_tool "$_dir" "$_tool"
     done
     printf '%s\n' "$_dir"
@@ -128,7 +131,7 @@ write_fake_wget_404() {
     _dir=$1
     cat > "$_dir/wget" <<'EOF'
 #!/bin/sh
-if [ "${1:-}" = "--help" ]; then
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "--version" ]; then
     printf 'GNU Wget 1.21\n'
     exit 0
 fi
@@ -145,30 +148,14 @@ contains() {
 }
 
 test_default_dirs_are_split() {
-    _fakebin=$(make_minimal_path default-dirs)
-    write_fake_find "$_fakebin"
-
-    _out=$(PATH="$_fakebin:$PATH" run_ash \
-        --server 127.0.0.1 --dry-run --no-log-file --no-progress --debug 2>&1)
-    _rc=$?
-
-    if [ "$_rc" -ne 0 ]; then
-        fail "ash/default-dirs: collector exited with $_rc"
+    # Do not traverse real default roots, even with a fake find: cd can itself
+    # trigger an automount. Runtime directory iteration is tested on fixtures.
+    _defaults=$(sed -n '/^SCAN_DIRS="/,/^\/usr"/p' "$COLLECTOR")
+    if ! contains "$(printf 'SCAN_DIRS="/root\n/tmp\n/home\n/var\n/usr"')" "$_defaults"; then
+        fail "ash/default-dirs: default roots must be newline-separated"
         return
     fi
-    if contains "Skipping non-directory path '/root /tmp /home /var /usr'" "$_out"; then
-        fail "ash/default-dirs: default roots collapsed into one invalid path"
-        return
-    fi
-    if ! contains "Scanning '/tmp'" "$_out"; then
-        fail "ash/default-dirs: expected /tmp to be processed as its own scan root"
-        return
-    fi
-    if ! contains "Run completed:" "$_out"; then
-        fail "ash/default-dirs: collector did not complete normally"
-        return
-    fi
-    pass "ash/default-dirs: default roots processed individually"
+    pass "ash/default-dirs: default root declaration remains newline-separated (static check)"
 }
 
 test_wget_404_marker_is_optional() {
@@ -176,9 +163,9 @@ test_wget_404_marker_is_optional() {
     write_fake_find "$_fakebin"
     write_fake_wget_404 "$_fakebin"
 
+    _rc=0
     _out=$(PATH="$_fakebin" run_ash \
-        --server 127.0.0.1 --port 8080 --no-log-file --no-progress --debug 2>&1)
-    _rc=$?
+        --server 127.0.0.1 --port 8080 --dir "$TMP_ROOT/input" --no-log-file --no-progress --debug 2>&1) || _rc=$?
 
     if [ "$_rc" -ne 0 ]; then
         fail "ash/wget-404-marker: collector exited with $_rc"
@@ -204,15 +191,15 @@ test_nc_only_marker_is_optional() {
     write_fake_find "$_fakebin"
     write_fake_nc "$_fakebin"
 
+    _rc=0
     _out=$(PATH="$_fakebin" run_ash \
-        --server 127.0.0.1 --port 8080 --no-log-file --no-progress --debug 2>&1)
-    _rc=$?
+        --server 127.0.0.1 --port 8080 --dir "$TMP_ROOT/input" --no-log-file --no-progress --debug 2>&1) || _rc=$?
 
     if [ "$_rc" -ne 0 ]; then
         fail "ash/nc-marker: collector exited with $_rc"
         return
     fi
-    if ! contains "Skipping collection marker 'begin': curl or wget is required for /api/collection" "$_out"; then
+    if ! contains "Skipping collection marker 'begin': curl or GNU wget is required for /api/collection" "$_out"; then
         fail "ash/nc-marker: missing nc-only collection-marker warning"
         return
     fi

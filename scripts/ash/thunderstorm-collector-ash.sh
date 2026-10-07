@@ -1,19 +1,17 @@
 #!/bin/sh
 #
-# THOR Thunderstorm Collector — POSIX sh / ash Edition
+# THOR Thunderstorm Collector - POSIX sh / ash Edition
 # Florian Roth / Nextron Systems
 #
 # Goals:
-# - POSIX sh compatible (ash, dash, busybox sh, ksh88)
-# - No bash required — suitable for embedded Linux, routers, stripped VMs
-# - Functionally equivalent to thunderstorm-collector.sh
+# - POSIX sh compatible, tested with dash and BusyBox ash
+# - No bash required: suitable for embedded Linux, routers, stripped VMs
+# - Fail visibly rather than report incomplete or corrupted uploads as success
 #
 # Limitations vs the bash version:
-# - Filenames containing literal newlines will not be processed correctly
-#   (find -print0 / read -d '' require bash; this is an extreme edge case
-#   in real deployments and is documented here as a known trade-off)
-# - No associative arrays, no C-style for loops — all replaced with
-#   POSIX-compatible equivalents
+# - Paths containing literal newlines are rejected, never split into other paths
+# - BusyBox wget is not used for multipart uploads
+# - The nc fallback requires timeout and length-delimited, plain HTTP responses
 
 VERSION="0.5.0"
 
@@ -39,7 +37,8 @@ DRY_RUN=0
 RETRIES=3
 
 UPLOAD_TOOL=""
-TMP_FILES=""
+WORK_DIR=""
+LOG_PATH=""
 
 # Newline-separated list of directories to scan (no bash arrays in ash)
 SCAN_DIRS="/root
@@ -53,6 +52,7 @@ FILES_SCANNED=0
 FILES_SUBMITTED=0
 FILES_SKIPPED=0
 FILES_FAILED=0
+SCAN_ERRORS=0
 PROGRESS=1
 PROGRESS_SET=0
 
@@ -81,7 +81,7 @@ get_excluded_mounts() {
     [ -r /proc/mounts ] || return 0
     while IFS=' ' read -r _gem_dev _gem_mp _gem_fs _gem_rest; do
         case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
-            *" $_gem_fs "*) printf '%s\n' "$_gem_mp" ;;
+            *" $_gem_fs "*) printf '%b\n' "$_gem_mp" ;;
         esac
     done < /proc/mounts
 }
@@ -116,9 +116,8 @@ timestamp() {
 }
 
 cleanup_tmp_files() {
-    for _f in $TMP_FILES; do
-        [ -n "$_f" ] && [ -f "$_f" ] && rm -f "$_f"
-    done
+    [ -n "$WORK_DIR" ] && rm -rf -- "$WORK_DIR"
+    return 0
 }
 
 INTERRUPTED=0
@@ -128,26 +127,26 @@ on_exit() {
 }
 
 on_signal() {
+    trap '' INT TERM
     INTERRUPTED=1
     # Close file descriptors that may be open from the main loop
-    exec 3<&- 2>/dev/null
-    exec 4<&- 2>/dev/null
+    exec 3<&- 4<&-
     PROGRESS_ACTIVE=0
-    log_msg warn "Signal received — sending interrupted collection marker"
-    if [ "$DRY_RUN" -eq 0 ] && [ -n "$_GLOBAL_BASE_URL" ]; then
+    log_msg warn "Signal received - sending interrupted collection marker"
+    if [ "$DRY_RUN" -eq 0 ] && [ -n "$WORK_DIR" ] && [ "${_begin_ok:-0}" -eq 1 ]; then
         _sig_elapsed=0
         if [ "$START_TS" -gt 0 ] 2>/dev/null; then
             _sig_elapsed=$(( $(date +%s 2>/dev/null || echo "$START_TS") - START_TS ))
             [ "$_sig_elapsed" -lt 0 ] && _sig_elapsed=0
         fi
-        _sig_stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${_sig_elapsed}}"
+        _sig_stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_sig_elapsed}}"
         collection_marker "$_GLOBAL_BASE_URL" "interrupted" "$_GLOBAL_SCAN_ID" "$_sig_stats" >/dev/null
     fi
     cleanup_tmp_files
     exit 1
 }
 
-trap on_exit EXIT
+trap on_exit 0
 trap on_signal INT TERM
 
 log_msg() {
@@ -226,14 +225,14 @@ Options:
   -s, --server <host>        Thunderstorm server hostname or IP
   -p, --port <port>          Thunderstorm port (default: 8080)
   -d, --dir <path>           Directory to scan (repeatable)
-  --max-age <days>           Max file age in days (default: 14)
-  --max-size-kb <kb>         Max file size in KB (default: 2000)
+  --max-age <days>           Max file age, 0..36500; 0 disables it (default: 14)
+  --max-size-kb <kb>         Max file size, 1..1048576 KiB (default: 2000)
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
   --sync                     Use /api/check (default: /api/checkAsync)
-  --retries <num>            Retry attempts per file (default: 3)
+  --retries <num>            Total attempts per file, 1..10 (default: 3)
   --dry-run                  Do not upload, only show what would be submitted
   --debug                    Enable debug log messages
   --log-file <path>          Log file path (default: ./thunderstorm.log)
@@ -246,7 +245,9 @@ Options:
 
 Notes:
   This script requires only POSIX sh (ash, dash, busybox sh).
-  Filenames containing literal newline characters are not supported.
+  Paths containing literal newline characters are rejected.
+  Uploads require curl, GNU wget, or nc plus timeout (plain HTTP only).
+  BusyBox wget alone is not supported; binary integrity is mandatory.
   For systems with bash available, prefer thunderstorm-collector.sh.
 
 Examples:
@@ -313,43 +314,20 @@ sanitize_filename_for_multipart() {
 }
 
 file_size_kb() {
-    _sz_bytes="$(wc -c < "$1" 2>/dev/null | tr -d ' \t')"
+    _sz_bytes="$(stat -c '%s' -- "$1" 2>/dev/null)" ||
+        _sz_bytes="$(stat -f '%z' "$1" 2>/dev/null)" ||
+        { _sz_bytes="$(wc -c < "$1" 2>/dev/null)" || return 1; }
+    _sz_bytes="$(printf '%s' "$_sz_bytes" | tr -d ' \t')"
     case "$_sz_bytes" in
         ''|*[!0-9]*) echo -1; return 1 ;;
     esac
-    echo $(( (_sz_bytes + 1023) / 1024 ))
+    # Avoid overflowing a 32-bit shell on large files; only the limit matters.
+    printf '%s\n' "$_sz_bytes" | awk -v limit="$MAX_FILE_SIZE_KB" \
+        '{printf "%.0f\n", ($1 > limit * 1024 ? limit + 1 : int(($1 + 1023) / 1024))}'
 }
 
-mktemp_portable() {
-    _mp_t="$(mktemp "${TMPDIR:-/tmp}/thunderstorm.XXXXXX" 2>/dev/null)"
-    if [ -n "$_mp_t" ]; then
-        echo "$_mp_t"
-        return 0
-    fi
-    # mktemp unavailable — create a private temp directory with restrictive
-    # permissions, then place files inside it to avoid symlink races.
-    _mp_dir="${TMPDIR:-/tmp}/thunderstorm.$$"
-    if [ ! -d "$_mp_dir" ]; then
-        ( umask 077 && mkdir "$_mp_dir" ) 2>/dev/null || return 1
-    fi
-    _mp_seq=0
-    while :; do
-        _mp_t="${_mp_dir}/${_mp_seq}.$(date +%s 2>/dev/null || echo 0)"
-        if ( set -C; : > "$_mp_t" ) 2>/dev/null; then
-            echo "$_mp_t"
-            return 0
-        fi
-        _mp_seq=$((_mp_seq + 1))
-        [ "$_mp_seq" -gt 100 ] && return 1
-    done
-}
-
-_wget_is_busybox() {
-    # BusyBox wget truncates --post-file at the first NUL byte, making it
-    # unable to upload binary files.  Detect it so we can fall back to nc.
-    # Note: BusyBox wget does not support --version; use --help instead.
-    # Use head -1 to check only the first line and avoid excessive output.
-    wget --help 2>&1 | head -5 | grep -qi busybox
+escape_find_path() {
+    printf '%s' "$1" | sed 's/[\\*?[]/\\&/g'
 }
 
 detect_upload_tool() {
@@ -357,22 +335,16 @@ detect_upload_tool() {
         UPLOAD_TOOL="curl"
         return 0
     fi
-    # Prefer nc over BusyBox wget for binary-safe plain HTTP uploads
-    if command -v wget >/dev/null 2>&1 && ! _wget_is_busybox; then
+    if command -v wget >/dev/null 2>&1 && wget --version 2>/dev/null | head -1 | grep -q '^GNU Wget'; then
         UPLOAD_TOOL="wget"
         return 0
     fi
-    if [ "$USE_SSL" -eq 0 ] && command -v nc >/dev/null 2>&1; then
+    if [ "$USE_SSL" -eq 0 ] && command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
         UPLOAD_TOOL="nc"
         return 0
     fi
-    # Fall back to BusyBox wget (works for text files, truncates binary at NUL)
     if command -v wget >/dev/null 2>&1; then
-        UPLOAD_TOOL="wget"
-        log_msg warn "WARNING: BusyBox wget detected — --post-file truncates at the first NUL byte."
-        log_msg warn "Binary files (EXE, DLL, ZIP, etc.) will be silently corrupted during upload."
-        log_msg warn "Install curl or full GNU wget for reliable binary uploads."
-        return 0
+        log_msg warn "Only GNU wget is supported for multipart uploads; BusyBox/unknown wget is refused"
     fi
     return 1
 }
@@ -382,28 +354,26 @@ upload_with_curl() {
     _uc_filepath="$2"
     _uc_filename="$3"
     _uc_safe_name="$(sanitize_filename_for_multipart "$_uc_filename")"
-    _uc_resp="$(mktemp_portable)" || return 91
-    _uc_hdr="$(mktemp_portable)" || return 91
-    TMP_FILES="${TMP_FILES} ${_uc_resp} ${_uc_hdr}"
+    _uc_resp="$WORK_DIR/upload.response"
+    _uc_hdr="$WORK_DIR/upload.headers"
+    : > "$_uc_hdr" || return 91
 
     # Build TLS arguments safely to avoid word-splitting on paths with spaces
-    set -- -sS -X POST -o "$_uc_resp" -D "$_uc_hdr" -w '%{http_code}'
+    set -- -sS -X POST --connect-timeout 10 --max-time 60 -o "$_uc_resp" -D "$_uc_hdr" -w '%{http_code}'
     [ "$INSECURE" -eq 1 ] && set -- "$@" -k
     [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
     set -- "$@" "$_uc_endpoint" \
-        -F "file=@${_uc_filepath};filename=${_uc_safe_name}"
+        -F "file=@-;filename=\"${_uc_safe_name}\""
 
     # Use -w to capture HTTP status code; do NOT use --fail so we can inspect 503
-    _uc_http_code="$(curl "$@" 2>"${_uc_resp}.err")"
+    _uc_http_code="$(curl "$@" < "$_uc_filepath" 2>"${_uc_resp}.err")"
     _uc_code=$?
 
     if [ "$_uc_code" -ne 0 ]; then
         _uc_err="$(cat "${_uc_resp}.err" 2>/dev/null | tr '\r\n' '  ')"
-        TMP_FILES="${TMP_FILES} ${_uc_resp}.err"
         log_msg debug "curl error (code $_uc_code) for '$_uc_filepath': $_uc_err"
         return "$_uc_code"
     fi
-    TMP_FILES="${TMP_FILES} ${_uc_resp}.err"
 
     # Handle 503 back-pressure: return special code 103 and set RETRY_AFTER
     if [ "$_uc_http_code" = "503" ]; then
@@ -420,7 +390,7 @@ upload_with_curl() {
 
     # Any other non-2xx status
     case "$_uc_http_code" in
-        2*) ;;
+        2[0-9][0-9]) ;;
         *)
             _uc_body="$(cat "$_uc_resp" 2>/dev/null | tr '\r\n' '  ')"
             log_msg error "Server returned HTTP $_uc_http_code for '$_uc_filepath': $_uc_body"
@@ -439,14 +409,26 @@ generate_safe_boundary() {
     while [ "$_gsb_attempt" -lt 10 ]; do
         _gsb_rand="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
         _gsb_boundary="----ThunderstormBoundary${$}${_gsb_rand:-$(date +%s 2>/dev/null || echo 0)${_gsb_attempt}}"
-        if ! LC_ALL=C grep -qF "$_gsb_boundary" "$_gsb_filepath" 2>/dev/null; then
-            printf '%s' "$_gsb_boundary"
-            return 0
-        fi
+        LC_ALL=C grep -qF -- "$_gsb_boundary" "$_gsb_filepath" 2>/dev/null
+        _gsb_rc=$?
+        case "$_gsb_rc" in
+            1)
+                case "$_gsb_filepath" in
+                    *"$_gsb_boundary"*) ;;
+                    *) printf '%s' "$_gsb_boundary"; return 0 ;;
+                esac
+                ;;
+            0) ;;
+            *) return 1 ;;
+        esac
         _gsb_attempt=$((_gsb_attempt + 1))
     done
-    # Exhausted attempts — return last candidate (collision is astronomically unlikely)
-    printf '%s' "$_gsb_boundary"
+    return 1
+}
+
+http_status() {
+    awk '$1 ~ /^HTTP\/[0-9]+(\.[0-9]+)?$/ && $2 ~ /^[0-9][0-9][0-9]$/ {status=$2}
+         END {print status}' "$1"
 }
 
 upload_with_wget() {
@@ -454,24 +436,23 @@ upload_with_wget() {
     _uw_filepath="$2"
     _uw_filename="$3"
     _uw_safe_name="$(sanitize_filename_for_multipart "$_uw_filename")"
-    _uw_boundary="$(generate_safe_boundary "$_uw_filepath")"
-    _uw_body="$(mktemp_portable)" || return 93
-    _uw_resp="$(mktemp_portable)" || return 94
-    _uw_hdr="$(mktemp_portable)" || return 94
-    TMP_FILES="${TMP_FILES} ${_uw_body} ${_uw_resp} ${_uw_hdr}"
+    _uw_boundary="$(generate_safe_boundary "$_uw_filepath")" || return 95
+    _uw_body="$WORK_DIR/upload.body"
+    _uw_resp="$WORK_DIR/upload.response"
+    _uw_hdr="$WORK_DIR/upload.headers"
 
     {
         printf -- "--%s\r\n" "$_uw_boundary"
         printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' \
             "$_uw_safe_name"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
-        cat "$_uw_filepath"
+        cat "$_uw_filepath" || return 95
         printf '\r\n--%s--\r\n' "$_uw_boundary"
     } > "$_uw_body" 2>/dev/null || return 95
 
     # Use --server-response to capture HTTP status; stderr has the headers
     # Build TLS arguments safely to avoid word-splitting on paths with spaces
-    set -- -O "$_uw_resp" -S
+    set -- -O "$_uw_resp" -S --tries=1 --max-redirect=0 --connect-timeout=10 --read-timeout=60
     [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
     [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT"
     set -- "$@" --header="Content-Type: multipart/form-data; boundary=${_uw_boundary}" \
@@ -483,11 +464,12 @@ upload_with_wget() {
 
     # Parse HTTP status code from wget's server response output
     # wget -S prints "  HTTP/1.1 200 OK" lines to stderr
-    # Use sed instead of grep -oE for POSIX/BusyBox compatibility
-    _uw_http_code="$(sed -n 's/.*HTTP\/[0-9.]*[[:space:]]*\([0-9][0-9][0-9]\).*/\1/p' "$_uw_hdr" 2>/dev/null | tail -1)"
+    # Only real status lines count, never HTTP-looking diagnostic headers.
+    _uw_http_code="$(http_status "$_uw_hdr")"
 
-    # If wget failed and we couldn't parse a status, return the wget error
-    if [ "$_uw_code" -ne 0 ] && [ -z "$_uw_http_code" ]; then
+    # An incomplete 2xx transport is not a successful upload.
+    if [ "$_uw_code" -ne 0 ] && [ "$_uw_http_code" != 503 ]; then
+        log_msg error "wget failed (code $_uw_code, HTTP ${_uw_http_code:-unknown}) for '$_uw_filepath'"
         return "$_uw_code"
     fi
 
@@ -504,16 +486,10 @@ upload_with_wget() {
     fi
 
     # Accept 2xx as success
-    if [ -n "$_uw_http_code" ]; then
-        case "$_uw_http_code" in
-            2[0-9][0-9]) ;;
-            *)
-                _uw_body_content="$(cat "$_uw_resp" 2>/dev/null | tr '\r\n' '  ')"
-                log_msg error "Server returned HTTP $_uw_http_code for '$_uw_filepath': $_uw_body_content"
-                return 92
-                ;;
-        esac
-    fi
+    case "$_uw_http_code" in
+        2[0-9][0-9]) ;;
+        *) log_msg error "Server returned HTTP ${_uw_http_code:-unknown} for '$_uw_filepath'"; return 92 ;;
+    esac
 
     return 0
 }
@@ -529,10 +505,10 @@ upload_with_nc() {
     _nc_filepath="$2"
     _nc_filename="$3"
     _nc_safe_name="$(sanitize_filename_for_multipart "$_nc_filename")"
-    _nc_boundary="$(generate_safe_boundary "$_nc_filepath")"
-    _nc_body="$(mktemp_portable)" || return 97
-    _nc_resp_file="$(mktemp_portable)" || return 97
-    TMP_FILES="${TMP_FILES} ${_nc_body} ${_nc_resp_file}"
+    _nc_boundary="$(generate_safe_boundary "$_nc_filepath")" || return 97
+    _nc_body="$WORK_DIR/upload.body"
+    _nc_resp_file="$WORK_DIR/upload.response"
+    _nc_request="$WORK_DIR/upload.request"
 
     # Build multipart body
     {
@@ -540,7 +516,7 @@ upload_with_nc() {
         printf 'Content-Disposition: form-data; name="file"; filename="%s"\r\n' \
             "$_nc_safe_name"
         printf 'Content-Type: application/octet-stream\r\n\r\n'
-        cat "$_nc_filepath"
+        cat "$_nc_filepath" || return 98
         printf '\r\n--%s--\r\n' "$_nc_boundary"
     } > "$_nc_body" 2>/dev/null || return 98
 
@@ -557,7 +533,7 @@ upload_with_nc() {
     # Extract path+query
     _nc_path="/${_nc_hostpath#*/}"
 
-    # Send raw HTTP via nc (cat merges headers + binary body into one stream)
+    # Spool before connecting so a failed copy cannot become a truncated upload.
     {
         printf "POST %s HTTP/1.0\r\n" "$_nc_path"
         printf "Host: %s\r\n" "$_nc_hostport"
@@ -565,21 +541,59 @@ upload_with_nc() {
         printf "Content-Length: %s\r\n" "$_nc_content_length"
         printf "Connection: close\r\n"
         printf "\r\n"
-        cat "$_nc_body"
-    } | nc "$_nc_host" "$_nc_port" -w 30 > "$_nc_resp_file" 2>/dev/null
+        cat "$_nc_body" || return 98
+    } > "$_nc_request" || return 98
+    timeout 60 nc -w 30 "$_nc_host" "$_nc_port" < "$_nc_request" > "$_nc_resp_file" 2>/dev/null
+    _nc_rc=$?
 
     # No response or connection failure
-    if [ ! -s "$_nc_resp_file" ]; then
-        log_msg error "No response from server for '$_nc_filepath'"
+    if [ "$_nc_rc" -ne 0 ] || [ ! -s "$_nc_resp_file" ]; then
+        log_msg error "Incomplete nc transport (code $_nc_rc) for '$_nc_filepath'"
         return 1
     fi
 
     # Parse HTTP status code from the first line (e.g. "HTTP/1.1 200 OK")
     _nc_status_line="$(head -1 "$_nc_resp_file" | tr -d '\r')"
-    _nc_http_code="$(printf '%s' "$_nc_status_line" | sed -n 's/^HTTP\/[^ ]* \([0-9][0-9]*\).*/\1/p')"
+    _nc_http_code="$(printf '%s\n' "$_nc_status_line" | awk \
+        '$1 ~ /^HTTP\/1\.[01]$/ && $2 ~ /^[0-9][0-9][0-9]$/ {print $2}')"
 
     if [ -z "$_nc_http_code" ]; then
         log_msg error "Could not parse HTTP status for '$_nc_filepath': $_nc_status_line"
+        return 99
+    fi
+
+    # This deliberately small HTTP client requires unambiguous length framing.
+    # Do not accept truncated, chunked, duplicate-length or close-delimited data.
+    _nc_framing="$(LC_ALL=C awk '
+        BEGIN {bytes=0; lengths=0; bad=0}
+        {
+            bytes += length($0) + 1
+            line=$0
+            sub(/\r$/, "", line)
+            if (NR == 1) next
+            if (line == "") {
+                if (lengths == 1 && !bad) printf "%.0f %.0f\n", bytes, length_value
+                exit
+            }
+            lower=tolower(line)
+            if (lower ~ /^content-length:/) {
+                sub(/^[^:]*:[ \t]*/, "", line)
+                sub(/[ \t]*$/, "", line)
+                lengths++
+                if (line !~ /^[0-9]+$/ || length(line) > 10) bad=1
+                length_value=line
+            }
+            if (lower ~ /^transfer-encoding:/) bad=1
+        }' "$_nc_resp_file")"
+    set -- $_nc_framing
+    if [ "$#" -ne 2 ]; then
+        log_msg error "nc requires a complete response with a single Content-Length"
+        return 99
+    fi
+    _nc_actual_bytes="$(wc -c < "$_nc_resp_file" | tr -d ' \t')"
+    if ! awk -v actual="$_nc_actual_bytes" -v headers="$1" -v body="$2" \
+        'BEGIN {exit !(actual == headers + body)}'; then
+        log_msg error "Truncated or excess nc response for '$_nc_filepath'"
         return 99
     fi
 
@@ -654,7 +668,12 @@ collection_marker() {
     _cm_scan_id="${3:-}"
     _cm_stats="${4:-}"
     _cm_url="${_cm_base_url%/}/api/collection"
-    _cm_resp="$(mktemp_portable)" || return 1
+    if [ "$UPLOAD_TOOL" = nc ]; then
+        log_msg warn "Skipping collection marker '$_cm_type': curl or GNU wget is required for /api/collection"
+        return 0
+    fi
+    _cm_resp="$WORK_DIR/marker.response"
+    _cm_hdr="$WORK_DIR/marker.headers"
 
     _cm_safe_source="$(json_escape "$SOURCE_NAME")"
     _cm_body="{\"type\":\"${_cm_type}\""
@@ -668,10 +687,10 @@ collection_marker() {
     _cm_body="${_cm_body}}"
 
     _cm_ok=0
-    _cm_hdr="$(mktemp_portable)" || { rm -f "$_cm_resp"; return 1; }
-    : > "$_cm_resp" 2>/dev/null || true
-    if command -v curl >/dev/null 2>&1; then
-        set -- -sS -o "$_cm_resp" -D "$_cm_hdr" -w '%{http_code}' -H "Content-Type: application/json" -d "$_cm_body" --max-time 10
+    : > "$_cm_resp" || return 1
+    : > "$_cm_hdr" || return 1
+    if [ "$UPLOAD_TOOL" = curl ]; then
+        set -- -sS -o "$_cm_resp" -D "$_cm_hdr" -w '%{http_code}' -H "Content-Type: application/json" -d "$_cm_body" --connect-timeout 5 --max-time 10
         [ "$INSECURE" -eq 1 ] && set -- "$@" -k
         [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
         set -- "$@" "$_cm_url"
@@ -680,32 +699,27 @@ collection_marker() {
         if [ "$_cm_curl_rc" -eq 0 ]; then
             case "$_cm_http_code" in
                 2[0-9][0-9]) _cm_ok=1 ;;
-                404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code) — server does not implement /api/collection"; _cm_ok=1 ;;
+                404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"; return 0 ;;
                 *) log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code" ;;
             esac
         fi
-    elif command -v wget >/dev/null 2>&1; then
-        set -- -O "$_cm_resp" -S --header "Content-Type: application/json" --post-data "$_cm_body" --timeout=10
+    elif [ "$UPLOAD_TOOL" = wget ]; then
+        set -- -O "$_cm_resp" -S --tries=1 --max-redirect=0 --header "Content-Type: application/json" --post-data "$_cm_body" --timeout=10
         [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
         [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT"
         set -- "$@" "$_cm_url"
         wget "$@" 2>"$_cm_hdr"
         _cm_wget_rc=$?
-        _cm_http_code="$(sed -n 's/.*HTTP\/[0-9.]*[[:space:]]*\([0-9][0-9][0-9]\).*/\1/p' "$_cm_hdr" 2>/dev/null | tail -1)"
-        if [ -n "$_cm_http_code" ]; then
-            case "$_cm_http_code" in
-                2[0-9][0-9]) _cm_ok=1 ;;
-                404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code) — server does not implement /api/collection"; _cm_ok=1 ;;
-                *) log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code" ;;
-            esac
-        elif [ "$_cm_wget_rc" -eq 0 ]; then
-            _cm_ok=1
-        fi
+        _cm_http_code="$(http_status "$_cm_hdr")"
+        case "$_cm_http_code" in
+            404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"; return 0 ;;
+            2[0-9][0-9]) [ "$_cm_wget_rc" -eq 0 ] && _cm_ok=1 ;;
+            *) log_msg warn "Collection marker '$_cm_type' got HTTP ${_cm_http_code:-unknown}" ;;
+        esac
     else
-        log_msg warn "Skipping collection marker '$_cm_type': curl or wget is required for /api/collection"
-        _cm_ok=1
+        return 1
     fi
-    rm -f "$_cm_hdr"
+    [ "$_cm_ok" -eq 1 ] || return 1
 
     # Extract scan_id value using a strict regex that only matches plain
     # (unescaped) JSON string values containing safe characters.
@@ -713,7 +727,6 @@ collection_marker() {
     # escaped scan_id we simply won't match it, which is safe (we continue
     # without a scan_id).
     _cm_id="$(sed -n 's/.*"scan_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p' "$_cm_resp" 2>/dev/null | head -1)"
-    rm -f "$_cm_resp"
     printf '%s' "$_cm_id"
     [ "$_cm_ok" -eq 1 ]
 }
@@ -787,14 +800,7 @@ parse_args() {
                 ;;
             -d|--dir)
                 [ -n "$2" ] || die "Missing value for $_pa_arg"
-                if [ "$SCAN_DIRS_SET" -eq 0 ]; then
-                    SCAN_DIRS=""
-                    SCAN_DIRS_SET=1
-                fi
-                # Append to space-separated list (quote-safe for dirs without spaces)
-                # Dirs with spaces are handled via IFS manipulation during iteration
-                SCAN_DIRS="${SCAN_DIRS:+$SCAN_DIRS
-}$2"
+                add_scan_dir "$2"
                 shift
                 ;;
             --max-age)
@@ -840,6 +846,7 @@ parse_args() {
             --log-file)
                 [ -n "$2" ] || die "Missing value for $_pa_arg"
                 LOGFILE="$2"
+                LOG_TO_FILE=1
                 shift
                 ;;
             --no-log-file)
@@ -861,36 +868,58 @@ parse_args() {
                 ;;
             --)
                 shift
+                for _pa_dir do add_scan_dir "$_pa_dir"; done
                 break
                 ;;
             -*)
                 die "Unknown option: $_pa_arg (use --help)"
                 ;;
             *)
-                # Positional args treated as additional directories
-                if [ "$SCAN_DIRS_SET" -eq 0 ]; then
-                    SCAN_DIRS=""
-                    SCAN_DIRS_SET=1
-                fi
-                SCAN_DIRS="${SCAN_DIRS:+$SCAN_DIRS
-}$_pa_arg"
+                add_scan_dir "$_pa_arg"
                 ;;
         esac
         shift
     done
 }
 
+add_scan_dir() {
+    case "$1" in
+        *'
+'*) die "Scan directory paths containing newlines are not supported" ;;
+    esac
+    [ -n "$1" ] || die "Scan directory must not be empty"
+    if [ "$SCAN_DIRS_SET" -eq 0 ]; then
+        SCAN_DIRS=""
+        SCAN_DIRS_SET=1
+    fi
+    SCAN_DIRS="${SCAN_DIRS:+$SCAN_DIRS
+}$1"
+}
+
+normalize_uint() {
+    is_integer "$1" || die "$4 must be numeric"
+    _nu_value="$(printf '%s' "$1" | sed 's/^0*//')"
+    _nu_value="${_nu_value:-0}"
+    [ "${#_nu_value}" -le "${#3}" ] || die "$4 must be in $2..$3"
+    [ "$_nu_value" -ge "$2" ] && [ "$_nu_value" -le "$3" ] || die "$4 must be in $2..$3"
+    printf '%s' "$_nu_value"
+}
+
 validate_config() {
-    is_integer "$THUNDERSTORM_PORT"  || die "Port must be numeric: '$THUNDERSTORM_PORT'"
-    is_integer "$MAX_AGE"            || die "max-age must be numeric: '$MAX_AGE'"
-    is_integer "$MAX_FILE_SIZE_KB"   || die "max-size-kb must be numeric: '$MAX_FILE_SIZE_KB'"
-    is_integer "$RETRIES"            || die "retries must be numeric: '$RETRIES'"
-    [ "$THUNDERSTORM_PORT" -gt 0 ]   || die "Port must be greater than 0"
-    [ "$MAX_AGE" -ge 0 ]             || die "max-age must be >= 0"
-    [ "$MAX_FILE_SIZE_KB" -gt 0 ]    || die "max-size-kb must be > 0"
-    [ "$RETRIES" -gt 0 ]             || die "retries must be > 0"
-    [ -n "$THUNDERSTORM_SERVER" ]    || die "Server must not be empty"
+    THUNDERSTORM_PORT="$(normalize_uint "$THUNDERSTORM_PORT" 1 65535 Port)" || exit 2
+    MAX_AGE="$(normalize_uint "$MAX_AGE" 0 36500 max-age)" || exit 2
+    MAX_FILE_SIZE_KB="$(normalize_uint "$MAX_FILE_SIZE_KB" 1 1048576 max-size-kb)" || exit 2
+    RETRIES="$(normalize_uint "$RETRIES" 1 10 retries)" || exit 2
+    case "$THUNDERSTORM_SERVER" in
+        ''|-*|*[!a-zA-Z0-9._-]*) die "Server must be an IPv4 address or DNS hostname, without a scheme or path" ;;
+    esac
     [ -n "$SCAN_DIRS" ]              || die "At least one directory is required"
+    if [ -n "$CA_CERT" ]; then
+        [ -f "$CA_CERT" ] && [ -r "$CA_CERT" ] || die "CA certificate file is missing or unreadable"
+    fi
+    if [ "$INSECURE" -eq 1 ]; then
+        log_msg warn "TLS certificate verification is explicitly disabled by --insecure"
+    fi
 }
 
 main() {
@@ -901,15 +930,29 @@ main() {
     _base_url=""
     _SCAN_ID=""
     _elapsed=0
-    _find_mtime=""
     _results_file=""
     _GLOBAL_BASE_URL=""
     _GLOBAL_SCAN_ID=""
 
     parse_args "$@"
-    _find_mtime="-${MAX_AGE}"
     detect_source_name
     validate_config
+    for _required in sh find awk sed grep tr wc od cat date head tail rm mktemp dirname basename uname; do
+        command -v "$_required" >/dev/null 2>&1 || {
+            printf "ERROR: Required utility '%s' is missing\n" "$_required" >&2
+            exit 2
+        }
+    done
+    WORK_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/thunderstorm.XXXXXX")" ||
+        die "Cannot create private temporary directory"
+    _work_physical="$(CDPATH='' cd -- "$WORK_DIR" && pwd -P)" || die "Cannot access temporary directory"
+    WORK_DIR="$_work_physical"
+    if [ "$LOG_TO_FILE" -eq 1 ]; then
+        _log_dir="$(dirname -- "$LOGFILE")"
+        if _log_dir="$(CDPATH='' cd -- "$_log_dir" && pwd -P)"; then
+            LOG_PATH="$_log_dir/$(basename -- "$LOGFILE")"
+        fi
+    fi
     print_banner
 
     if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
@@ -933,14 +976,10 @@ main() {
             if [ "$USE_SSL" -eq 1 ] && command -v nc >/dev/null 2>&1; then
                 die "HTTPS uploads require 'curl' or 'wget'; 'nc' does not support TLS"
             fi
-            die "Neither 'curl', 'wget', nor 'nc' is installed; unable to upload samples"
+            die "Uploads require curl, GNU wget, or nc plus timeout (plain HTTP only)"
         fi
     else
-        if detect_upload_tool; then
-            log_msg info "Dry-run mode active (upload tool detected: $UPLOAD_TOOL)"
-        else
-            log_msg info "Dry-run mode active (no upload tool required)"
-        fi
+        log_msg info "Dry-run mode active (no upload tool or server connection required)"
     fi
 
     log_msg info "Started Thunderstorm Collector (ash) - Version $VERSION"
@@ -970,17 +1009,16 @@ main() {
     # Retry once after 2s on initial connection failure
     if [ "$DRY_RUN" -eq 0 ]; then
         _begin_ok=0
-        _scan_id_file="$(mktemp_portable)" || die "Could not create temp file for scan_id"
-        TMP_FILES="${TMP_FILES} ${_scan_id_file}"
+        _scan_id_file="$WORK_DIR/begin.id"
         if collection_marker "$_base_url" "begin" "" "" > "$_scan_id_file"; then
-            _SCAN_ID="$(cat "$_scan_id_file")"
+            IFS= read -r _SCAN_ID < "$_scan_id_file" || true
             _begin_ok=1
         fi
         if [ "$_begin_ok" -eq 0 ]; then
             log_msg warn "Begin marker failed; retrying in 2 seconds..."
             sleep 2
             if collection_marker "$_base_url" "begin" "" "" > "$_scan_id_file"; then
-                _SCAN_ID="$(cat "$_scan_id_file")"
+                IFS= read -r _SCAN_ID < "$_scan_id_file" || true
                 _begin_ok=1
             else
                 die "Cannot connect to Thunderstorm server at ${_base_url}/api/collection after retry"
@@ -1004,9 +1042,9 @@ main() {
     # Write the newline-separated directory list to a temp file so the while
     # loop runs in the current shell (not a subshell). A pipe would lose all
     # counter increments (FILES_SCANNED etc.) due to POSIX subshell semantics.
-    _dirs_file="$(mktemp_portable)" || die "Could not create temp file for directory list"
-    TMP_FILES="${TMP_FILES} ${_dirs_file}"
-    printf '%s\n' "$SCAN_DIRS" > "$_dirs_file"
+    get_excluded_mounts > "$WORK_DIR/mounts.list" || die "Cannot write excluded mount list"
+    _dirs_file="$WORK_DIR/directories.list"
+    printf '%s\n' "$SCAN_DIRS" > "$_dirs_file" || die "Cannot write directory list"
 
     exec 3< "$_dirs_file"
     while IFS= read -r _scandir <&3; do
@@ -1015,43 +1053,51 @@ main() {
 
         if [ ! -d "$_scandir" ]; then
             log_msg warn "Skipping non-directory path '$_scandir'"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
             continue
         fi
 
         log_msg info "Scanning '$_scandir'"
-
-        _results_file="$(mktemp_portable)" || {
-            log_msg error "Could not create temporary file list for '$_scandir'"
+        if ! _scandir="$(CDPATH='' cd -- "$_scandir" && pwd -P)"; then
+            log_msg warn "Cannot access scan directory"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
             continue
-        }
-        TMP_FILES="${TMP_FILES} ${_results_file}"
+        fi
 
-        # Note: find without -print0 is safe for all filenames EXCEPT those
-        # containing literal newline characters (an extremely rare edge case).
-        # If your environment has such filenames, use thunderstorm-collector.sh
-        # (requires bash) which uses find -print0 + read -d ''.
-        # Build find exclusion arguments safely in a subshell to avoid
-        # clobbering positional parameters of the outer loop.
-        # The resulting find expression is:
-        #   find <dir> -path <excl1> -prune -o -path <excl2> -prune -o ... -type f -mtime <age> -print
-        # Each -prune -o short-circuits excluded paths; the final -type f -print
-        # matches only regular files in non-excluded subtrees.
+        _results_file="$WORK_DIR/files.list"
+        : > "$WORK_DIR/path.errors" || die "Cannot write path error list"
+
+        # Validate each unsplit find operand before emitting line-based records.
+        # A newline filename must never turn into an unrelated relative path.
         (
             set -- "$_scandir"
+            set -- "$@" -path "$(escape_find_path "$WORK_DIR")" -prune -o
+            [ -n "$LOG_PATH" ] && set -- "$@" -path "$(escape_find_path "$LOG_PATH")" -prune -o
             for _ep in $EXCLUDE_PATHS; do
                 [ -d "$_ep" ] && set -- "$@" -path "$_ep" -prune -o
             done
-            _mount_file="$(mktemp_portable)" || true
-            if [ -n "$_mount_file" ]; then
-                get_excluded_mounts > "$_mount_file"
-                while IFS= read -r _ep; do
-                    [ -n "$_ep" ] && [ -d "$_ep" ] && set -- "$@" -path "$_ep" -prune -o
-                done < "$_mount_file"
-                rm -f "$_mount_file"
-            fi
-            set -- "$@" -type f -mtime "$_find_mtime" -print
+            while IFS= read -r _ep; do
+                [ -n "$_ep" ] && [ -d "$_ep" ] && set -- "$@" -path "$(escape_find_path "$_ep")" -prune -o
+            done < "$WORK_DIR/mounts.list"
+            set -- "$@" -type f
+            [ "$MAX_AGE" -gt 0 ] && set -- "$@" -mtime "-${MAX_AGE}"
+            set -- "$@" -exec sh -c '
+                case "$1" in
+                    *"
+"*) printf "unsupported newline path\n" >> "$2" || exit 1 ;;
+                    *) printf "%s\n" "$1" ;;
+                esac' sh '{}' "$WORK_DIR/path.errors" ';'
             find "$@"
-        ) > "$_results_file" 2>/dev/null || true
+        ) > "$_results_file" 2> "$WORK_DIR/find.stderr"
+        if [ "$?" -ne 0 ] || [ -s "$WORK_DIR/find.stderr" ]; then
+            log_msg warn "Incomplete scan of '$_scandir': $(cat "$WORK_DIR/find.stderr")"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
+        fi
+        _path_errors="$(wc -l < "$WORK_DIR/path.errors" | tr -d ' \t')"
+        if [ "$_path_errors" -gt 0 ]; then
+            SCAN_ERRORS=$((SCAN_ERRORS + _path_errors))
+            log_msg warn "Rejected $_path_errors paths containing unsupported newline characters"
+        fi
 
         # Count total lines for progress reporting
         _total_in_dir="$(wc -l < "$_results_file" 2>/dev/null | tr -d ' \t')"
@@ -1072,9 +1118,13 @@ main() {
                 PROGRESS_ACTIVE=1
             fi
 
-            [ -f "$_file_path" ] || continue
-
             FILES_SCANNED=$((FILES_SCANNED + 1))
+
+            if [ ! -f "$_file_path" ] || [ -L "$_file_path" ] || [ ! -r "$_file_path" ]; then
+                FILES_FAILED=$((FILES_FAILED + 1))
+                log_msg warn "File disappeared, changed type, or is unreadable: '$_file_path'"
+                continue
+            fi
 
             # Skip files inside cloud storage folders
             if is_cloud_path "$_file_path"; then
@@ -1083,10 +1133,9 @@ main() {
                 continue
             fi
 
-            _size_kb="$(file_size_kb "$_file_path")"
-            if [ "$_size_kb" -lt 0 ]; then
-                FILES_SKIPPED=$((FILES_SKIPPED + 1))
-                log_msg debug "Skipping unreadable file '$_file_path'"
+            if ! _size_kb="$(file_size_kb "$_file_path")"; then
+                FILES_FAILED=$((FILES_FAILED + 1))
+                log_msg warn "Cannot determine size of '$_file_path'"
                 continue
             fi
 
@@ -1118,16 +1167,19 @@ main() {
         [ "$_elapsed" -lt 0 ] && _elapsed=0
     fi
 
-    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED seconds=$_elapsed"
+    log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$_elapsed"
 
     # Send collection end marker with run statistics
     if [ "$DRY_RUN" -eq 0 ]; then
-        _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${_elapsed}}"
-        collection_marker "$_base_url" "end" "$_SCAN_ID" "$_stats" >/dev/null
+        _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_elapsed}}"
+        collection_marker "$_base_url" "end" "$_SCAN_ID" "$_stats" >/dev/null || {
+            log_msg warn "Collection end marker failed; uploads may still have succeeded"
+            return 1
+        }
     fi
 
-    # Exit code: 0 = success, 1 = partial failure (some uploads failed)
-    if [ "$FILES_FAILED" -gt 0 ]; then
+    # Exit code: 0 = success, 1 = incomplete collection.
+    if [ "$FILES_FAILED" -gt 0 ] || [ "$SCAN_ERRORS" -gt 0 ]; then
         return 1
     fi
     return 0
