@@ -246,7 +246,8 @@ cleanup() {
 trap cleanup EXIT
 
 clear_log() {
-    curl -s -X POST "$STUB_URL/api/test/reset" > /dev/null 2>&1 || true
+    # The pinned stub truncates its audit file on reset. Never continue on a failed reset.
+    curl -fsS --connect-timeout 5 --max-time 10 -X POST "$STUB_URL/api/test/reset" > /dev/null
 }
 
 query_log() {

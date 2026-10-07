@@ -44,6 +44,8 @@ STUB_URL="http://localhost:${STUB_PORT}"
 STUB_LOG="${STUB_LOG:-}"
 STUB_UPLOADS=""
 STUB_PID=""
+RETRY_STUB_PIDS=()
+TEST_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/detection-suite-XXXXXX")"
 COLLECTOR_FILTER_RAW="${THUNDERSTORM_TEST_COLLECTORS:-}"
 COLLECTOR_REQUIRE_MATCH="${THUNDERSTORM_TEST_REQUIRE_MATCH:-0}"
 COLLECTOR_REQUIRE_ALL="${THUNDERSTORM_TEST_REQUIRE_ALL:-0}"
@@ -235,7 +237,7 @@ STUB_RULES="$(find_stub_rules)"
 
 # Start the stub server (once for the entire test run)
 start_stub() {
-    local tmpdir; tmpdir="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local tmpdir; tmpdir="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
     STUB_LOG="$tmpdir/thunderstorm.jsonl"
     STUB_UPLOADS="$tmpdir/uploads"
     mkdir -p "$STUB_UPLOADS"
@@ -273,7 +275,7 @@ start_stub() {
 }
 
 stop_stub() {
-    [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null && wait "$STUB_PID" 2>/dev/null
+    [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null && wait "$STUB_PID" 2>/dev/null || true
     STUB_PID=""
 }
 
@@ -284,12 +286,14 @@ clear_log() {
 
 cleanup() {
     stop_stub
-    # Kill any leftover retry-test stubs
-    for p in 18101 18102 18103 18104 18105 18106; do
-        local pid; pid="$(lsof -ti :$p 2>/dev/null)"
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null
-    done
-    rm -rf /tmp/detection-test-* /tmp/filename-ioc-test-* /tmp/retry-stub-* /tmp/collector-out-* 2>/dev/null
+    local pid
+    if [ "${#RETRY_STUB_PIDS[@]}" -gt 0 ]; then
+        for pid in "${RETRY_STUB_PIDS[@]}"; do
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        done
+    fi
+    rm -rf "$TEST_TMP_DIR"
 }
 trap cleanup EXIT
 
@@ -465,7 +469,7 @@ BENIGN_CONTENT="completely harmless content"
 # Create per-collector fixture directories with uniquely named files
 setup_collector_fixtures() {
     local collector="$1"
-    local base; base="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local base; base="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$base/malicious"
     echo "$MALICIOUS_CONTENT" > "$base/malicious/evil-${collector}.exe"
@@ -646,7 +650,7 @@ test_full_path_in_log() {
 test_directory_scope() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     # Create two sibling directories: target and decoy
     mkdir -p "$fixtures/target" "$fixtures/decoy"
@@ -681,7 +685,7 @@ test_directory_scope() {
 test_age_filter() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/aged"
 
@@ -739,7 +743,7 @@ test_extension_filter() {
             return ;;
     esac
 
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
     mkdir -p "$fixtures/exttest"
 
     # File with a known extension — should be submitted
@@ -774,7 +778,7 @@ test_extension_filter() {
 test_subdirectory_recursion() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/root/sub1/sub2"
     echo "$MALICIOUS_CONTENT" > "$fixtures/root/top-${collector}.exe"
@@ -804,7 +808,7 @@ test_subdirectory_recursion() {
 test_empty_file() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/empty"
     : > "$fixtures/empty/empty-${collector}.exe"   # 0 bytes
@@ -836,7 +840,7 @@ test_empty_file() {
 test_unicode_filename() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/unicode"
     # File with Unicode chars in name
@@ -866,7 +870,7 @@ test_unicode_filename() {
 test_symlink_not_followed() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/scandir" "$fixtures/outside"
     echo "$MALICIOUS_CONTENT" > "$fixtures/outside/secret-${collector}.exe"
@@ -903,7 +907,7 @@ test_symlink_not_followed() {
 test_broken_symlink() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/broken"
     echo "$MALICIOUS_CONTENT" > "$fixtures/broken/real-${collector}.exe"
@@ -930,7 +934,7 @@ test_broken_symlink() {
 test_special_chars_filename() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/special"
     # File with spaces
@@ -968,7 +972,7 @@ test_special_chars_filename() {
 test_excluded_dirs_survive() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     # Create a tree with directories named after excluded paths
     mkdir -p "$fixtures/scanme/proc" "$fixtures/scanme/dev" "$fixtures/scanme/normal"
@@ -998,7 +1002,7 @@ test_excluded_dirs_survive() {
 test_unreadable_file() {
     local collector="$1"
     clear_log
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
 
     mkdir -p "$fixtures/perms"
     echo "$MALICIOUS_CONTENT" > "$fixtures/perms/readable-${collector}.exe"
@@ -1027,7 +1031,7 @@ test_retry_on_late_server() {
     local collector="$1"
     clear_log
 
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
     mkdir -p "$fixtures/retry"
     echo "$MALICIOUS_CONTENT" > "$fixtures/retry/retry-${collector}.exe"
 
@@ -1041,10 +1045,10 @@ test_retry_on_late_server() {
         ps3)    retry_port=18105 ;;
         ps2)    retry_port=18106 ;;
     esac
-    local retry_log; retry_log="$(mktemp /tmp/retry-stub-XXXXXX.jsonl)"
+    local retry_log; retry_log="$(mktemp "$TEST_TMP_DIR/retry-stub-XXXXXX")"
 
     # Start the collector against the dead port (it will retry)
-    local collector_out; collector_out="$(mktemp /tmp/collector-out-XXXXXX.txt)"
+    local collector_out; collector_out="$(mktemp "$TEST_TMP_DIR/collector-out-XXXXXX")"
 
     # Start the stub server FIRST on the retry port, but with a delayed start.
     # We use a wrapper that waits 2 seconds before launching the stub.
@@ -1057,9 +1061,10 @@ test_retry_on_late_server() {
     # The stub takes ~0.5-1s to load YARA rules and bind, so we must start it
     # early enough that it's listening before the 2nd begin marker attempt.
     # Starting at 0.3s gives the stub ~1.7s to initialize before t=2s.
-    ( sleep 0.3 && "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
+    ( sleep 0.3 && exec "$stub_bin" -port "$retry_port" -rules-dir "$stub_rules" -log-file "$retry_log" ) \
         > /dev/null 2>&1 &
     local stub_pid=$!
+    RETRY_STUB_PIDS+=("$stub_pid")
 
     # Run the collector synchronously — it will fail first, then succeed on retry.
     # --retries 5 gives enough attempts for the stub to come up after 2s delay.
@@ -1126,8 +1131,9 @@ for line in open('$retry_log'):
     fi
 
     # Cleanup: kill the delayed stub
-    kill "$stub_pid" 2>/dev/null
+    kill "$stub_pid" 2>/dev/null || true
     wait "$stub_pid" 2>/dev/null || true
+    RETRY_STUB_PIDS=()
     rm -rf "$fixtures" "$retry_log" "$collector_out"
 }
 
@@ -1138,13 +1144,13 @@ test_server_unreachable() {
     local collector="$1"
     clear_log
 
-    local fixtures; fixtures="$(mktemp -d /tmp/detection-test-XXXXXX)"
+    local fixtures; fixtures="$(mktemp -d "$TEST_TMP_DIR/fixtures-XXXXXX")"
     mkdir -p "$fixtures/unreachable"
     echo "$MALICIOUS_CONTENT" > "$fixtures/unreachable/orphan-${collector}.exe"
 
     # Port 18099 has nothing listening — all uploads will fail
     local dead_port=18099
-    local collector_out; collector_out="$(mktemp /tmp/collector-out-XXXXXX.txt)"
+    local collector_out; collector_out="$(mktemp "$TEST_TMP_DIR/collector-out-XXXXXX")"
 
     # Run with minimal retries to avoid long wait.
     # Use timeout to kill collectors that hang; || true to prevent set -e from aborting.

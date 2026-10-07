@@ -23,9 +23,10 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 
-STUB_PORT=19993
-STUB_LOG="/tmp/e2e-compliance.jsonl"
+STUB_PORT="${STUB_PORT:-19993}"
+STUB_LOG=""
 STUB_PID=""
+WORK_DIR=""
 
 TS_HOST="${THUNDERSTORM_HOST:-}"
 TS_PORT="${THUNDERSTORM_PORT:-8081}"
@@ -33,7 +34,7 @@ COLLECTOR_FILTER_RAW="${THUNDERSTORM_TEST_COLLECTORS:-}"
 COLLECTOR_REQUIRE_MATCH="${THUNDERSTORM_TEST_REQUIRE_MATCH:-0}"
 COLLECTOR_REQUIRE_ALL="${THUNDERSTORM_TEST_REQUIRE_ALL:-0}"
 
-FIXTURES="/tmp/e2e-compliance-fixtures"
+FIXTURES=""
 PASS=0
 FAIL=0
 SKIP=0
@@ -200,29 +201,21 @@ find_stub() {
     return 1
 }
 
-kill_port_listener() {
-    command -v lsof >/dev/null 2>&1 || return 0
-    local pid
-    for pid in $(lsof -tiTCP:"$STUB_PORT" -sTCP:LISTEN 2>/dev/null || true); do
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
-    done
-}
-
 start_stub() {
-    kill_port_listener
-    sleep 1
-    rm -f "$STUB_LOG"
-    "$1" -port "$STUB_PORT" -log-file "$STUB_LOG" &
+    "$1" -port "$STUB_PORT" -log-file "$STUB_LOG" > "$WORK_DIR/stub.log" 2>&1 &
     STUB_PID=$!
     sleep 2
-    if ! curl -sf "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
-        echo "ERROR: Stub server failed to start on port $STUB_PORT"; exit 1
+    if ! kill -0 "$STUB_PID" 2>/dev/null ||
+        ! curl -fsS --connect-timeout 5 --max-time 10 "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
+        echo "ERROR: Stub server failed to start on port $STUB_PORT (possibly already in use)" >&2
+        cat "$WORK_DIR/stub.log" >&2
+        exit 1
     fi
 }
 
 stop_stub() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null && wait "$STUB_PID" 2>/dev/null || true; STUB_PID=""; }
 
-cleanup() { stop_stub; rm -rf "$FIXTURES"; }
+cleanup() { stop_stub; [ -z "$WORK_DIR" ] || rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -318,7 +311,10 @@ run_tests() {
     section "$name"
 
     start_line=$(($(jsonl_count) + 1))
-    "$@" --source "$source_val" > /dev/null 2>&1 || true
+    if ! "$@" --source "$source_val" > "$WORK_DIR/collector.log" 2>&1; then
+        fail "$name: collector exited unsuccessfully"
+        cat "$WORK_DIR/collector.log"
+    fi
     sleep 2
 
     uploads=$(jsonl_uploads_since "$start_line")
@@ -408,10 +404,13 @@ run_tests_ps() {
     section "$name"
 
     start_line=$(($(jsonl_count) + 1))
-    pwsh -NoProfile -ep bypass -c "& '$script' \
-        -ThunderstormServer '127.0.0.1' -ThunderstormPort $STUB_PORT \
-        -Folder '$FIXTURES' -MaxAge 365 -AllExtensions \
-        -Source '$source_val'" > /dev/null 2>&1 || true
+    if ! pwsh -NoProfile -ep bypass -File "$script" \
+        -ThunderstormServer 127.0.0.1 -ThunderstormPort "$STUB_PORT" \
+        -Folder "$FIXTURES" -MaxAge 365 -AllExtensions \
+        -Source "$source_val" > "$WORK_DIR/collector.log" 2>&1; then
+        fail "$name: collector exited unsuccessfully"
+        cat "$WORK_DIR/collector.log"
+    fi
     sleep 2
 
     uploads=$(jsonl_uploads_since "$start_line")
@@ -446,7 +445,11 @@ run_dry_run_test() {
     local name="$1"; shift
     local start_line n
     start_line=$(($(jsonl_count) + 1))
-    "$@" --dry-run > /dev/null 2>&1 || true
+    if ! "$@" --dry-run > "$WORK_DIR/collector.log" 2>&1; then
+        fail "$name/dry-run: collector exited unsuccessfully"
+        cat "$WORK_DIR/collector.log"
+        return
+    fi
     sleep 1
     n=$(jsonl_uploads_since "$start_line" | wc -l | tr -d ' ')
     [ "$n" -eq 0 ] && pass "$name/dry-run" || fail "$name/dry-run: $n uploads (should be 0)"
@@ -489,6 +492,9 @@ if [ -z "$STUB_BIN" ]; then
     echo "ERROR: Cannot find stub server binary"; exit 1
 fi
 echo "Stub: $STUB_BIN"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/e2e-compliance-XXXXXX")"
+STUB_LOG="$WORK_DIR/audit.jsonl"
+FIXTURES="$WORK_DIR/fixtures"
 start_stub "$STUB_BIN"
 create_fixtures
 
@@ -560,20 +566,23 @@ fi
 # Real Thunderstorm smoke tests
 if [ -n "$TS_HOST" ]; then
     section "Real Thunderstorm ($TS_HOST:$TS_PORT)"
-    if curl -sf "http://$TS_HOST:$TS_PORT/api/status" >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout 5 --max-time 10 "http://$TS_HOST:$TS_PORT/api/status" >/dev/null 2>&1; then
         pass "connectivity: server reachable"
-        TS_FIX="/tmp/e2e-ts-smoke"
-        rm -rf "$TS_FIX"; mkdir -p "$TS_FIX"
+        TS_FIX="$WORK_DIR/live-fixtures"
+        mkdir -p "$TS_FIX"
         echo "live test" > "$TS_FIX/live.txt"
         printf '\x00BINARY\x00' > "$TS_FIX/live.bin"
 
-        for info in \
-            "bash:bash $SCRIPTS_DIR/thunderstorm-collector.sh --server $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365 --quiet" \
-            "python3:python3 $SCRIPTS_DIR/thunderstorm-collector.py -s $TS_HOST -p $TS_PORT -d $TS_FIX --max-age 365" \
-            "perl:perl $SCRIPTS_DIR/thunderstorm-collector.pl -s $TS_HOST --port $TS_PORT --dir $TS_FIX --max-age 365" \
-            "ps3:pwsh -NoProfile -ep bypass -c \"& '$SCRIPTS_DIR/thunderstorm-collector.ps1' -ThunderstormServer $TS_HOST -ThunderstormPort $TS_PORT -Folder '$TS_FIX' -MaxAge 365 -AllExtensions\""; do
-            n="${info%%:*}"; c="${info#*:}"
-            if eval "$c" >/dev/null 2>&1; then
+        for n in "${available_collectors[@]}"; do
+            script="$(collector_script_path "$n")"
+            case "$n" in
+                bash) live_command=(bash "$script" --server "$TS_HOST" --port "$TS_PORT" --dir "$TS_FIX" --max-age 365 --quiet) ;;
+                ash) read -r -a live_command <<< "$ASH_SHELL"; live_command+=("$script" --server "$TS_HOST" --port "$TS_PORT" --dir "$TS_FIX" --max-age 365 --quiet) ;;
+                python3|python2) live_command=("$n" "$script" -s "$TS_HOST" -p "$TS_PORT" -d "$TS_FIX" --max-age 365) ;;
+                perl) live_command=(perl "$script" -s "$TS_HOST" --port "$TS_PORT" --dir "$TS_FIX" --max-age 365) ;;
+                ps3|ps2) live_command=(pwsh -NoProfile -ep bypass -File "$script" -ThunderstormServer "$TS_HOST" -ThunderstormPort "$TS_PORT" -Folder "$TS_FIX" -MaxAge 365 -AllExtensions) ;;
+            esac
+            if "${live_command[@]}" >/dev/null 2>&1; then
                 pass "live/$n: upload succeeded"
             else
                 fail "live/$n: upload failed"
