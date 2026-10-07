@@ -38,9 +38,11 @@ cd thunderstorm-collector-amd64-linux
 ./amd64-linux-thunderstorm-collector --help
 ```
 
-### Scripts Package
+### Script Assets
 
-If you prefer scripts over compiled binaries, download `thunderstorm-collector-scripts.zip` which includes:
+Each available collector is attached to the release as a separate, versioned script asset, for example `thunderstorm-collector-<version>.sh` or `thunderstorm-collector-py2-<version>.py`. There is no combined scripts ZIP archive.
+
+Source code and per-collector documentation are organized in:
 - `scripts/bash/` (Bash)
 - `scripts/ash/` (POSIX sh / ash)
 - `scripts/python/` (Python 3 and Python 2)
@@ -69,15 +71,15 @@ make help   # Show all available build targets
 From the repository root:
 
 ```bash
-make release           # Build both binary packages and scripts package
-make release-binary    # Build binary packages only
-make release-scripts   # Build scripts package only
+make release           # Build binary packages and individual script assets
+make release-binary    # Build binary packages and copy standalone config
+make release-scripts   # Copy individual script assets only
 make help              # Show all available targets
 ```
 
 This creates:
 - **Binary packages:** `go/dist/*.tar.gz` and `go/dist/*.zip` (46+ platforms)
-- **Scripts package:** `release/thunderstorm-collector-scripts.zip`
+- **Release assets:** versioned binary packages, individual collector scripts, and `config-<version>.yml` in `release/`
 
 ## Which Collector Should You Choose?
 
@@ -98,8 +100,8 @@ This creates:
 When a version tag is pushed (e.g., `v1.2.3`), GitHub Actions automatically:
 1. Builds binaries for all 46 supported platforms
 2. Creates compressed packages (tar.gz/zip) with binary + config
-3. Creates a scripts package with all collection scripts
-4. Publishes a GitHub release with all packages attached
+3. Copies each available collector script and the standalone configuration into versioned release assets
+4. Publishes a GitHub release with binary packages and individual assets attached
 
 ## Craft Your Own Collector
 

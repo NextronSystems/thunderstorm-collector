@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - "scripts/**"
+      - "Makefile"
       - ".github/workflows/script-collectors.yml"
   pull_request:
     paths:
       - "scripts/**"
+      - "Makefile"
       - ".github/workflows/script-collectors.yml"
   workflow_dispatch:
     inputs:
@@ -62,6 +64,9 @@ jobs:
 
       - name: Test harness safeguards
         run: python -B scripts/tests/test_harness.py
+
+      - name: Test release asset selection
+        run: python -B scripts/tests/test_release_assets.py
 
       - name: Detect Linux collectors
         id: collectors
