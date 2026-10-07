@@ -1,4 +1,4 @@
-#!/usr/bin/perl -s 
+#!/usr/bin/perl -s
 #
 # THOR Thunderstorm Collector
 # Florian Roth
@@ -7,7 +7,7 @@
 #
 # Requires LWP::UserAgent
 #   - on Linux: apt-get install libwww-perl
-#   - other: perl -MCPAN -e 'install Bundle::LWP' 
+#   - other: perl -MCPAN -e 'install Bundle::LWP'
 #
 # Usage examples:
 #   $> perl thunderstorm-collector.pl -- -s thunderstorm.internal.net
@@ -21,7 +21,7 @@ use LWP::UserAgent;
 use File::Spec::Functions qw( catfile );
 use Sys::Hostname;
 
-use Cwd; # module for finding the current working directory 
+use Cwd; # module for finding the current working directory
 
 # Configuration
 our $debug = 0;
@@ -32,7 +32,7 @@ my $scheme = "http";
 my $source = "";
 our $max_age = 3;       # in days
 our $max_size = 10;     # in megabytes
-our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm');
+our @skipElements = map { qr{$_} } ('^\/proc', '^\/mnt', '\.dat$', '\.npm', '\.lck$');
 our @hardSkips = ('/proc', '/dev', '/sys');
 
 # Command Line Parameters
@@ -66,44 +66,52 @@ our $num_processed = 0;
 our $ua;
 
 # Process Folders
-sub processDir { 
-    my ($workdir) = shift; 
-    my ($startdir) = &cwd; 
-    # keep track of where we began 
-    chdir($workdir) or do { print "[ERROR] Unable to enter dir $workdir:$!\n"; return; }; 
-    opendir(DIR, ".") or do { print "[ERROR] Unable to open $workdir:$!\n"; return; }; 
-    
+sub processDir {
+    my ($workdir) = shift;
+    my ($startdir) = &cwd;
+    # keep track of where we began
+    chdir($workdir) or do { print "[ERROR] Unable to enter dir $workdir:$!\n"; return; };
+    opendir(DIR, ".") or do { print "[ERROR] Unable to open $workdir:$!\n"; return; };
+
     my @names = readdir(DIR) or do { print "[ERROR] Unable to read $workdir:$!\n"; return; };
-    closedir(DIR); 
-    
-    foreach my $name (@names){ 
-        next if ($name eq "."); 
-        next if ($name eq ".."); 
+    closedir(DIR);
+
+    foreach my $name (@names){
+        next if ($name eq ".");
+        next if ($name eq "..");
 
         #print("Workdir: $workdir Name: $name\n");
         my $filepath = catfile($workdir, $name);
         # Hard directory skips
         my $skipHard = 0;
-        foreach ( @hardSkips ) { 
-            $skipHard = 1 if ( $filepath eq $_ ); 
+        foreach ( @hardSkips ) {
+            $skipHard = 1 if ( $filepath eq $_ );
         }
         next if $skipHard;
-        
+
         # Is a Directory
-        if (-d $filepath){ 
+        if (-d $filepath){
             #print "IS DIR!\n";
             # Skip symbolic links
             if (-l $filepath) { next; }
             # Process Dir
-            &processDir($filepath); 
-            next; 
+            &processDir($filepath);
+            next;
         } else {
             if ( $debug ) { print "[DEBUG] Checking $filepath ...\n"; }
         }
 
+        # skip non-regular files
+        # has to be after the directory check, otherwise we would skip directories as well
+        unless (-f $filepath) {
+            if ( $debug ) { print "[DEBUG] Skipping non-regular file $filepath\n"; }
+            next;
+        }
+
         # Characteristics
-        my $size = (stat($filepath))[7];
-        my $mdate = (stat($filepath))[9];
+        my @stat = stat($filepath);
+        my $size  = $stat[7];
+        my $mdate = $stat[9];
         #print("SIZE: $size MDATE: $mdate\n");
 
         # Count
@@ -113,31 +121,31 @@ sub processDir {
         # Skip Folders / elements
         my $skipRegex = 0;
         # Regex Checks
-        foreach ( @skipElements ) { 
+        foreach ( @skipElements ) {
             if ( $filepath =~ $_ ) {
                 if ( $debug ) { print "[DEBUG] Skipping file due to configured exclusion $filepath\n"; }
                 $skipRegex = 1;
-            } 
+            }
         }
         next if $skipRegex;
         # Size
-        if ( ( $size / 1024 / 1024 ) gt $max_size ) {
+        if ( ( $size / 1024 / 1024 ) > $max_size ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to file size $filepath\n"; }
             next;
         }
         # Age
         #print("MDATE: $mdate CURR_DATE: $current_date\n");
-        if ( $mdate lt ( $current_date - ($max_age * 86400) ) ) {
+        if ( $mdate < ( $current_date - ($max_age * 86400) ) ) {
             if ( $debug ) { print "[DEBUG] Skipping file due to age $filepath\n"; }
             next;
-        }       
-        
+        }
+
         # Submit
         &submitSample($filepath);
 
-        chdir($startdir) or die "Unable to change back to dir $startdir:$!\n"; 
-    } 
-} 
+        chdir($startdir) or die "Unable to change back to dir $startdir:$!\n";
+    }
+}
 
 sub submitSample {
     my ($filepath) = shift;
@@ -158,8 +166,11 @@ sub submitSample {
                 ],
             );
             $successful = $req->is_success;
-            $num_submitted++;
-            print "\nError: ", $req->status_line unless $successful;
+            if ($successful) {
+                $num_submitted++;
+            } else {
+                print "\nError: ", $req->status_line;
+            }
         } or do {
             my $error = $@ || 'Unknown failure';
             warn "Could not submit '$filepath' - $error";
@@ -171,7 +182,7 @@ sub submitSample {
 }
 
 # MAIN ----------------------------------------------------------------
-# Default Values 
+# Default Values
 print "==============================================================\n";
 print "    ________                __            __                  \n";
 print "   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _    \n";
@@ -189,8 +200,8 @@ print "Maximum Age of Files: $max_age\n";
 print "Maximum File Size: $max_size\n";
 print "\n";
 
-# Instanciate an object 
-$ua = LWP::UserAgent->new;
+# Instantiate an object
+$ua = LWP::UserAgent->new(timeout => 30);
 
 print "Starting the walk at: $targetdir ...\n";
 # Start the walk

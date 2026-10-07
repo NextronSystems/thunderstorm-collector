@@ -96,7 +96,7 @@ func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	f, err := os.Open(template)
 	if err != nil {
 		if templateSpecified {
-			return fmt.Errorf("Template file %s could not be opened: %w\n", template, err)
+			return fmt.Errorf("Template file %s could not be opened: %v\n", template, err)
 		} else {
 			return nil // If we can't find the default template, don't give an error, just move on silently
 		}
@@ -106,7 +106,7 @@ func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	decoder.KnownFields(true)
 	err = decoder.Decode(config)
 	if err != nil {
-		return fmt.Errorf("Template file %s could not be parsed: %w\n", template, err)
+		return fmt.Errorf("Template file %s could not be parsed: %v\n", template, err)
 	}
 	return nil
 }
