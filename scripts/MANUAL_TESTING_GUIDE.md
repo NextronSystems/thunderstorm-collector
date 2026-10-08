@@ -731,4 +731,4 @@ capability profiles, acceptance matrix and a reusable agent assignment.
 It is not another collector implementation and does not certify untested platforms.
 Optional markers and the full feature set of one language remain optional; actual
 target tests and human acceptance are still required. After merging the guide,
-find it at `scripts/COLLECTOR_CONSTRUCTION_GUIDE.md`.
+find it at `docs/COLLECTOR_CONSTRUCTION_GUIDE.md`.
