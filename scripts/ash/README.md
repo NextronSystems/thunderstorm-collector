@@ -23,6 +23,10 @@ The first supported transport is selected:
 | nc + timeout | Yes | No | Yes | Not sent |
 | BusyBox/unknown wget alone | Refused | Refused | Not accepted as a safe fallback | Not sent |
 
+Curl/wget configuration files and proxy environment settings are ignored, so
+they cannot silently disable TLS verification or redirect uploads. GNU wget must
+support `--no-config`.
+
 Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SECONDS COMMAND`. Its minimal HTTP/1.0 client requires a complete header section, exactly one `Content-Length`, no `Transfer-Encoding`, and the exact declared body length. Chunked, close-delimited, informational, malformed and incomplete responses fail. Prefer curl/GNU wget if your backend needs those features. HTTP is unencrypted; use an appropriately isolated network.
 
 ## Capabilities
@@ -36,12 +40,15 @@ Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SE
 - Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and CR/LF with underscores.
 - Async `/api/checkAsync` submission by default; `--sync` uses `/api/check`. Async success means accepted, not analysis completed. The collector does not poll async results.
 - Optional begin/end/interrupted `/api/collection` markers. HTTP 404/501 is nonfatal and supplies no scan ID. Other begin failures retry once after two seconds, then abort; end failures produce a nonzero exit.
+- Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
 - `--retries 1..10` bounds total attempts per file, including HTTP 503. Retry-After integer seconds cap at 120; otherwise backoff starts at two seconds and caps at 60. A lost response can cause duplicates; no deduplication or resume.
 - Dry-run needs no upload tool and never contacts the server. CLI, file and optional syslog logging are supported.
 
 ## Limits and Exit Codes
 
 Paths containing literal newlines are **not supported**. Explicit newline roots are rejected before contacting the server. Discovered newline paths are never submitted or split into other paths; the run records scan errors and continues with supported files.
+This also applies to physical paths reached through symlinks. A resolved newline
+root is a scan error; a newline workspace or log path is a fatal configuration error.
 
 Missing/inaccessible roots, traversal errors, unreadable/disappeared files and failed uploads are visible failures, not successful skips. Other readable files can still be submitted. `scan_errors` counts root/traversal/unsupported-path errors separately from per-file `failed` counts.
 
@@ -54,6 +61,11 @@ Missing/inaccessible roots, traversal errors, unreadable/disappeared files and f
 An empty existing root can succeed with zero files; missing roots cannot. Netcat has no begin connectivity check, so an unreachable service fails per-file with exit 1 rather than curl/GNU wget's begin-stage exit 2. Logging failures disable file logging with a warning; they do not alone fail uploads.
 
 Curl attempts have a 10-second connect timeout and 60-second total timeout. GNU wget uses one internal attempt, no redirects, a 10-second connect timeout and 60-second idle-read timeout; this is not a total wall-clock deadline. Netcat attempts are wrapped in a 60-second timeout. Finite attempts do not imply a fixed deadline for the whole scan.
+
+Responses are limited to 1 MiB (including headers for netcat). Each transport
+output file also has an operating-system write limit of at most 2 MiB, including
+headers and diagnostics. Oversized responses fail; error-body logging is limited
+to 4 KiB. Large sample spooling is not subject to the response limit.
 
 Collection is not an atomic snapshot. Files can change between enumeration, measurement and reading; hostile replacement/symlink races are not prevented. Directory listings consume temporary disk space. Without `stat`, measuring size reads whole files, even oversized ones. Mount detection depends on Linux `/proc/mounts`; do not assume equivalent detection elsewhere. POSIX syntax alone does not establish compatibility with untested ksh or legacy BusyBox versions.
 

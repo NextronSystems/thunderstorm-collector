@@ -330,12 +330,148 @@ escape_find_path() {
     printf '%s' "$1" | sed 's/[\\*?[]/\\&/g'
 }
 
+# Preserve pwd output before rejecting unsupported physical newline paths.
+resolve_directory() {
+    _rd_value="$(CDPATH='' cd -- "$1" && pwd -P && printf '.')" || return 1
+    _rd_value="${_rd_value%.}"
+    _rd_value="${_rd_value%?}"
+    case "$_rd_value" in *"
+"*) return 1 ;; esac
+    RESOLVED_DIR="$_rd_value"
+}
+
+# Bound every response/header/error file even with older curl/wget versions.
+# Shells express this limit in 512- or 1024-byte units, so the physical cap is
+# at most 2 MiB. Apply the logical 1 MiB response limit before parsing anything.
+run_http() (
+    ulimit -f 2048 || exit 97
+    "$@"
+)
+
+response_is_bounded() {
+    for _rb_file in "$@"; do
+        _rb_bytes="$(wc -c < "$_rb_file")" || return 1
+        if [ "$_rb_bytes" -gt 1048576 ]; then
+            log_msg error "HTTP response exceeds the 1 MiB limit"
+            return 1
+        fi
+    done
+}
+
+# Parse the entire JSON document, not a substring that happens to name scan_id.
+# Keep this POSIX awk implementation standalone for machines without Python/jq.
+read_scan_id() {
+    LC_ALL=C awk '
+    BEGIN { for (i=1;i<256;i++) byte[sprintf("%c",i)]=i }
+    function ws() { while (substr(s,p,1) ~ /^[ \t\r\n]$/) p++ }
+    function fail() { exit 1 }
+    function hex4(    i,c,n) {
+        n=0
+        for (i=0;i<4;i++) {
+            c=index("0123456789abcdef",tolower(substr(s,p+i,1)))-1
+            if (length(substr(s,p+i,1)) != 1 || c<0) fail()
+            n=n*16+c
+        }
+        p+=4
+        return n
+    }
+    function utf8(n) {
+        if (n<128) return sprintf("%c",n)
+        if (n<2048) return sprintf("%c%c",192+int(n/64),128+n%64)
+        if (n<65536) return sprintf("%c%c%c",224+int(n/4096),128+int(n/64)%64,128+n%64)
+        return sprintf("%c%c%c%c",240+int(n/262144),128+int(n/4096)%64,128+int(n/64)%64,128+n%64)
+    }
+    function string(    out,c,n,lo,lead,count,j,nextbyte) {
+        if (substr(s,p++,1)!="\"") fail()
+        out=""
+        while (p<=length(s)) {
+            c=substr(s,p++,1)
+            if (c=="\"") { parsed=out; return }
+            if (c ~ /[[:cntrl:]]/) fail()
+            lead=byte[c]
+            if (lead>=128) {
+                if (lead<194 || lead>244) fail()
+                count=(lead<224 ? 1 : (lead<240 ? 2 : 3))
+                for (j=1;j<=count;j++) {
+                    nextbyte=byte[substr(s,p,1)]
+                    if (nextbyte<128 || nextbyte>191) fail()
+                    if (j==1 && ((lead==224 && nextbyte<160) ||
+                        (lead==237 && nextbyte>159) || (lead==240 && nextbyte<144) ||
+                        (lead==244 && nextbyte>143))) fail()
+                    c=c substr(s,p++,1)
+                }
+            }
+            if (c=="\\") {
+                c=substr(s,p++,1)
+                if (c=="u") {
+                    n=hex4()
+                    # Some awk implementations cannot preserve embedded NULs.
+                    if (n==0) fail()
+                    if (n>=55296 && n<=56319) {
+                        if (substr(s,p,2)!="\\u") fail()
+                        p+=2; lo=hex4()
+                        if (lo<56320 || lo>57343) fail()
+                        n=65536+(n-55296)*1024+lo-56320
+                    } else if (n>=56320 && n<=57343) fail()
+                    c=utf8(n)
+                } else if (c=="n") c="\n"
+                else if (c=="r") c="\r"
+                else if (c=="t") c="\t"
+                else if (c=="b") c=sprintf("%c",8)
+                else if (c=="f") c=sprintf("%c",12)
+                else if (c!="\"" && c!="\\" && c!="/") fail()
+            }
+            out=out c
+        }
+        fail()
+    }
+    function value(depth,    c,key,closing) {
+        if (depth>32) fail()
+        ws(); c=substr(s,p,1)
+        if (c=="\"") { string(); kind="string"; return }
+        if (c=="{" || c=="[") {
+            closing=(c=="{" ? "}" : "]"); p++; ws()
+            if (substr(s,p,1)!=closing) {
+                while (1) {
+                    if (c=="{") {
+                        ws(); string(); key=parsed; ws()
+                        if (substr(s,p++,1)!=":") fail()
+                    }
+                    value(depth+1)
+                    if (depth==1 && c=="{" && key=="scan_id") {
+                        if (++ids>1 || kind!="string") invalid_id=1
+                        else id=parsed
+                    }
+                    ws()
+                    if (substr(s,p,1)==closing) break
+                    if (substr(s,p++,1)!=",") fail()
+                }
+            }
+            p++; kind=(c=="{" ? "object" : "array"); return
+        }
+        if (match(substr(s,p),/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+            p+=RLENGTH; kind="number"; return
+        }
+        if (match(substr(s,p),/^(true|false|null)/)) {
+            p+=RLENGTH; kind="literal"; return
+        }
+        fail()
+    }
+    { s=s $0 "\n" }
+    END {
+        p=1; value(1); ws()
+        if (p<=length(s) || kind!="object" || invalid_id) fail()
+        if (length(id)>256 || id ~ /[[:cntrl:]]/) fail()
+        printf "%s",id
+    }' "$1"
+}
+
 detect_upload_tool() {
     if command -v curl >/dev/null 2>&1; then
         UPLOAD_TOOL="curl"
         return 0
     fi
-    if command -v wget >/dev/null 2>&1 && wget --version 2>/dev/null | head -1 | grep -q '^GNU Wget'; then
+    if command -v wget >/dev/null 2>&1 && wget --no-config --version 2>/dev/null | head -1 | grep -q '^GNU Wget'; then
         UPLOAD_TOOL="wget"
         return 0
     fi
@@ -366,11 +502,12 @@ upload_with_curl() {
         -F "file=@-;filename=\"${_uc_safe_name}\""
 
     # Use -w to capture HTTP status code; do NOT use --fail so we can inspect 503
-    _uc_http_code="$(curl "$@" < "$_uc_filepath" 2>"${_uc_resp}.err")"
+    _uc_http_code="$(run_http curl --disable --noproxy '*' --globoff "$@" < "$_uc_filepath" 2>"${_uc_resp}.err")"
     _uc_code=$?
+    response_is_bounded "$_uc_resp" "$_uc_hdr" || return 97
 
     if [ "$_uc_code" -ne 0 ]; then
-        _uc_err="$(cat "${_uc_resp}.err" 2>/dev/null | tr '\r\n' '  ')"
+        _uc_err="$(head -c 4096 "${_uc_resp}.err" 2>/dev/null | tr '\r\n' '  ')"
         log_msg debug "curl error (code $_uc_code) for '$_uc_filepath': $_uc_err"
         return "$_uc_code"
     fi
@@ -392,7 +529,7 @@ upload_with_curl() {
     case "$_uc_http_code" in
         2[0-9][0-9]) ;;
         *)
-            _uc_body="$(cat "$_uc_resp" 2>/dev/null | tr '\r\n' '  ')"
+            _uc_body="$(head -c 4096 "$_uc_resp" 2>/dev/null | tr '\r\n' '  ')"
             log_msg error "Server returned HTTP $_uc_http_code for '$_uc_filepath': $_uc_body"
             return 92
             ;;
@@ -459,8 +596,9 @@ upload_with_wget() {
         --post-file="$_uw_body" \
         "$_uw_endpoint"
 
-    wget "$@" 2>"$_uw_hdr"
+    run_http wget --no-config --no-proxy "$@" 2>"$_uw_hdr"
     _uw_code=$?
+    response_is_bounded "$_uw_resp" "$_uw_hdr" || return 97
 
     # Parse HTTP status code from wget's server response output
     # wget -S prints "  HTTP/1.1 200 OK" lines to stderr
@@ -543,8 +681,9 @@ upload_with_nc() {
         printf "\r\n"
         cat "$_nc_body" || return 98
     } > "$_nc_request" || return 98
-    timeout 60 nc -w 30 "$_nc_host" "$_nc_port" < "$_nc_request" > "$_nc_resp_file" 2>/dev/null
+    run_http timeout 60 nc -w 30 "$_nc_host" "$_nc_port" < "$_nc_request" > "$_nc_resp_file" 2>/dev/null
     _nc_rc=$?
+    response_is_bounded "$_nc_resp_file" || return 97
 
     # No response or connection failure
     if [ "$_nc_rc" -ne 0 ] || [ ! -s "$_nc_resp_file" ]; then
@@ -682,7 +821,7 @@ collection_marker() {
     _cm_body="${_cm_body},\"hostname\":\"${_cm_safe_hostname}\""
     _cm_body="${_cm_body},\"collector\":\"ash/${VERSION}\""
     _cm_body="${_cm_body},\"timestamp\":\"$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u)\""
-    [ -n "$_cm_scan_id" ] && _cm_body="${_cm_body},\"scan_id\":\"${_cm_scan_id}\""
+    [ -n "$_cm_scan_id" ] && _cm_body="${_cm_body},\"scan_id\":\"$(json_escape "$_cm_scan_id")\""
     [ -n "$_cm_stats"   ] && _cm_body="${_cm_body},${_cm_stats}"
     _cm_body="${_cm_body}}"
 
@@ -694,8 +833,9 @@ collection_marker() {
         [ "$INSECURE" -eq 1 ] && set -- "$@" -k
         [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
         set -- "$@" "$_cm_url"
-        _cm_http_code="$(curl "$@" 2>/dev/null)"
+        _cm_http_code="$(run_http curl --disable --noproxy '*' --globoff "$@" 2>/dev/null)"
         _cm_curl_rc=$?
+        response_is_bounded "$_cm_resp" "$_cm_hdr" || return 97
         if [ "$_cm_curl_rc" -eq 0 ]; then
             case "$_cm_http_code" in
                 2[0-9][0-9]) _cm_ok=1 ;;
@@ -708,11 +848,16 @@ collection_marker() {
         [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
         [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT"
         set -- "$@" "$_cm_url"
-        wget "$@" 2>"$_cm_hdr"
+        run_http wget --no-config --no-proxy "$@" 2>"$_cm_hdr"
         _cm_wget_rc=$?
+        response_is_bounded "$_cm_resp" "$_cm_hdr" || return 97
         _cm_http_code="$(http_status "$_cm_hdr")"
         case "$_cm_http_code" in
-            404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"; return 0 ;;
+            404|501)
+                case "$_cm_wget_rc" in 0|8)
+                    log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"
+                    return 0 ;;
+                esac ;;
             2[0-9][0-9]) [ "$_cm_wget_rc" -eq 0 ] && _cm_ok=1 ;;
             *) log_msg warn "Collection marker '$_cm_type' got HTTP ${_cm_http_code:-unknown}" ;;
         esac
@@ -721,12 +866,10 @@ collection_marker() {
     fi
     [ "$_cm_ok" -eq 1 ] || return 1
 
-    # Extract scan_id value using a strict regex that only matches plain
-    # (unescaped) JSON string values containing safe characters.
-    # This avoids partial JSON unescaping bugs — if the server returns an
-    # escaped scan_id we simply won't match it, which is safe (we continue
-    # without a scan_id).
-    _cm_id="$(sed -n 's/.*"scan_id"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p' "$_cm_resp" 2>/dev/null | head -1)"
+    _cm_id="$(read_scan_id "$_cm_resp")" || {
+        log_msg warn "Ignoring invalid collection marker JSON or scan_id"
+        _cm_id=""
+    }
     printf '%s' "$_cm_id"
     [ "$_cm_ok" -eq 1 ]
 }
@@ -945,13 +1088,16 @@ main() {
     done
     WORK_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/thunderstorm.XXXXXX")" ||
         die "Cannot create private temporary directory"
-    _work_physical="$(CDPATH='' cd -- "$WORK_DIR" && pwd -P)" || die "Cannot access temporary directory"
-    WORK_DIR="$_work_physical"
+    resolve_directory "$WORK_DIR" || die "Cannot access temporary directory or unsupported newline path"
+    WORK_DIR="$RESOLVED_DIR"
     if [ "$LOG_TO_FILE" -eq 1 ]; then
-        _log_dir="$(dirname -- "$LOGFILE")"
-        if _log_dir="$(CDPATH='' cd -- "$_log_dir" && pwd -P)"; then
-            LOG_PATH="$_log_dir/$(basename -- "$LOGFILE")"
-        fi
+        _log_dir="${LOGFILE%/*}"
+        [ "$_log_dir" != "$LOGFILE" ] || _log_dir=.
+        [ -n "$_log_dir" ] || _log_dir=/
+        resolve_directory "$_log_dir" || die "Cannot access log directory or unsupported newline path"
+        LOG_PATH="$RESOLVED_DIR/${LOGFILE##*/}"
+        case "$LOG_PATH" in *"
+"*) die "Unsupported newline log path" ;; esac
     fi
     print_banner
 
@@ -1058,11 +1204,12 @@ main() {
         fi
 
         log_msg info "Scanning '$_scandir'"
-        if ! _scandir="$(CDPATH='' cd -- "$_scandir" && pwd -P)"; then
-            log_msg warn "Cannot access scan directory"
+        if ! resolve_directory "$_scandir"; then
+            log_msg warn "Cannot access scan directory or unsupported newline path"
             SCAN_ERRORS=$((SCAN_ERRORS + 1))
             continue
         fi
+        _scandir="$RESOLVED_DIR"
 
         _results_file="$WORK_DIR/files.list"
         : > "$WORK_DIR/path.errors" || die "Cannot write path error list"

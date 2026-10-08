@@ -131,6 +131,7 @@ write_fake_wget_404() {
     _dir=$1
     cat > "$_dir/wget" <<'EOF'
 #!/bin/sh
+[ "${1:-}" = "--no-config" ] && shift
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "--version" ]; then
     printf 'GNU Wget 1.21\n'
     exit 0
