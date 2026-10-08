@@ -10,6 +10,9 @@ translation of another collector's source. A minimal, honest implementation is
 preferable to silently weakening security or pretending a legacy runtime has
 features it cannot provide. This document contains no collector implementation.
 
+For exact reviewed revisions, real-service results and remaining platform checks,
+see the [8 October 2026 acceptance report](SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md).
+
 ## 1. Specify the Target Before Implementation
 
 Record these inputs in the new collector's README:
@@ -202,6 +205,11 @@ arrays. Preserve the string type: JSON `123` is not the string `"123"`. Decode
 escapes without replacing identifier characters; reject unsupported encodings
 instead of silently changing the ID. The shell profiles reject duplicate IDs,
 control characters, IDs over 256 bytes, and JSON deeper than 32 levels.
+Bound parsing work separately from response storage. The shell profiles do not
+parse marker JSON larger than 64 KiB, even though transport permits up to 1 MiB;
+they warn and continue without an ID. Large valid strings can consume substantial
+CPU in older awk implementations. Test the parser-size boundary, not only the
+HTTP response-size limit.
 
 HTTP 404/501 means markers are unsupported: continue uploads without inventing a
 scan ID, even if that error body contains a plausible `scan_id` field. Other begin transport/HTTP failures must not silently look successful.
