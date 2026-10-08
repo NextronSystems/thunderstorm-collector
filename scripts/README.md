@@ -4,6 +4,8 @@ This directory contains script-based THOR Thunderstorm collectors for systems wh
 
 Prefer the Go collector for normal deployments; for VMware ESXi, start with the [Python guidance below](#vmware-esxi-use-the-python-collector). Use these scripts when runtime constraints, legacy systems, embedded systems, or operational restrictions make the compiled collector impractical.
 
+For recommendations by product rather than scripting language, see the [product and platform recommendation list](../docs/COLLECTOR_RECOMMENDATIONS.md). It distinguishes candidate combinations from recorded tests and explains when external file collection is needed.
+
 ## Directory Layout
 
 | Directory | Collector type | Intended use |

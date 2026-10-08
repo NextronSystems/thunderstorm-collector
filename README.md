@@ -15,7 +15,7 @@ For a comprehensive guide on each collector, refer to the linked subdirectories.
 
 ## Appliance Collector Recommendations
 
-Choose the collector for your appliance before selecting a generic OS download.
+Choose the collector for your appliance before selecting a generic OS download. The [product and platform recommendation list](docs/COLLECTOR_RECOMMENDATIONS.md) covers Nutanix, VMware, Cisco, F5, Kubernetes, Amazon Linux and Citrix NetScaler, with preferred collectors, alternatives, prerequisites and links to available test evidence.
 
 | Appliance or target | Recommended collector | Requirements and testing status | Download or instructions |
 | --- | --- | --- | --- |
