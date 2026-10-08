@@ -136,7 +136,9 @@ Use these statuses for each feature or test:
 
 Record Python 2 separately from Python 3, and PowerShell 2 separately from PowerShell 3+. A successful PowerShell 2 script run under a modern PowerShell does not prove compatibility with the actual PowerShell 2 runtime. Likewise, dash is not a substitute for acceptance on the intended BusyBox/ash system.
 
-CI's shared smoke-test interface probes only decide which scripts can use that harness during the rollout. They do not define all required collector features. Python 2 is not provisioned in the default CI runner and requires separate legacy-host validation; an explicit Python 2 selection without that runtime must fail rather than silently skip.
+CI's shared smoke-test interface probes only decide which scripts can use that harness during the rollout. They do not define all required collector features. Python 2 is not installed on the default runner, but PR #46 adds focused regressions in pinned actual Python 2.7 and minimum Python 3.4 containers. This does not replace acceptance of the target OS/SSL build. An explicit shared-harness Python 2 selection without that runtime still fails rather than silently skipping.
+
+The optional focused CI steps are centralized in #43; their collector-specific test files arrive with #44 through #48. Missing test files are skipped during preparation, not described as collector coverage. Windows PowerShell 5.1 and PowerShell 7 results must never be labeled actual PS2 certification. The updated Batch profile in #48 is a standalone cmd/JScript hybrid and requires enabled Windows Script Host, ADODB.Stream and trusted curl 8.4+; it deliberately does not implement collection markers. Check each branch's current README instead of assuming old requirements still apply.
 
 ### Test Harness Prerequisites
 
