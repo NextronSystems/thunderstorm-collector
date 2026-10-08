@@ -163,6 +163,22 @@ class ShellSafeguardTests(unittest.TestCase):
         self.assertIn("Stub server failed to start", result.stderr)
         self.assertNotIn("SHOULD_NOT_RUN", result.stdout)
 
+    def test_failed_operational_stub_does_not_probe_or_reset_existing_listener(self):
+        with tempfile.TemporaryDirectory(prefix="harness-operational-startup-") as directory:
+            result = self.run_shell(
+                "STUB_PORT=19993\nSTUB_URL=http://127.0.0.1:19993\n"
+                "find_stub() { echo /usr/bin/false; }\nfind_rules() { echo unused; }\n"
+                "mktemp() { echo " + repr(str(Path(directory) / "audit.jsonl")) + "; }\n"
+                "curl() { echo UNRELATED_LISTENER_CONTACTED; return 0; }\n"
+                + self.function("run_operational_tests.sh", "start_stub") + "\n"
+                + self.function("run_operational_tests.sh", "clear_log")
+                + "\nstart_stub\nclear_log\necho SHOULD_NOT_RUN\n"
+            )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("Stub server failed to start", result.stderr)
+        self.assertNotIn("UNRELATED_LISTENER_CONTACTED", result.stdout)
+        self.assertNotIn("SHOULD_NOT_RUN", result.stdout)
+
     def test_cleanup_does_not_need_lsof_or_touch_other_runs(self):
         with tempfile.TemporaryDirectory(prefix="harness-cleanup-") as directory:
             root = Path(directory)
