@@ -18,7 +18,7 @@ untrusted filenames through CALL or delayed expansion.
 | Filtering | MAX_AGE uses last modification time, days; 0 disables. COLLECT_MAX_SIZE is BYTES, inclusive, 1..209715200; default 3000000. Extension list default .exe;.dll;.ps1;.bat;.txt; * includes all extensions. |
 | Upload | Binary/empty-file safe snapshots, one multipart file; async default, SYNC=1 optional. Source UTF-8 percent-encoded. |
 | Deliberately absent | Collection markers/scan_id, interrupted markers, result polling, deduplication, resume, custom insecure TLS mode, syslog, parallelism. |
-| TLS | curl certificate/hostname verification stays enabled; CURL_CA_BUNDLE supplies an approved public CA. No machine trust changes. |
+| TLS | curl certificate/hostname verification stays enabled; CURL_CA_BUNDLE is passed explicitly as --cacert, including Schannel builds. No machine trust changes. |
 | Retries | UPLOAD_ATTEMPTS 1..10 TOTAL attempts, default 3; 503 Retry-After integer capped at 120 seconds. Each curl attempt has connect 10s / total 30s limits plus 40s process watchdog. |
 | Exit | 0 completed transfer/selection run, 1 partial failures, 2 invalid config/no usable roots/missing dependency. WSH launch failures may use host-specific nonzero codes. |
 | Temporary data | Exclusively created per-run directory under TEMP; contains copied sample payloads, removed on normal/error completion. Forced termination can leave it behind. |
@@ -26,9 +26,14 @@ untrusted filenames through CALL or delayed expansion.
 COLLECT_DIRS separates roots by semicolons; a ROOT containing a semicolon is not
 supported. Semicolons, commas, spaces, Unicode, percent, exclamation, brackets and
 ampersands in filenames within a root are supported. TEMP and curl executable paths
-containing percent signs, quotes or control characters are rejected to avoid WSH
+and custom CA paths containing percent signs, quotes or control characters are rejected to avoid WSH
 process expansion; choose a trusted ordinary path. Never disable organizational
 WSH policy just to run this collector.
+
+The explicit CA argument avoids curl's Schannel-specific omission of the
+CURL_CA_BUNDLE environment setting; see the [curl TLS documentation](https://curl.se/docs/manpage.html#--cacert).
+The curl build and Windows version must support that mode; failures do not
+automatically disable verification or certificate revocation checking.
 
 ADODB loads selected files into memory; size/mtime checks catch many file changes,
 but the size limit is NOT a hard memory bound if a source grows during that read.

@@ -15,8 +15,11 @@ SCRIPT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "batch", 
 
 @unittest.skipUnless(os.name == "nt", "requires Windows cmd.exe and Windows Script Host")
 class BatchRobustness(shared.PowerShellRobustness):
+    TLS_FAILURE_CODE = 1
+
     def command(self, *extra, **kwargs):
         self.environment = dict(os.environ)
+        self.environment.pop("CURL_CA_BUNDLE", None)
         self.environment.update({"THUNDERSTORM_SERVER": "127.0.0.1", "THUNDERSTORM_PORT": str(self.server.server_port),
                                  "MAX_AGE": "0", "UPLOAD_ATTEMPTS": "1", "SOURCE": "tests", "URL_SCHEME": "http",
                                  "DRY_RUN": "0", "SYNC": "0", "RELEVANT_EXTENSIONS": "*",
@@ -26,12 +29,16 @@ class BatchRobustness(shared.PowerShellRobustness):
         os.makedirs(temporary, exist_ok=True)
         self.environment["TEMP"] = self.environment["TMP"] = temporary
         names = {"--port": "THUNDERSTORM_PORT", "--source": "SOURCE", "--max-age": "MAX_AGE",
-                 "--max-size-kb": "COLLECT_MAX_SIZE", "--retries": "UPLOAD_ATTEMPTS", "--server": "THUNDERSTORM_SERVER"}
+                 "--max-size-kb": "COLLECT_MAX_SIZE", "--retries": "UPLOAD_ATTEMPTS", "--server": "THUNDERSTORM_SERVER",
+                 "--ca-cert": "CURL_CA_BUNDLE"}
         index = 0
         while index < len(extra):
             option = extra[index]
             if option in ("--dry-run", "--sync"):
                 self.environment["DRY_RUN" if option == "--dry-run" else "SYNC"] = "1"
+                index += 1
+            elif option == "--tls":
+                self.environment["URL_SCHEME"] = "https"
                 index += 1
             else:
                 value = extra[index + 1]
@@ -86,9 +93,6 @@ class BatchRobustness(shared.PowerShellRobustness):
 
     def test_profiles_share_the_reviewed_core(self):
         self.skipTest("PowerShell-only drift guard")
-
-    def test_tls_root_trust_and_hostname_remain_independent(self):
-        self.skipTest("PowerShell custom TLS callback; Batch uses curl OS/CA verification")
 
     def test_failed_end_marker_is_failure(self):
         self.skipTest("Batch deliberately has no collection markers")

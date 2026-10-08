@@ -43,6 +43,8 @@ class Server(ThreadingMixIn, HTTPServer):
 
 
 class PowerShellRobustness(unittest.TestCase):
+    TLS_FAILURE_CODE = 2
+
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="python-collector-")
         self.samples = os.path.join(self.root, "samples")
@@ -357,13 +359,13 @@ class PowerShellRobustness(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.file()
-        self.assertEqual(self.run_collector("--tls", "--server", "localhost"), 2, self.output)
+        self.assertEqual(self.run_collector("--tls", "--server", "localhost"), self.TLS_FAILURE_CODE, self.output)
         self.assertEqual(self.uploads, [])
         self.assertEqual(self.run_collector("--tls", "--ca-cert", ca, "--server", "localhost"), 0, self.output)
         self.assertEqual(len(self.uploads), 1)
         self.uploads[:] = []
         # The CA is correct, but the certificate deliberately has no IP SAN.
-        self.assertEqual(self.run_collector("--tls", "--ca-cert", ca), 2, self.output)
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", ca), self.TLS_FAILURE_CODE, self.output)
         self.assertEqual(self.uploads, [])
 
     def test_profiles_share_the_reviewed_core(self):

@@ -130,6 +130,7 @@ function upload(file) {
             " --dump-header " + quote(headers) + ' --write-out "%{http_code}" --header ' +
             quote("Content-Type: multipart/form-data; boundary=" + boundary) +
             " --data-binary " + quote("@" + fso.BuildPath(workspace, "body.bin")) + " --config " + quote(config);
+        if (caBundle) command += " --cacert " + quote(caBundle);
         for (var attempt = 1; attempt <= attempts; attempt++) {
             var result = execute(command), status = result.output.replace(/^\s+|\s+$/g, "");
             if (result.code === 0 && /^2\d\d$/.test(status) && fso.FileExists(response) &&
@@ -186,6 +187,12 @@ try {
     var maxSize = number("COLLECT_MAX_SIZE", 3000000, 1, 209715200);
     var maxAge = number("MAX_AGE", 30, 0, 36500), attempts = number("UPLOAD_ATTEMPTS", 3, 1, 10);
     var dryRun = flag("DRY_RUN"), sync = flag("SYNC");
+    var caBundle = scheme === "https" ? setting("CURL_CA_BUNDLE", "") : "";
+    if (caBundle && !dryRun) {
+        caBundle = fso.GetAbsolutePathName(caBundle);
+        quote(caBundle);
+        if (!fso.FileExists(caBundle)) throw new Error("CURL_CA_BUNDLE file not found.");
+    }
     var cutoff = new Date().getTime() - maxAge * 86400000;
     var source = setting("SOURCE", shell.ExpandEnvironmentStrings("%COMPUTERNAME%"));
     var url = scheme + "://" + server + ":" + port + (sync ? "/api/check" : "/api/checkAsync") +
