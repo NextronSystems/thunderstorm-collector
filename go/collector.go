@@ -75,6 +75,9 @@ type Collector struct {
 
 	logger *log.Logger
 
+	// Set before starting workers; defaults to time.Sleep.
+	retrySleep func(time.Duration)
+
 	workerGroup   *sync.WaitGroup
 	filesToUpload chan infoWithPath
 
@@ -145,6 +148,7 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 	collector := &Collector{
 		CollectorConfig: config,
 		logger:          logger,
+		retrySleep:      time.Sleep,
 		Statistics: &CollectionStatistics{
 			skipReasons: make(map[SkipReason]int64),
 		},
@@ -395,7 +399,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		if info.retries < maxRetries {
 			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, err)
 			info.retries++
-			time.Sleep(baseRetryDelay * time.Duration(1<<(info.retries-1)))
+			c.retrySleep(baseRetryDelay * time.Duration(1<<(info.retries-1)))
 			return true
 		} else {
 			c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it.", info.path)
@@ -417,7 +421,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 			retryTime = 30 // Default to 30 seconds cooldown time
 		}
 		c.logger.Printf("Thunderstorm has no free capacities for file '%s', retrying in %d seconds", info.path, retryTime)
-		time.Sleep(time.Second * time.Duration(retryTime))
+		c.retrySleep(time.Second * time.Duration(retryTime))
 		return true
 	}
 	responseBody, err := ioutil.ReadAll(response.Body)
