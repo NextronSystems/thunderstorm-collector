@@ -125,7 +125,8 @@ class PerlRobustness(unittest.TestCase):
 
     def run_collector(self, *extra, **kwargs):
         process = subprocess.Popen(self.command(*extra, **kwargs), stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, cwd=self.root)
+                                   stderr=subprocess.STDOUT, cwd=self.root,
+                                   env=dict(os.environ, **kwargs.get("env", {})))
         timer = threading.Timer(25, process.kill)
         timer.start()
         try:
@@ -277,6 +278,13 @@ class PerlRobustness(unittest.TestCase):
         self.file()
         self.assertEqual(self.run_collector("--sync"), 0, self.output)
         self.assertTrue(any(path.startswith("/api/check?") for path in self.paths))
+
+    def test_environment_proxy_is_not_implicitly_used(self):
+        self.file()
+        self.assertEqual(self.run_collector(env={"PERL_LWP_ENV_PROXY": "1",
+            "http_proxy": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1",
+            "no_proxy": "", "NO_PROXY": ""}), 0, self.output)
+        self.assertEqual(len(self.uploads), 1)
 
     def test_undecodable_filename_preserves_payload(self):
         path = os.fsencode(self.samples) + b"/bad_\xff.bin"

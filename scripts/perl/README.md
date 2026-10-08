@@ -41,8 +41,8 @@ PERL=perl
 COLLECTOR="$(pwd)/thunderstorm-collector.pl"
 SERVER=thunderstorm.example.internal
 PORT=8080
-SOURCE=manual-python-yourname
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ts-python.XXXXXX")
+SOURCE=manual-perl-yourname
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ts-perl.XXXXXX")
 mkdir -p "$ROOT/input/sub"
 printf 'text\n' > "$ROOT/input/plain.txt"
 printf '\000\001\377THUNDER\n' > "$ROOT/input/binary.bin"
@@ -62,7 +62,7 @@ collect() {
 
 ```sh
 collect -d "$ROOT/input"
-SOURCE=manual-python-sync-yourname
+SOURCE=manual-perl-sync-yourname
 collect -d "$ROOT/input" --sync
 ```
 

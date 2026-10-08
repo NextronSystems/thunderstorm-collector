@@ -64,7 +64,7 @@ if (open my $mounts, '<', '/proc/mounts') {
     }
     close $mounts;
 }
-my $ua = LWP::UserAgent->new(timeout => 30, max_size => 1024 * 1024,
+my $ua = LWP::UserAgent->new(timeout => 30, max_size => 1024 * 1024, env_proxy => 0,
                             max_redirect => 0, requests_redirectable => [],
                             protocols_allowed => ['http', 'https']);
 if ($tls) {
