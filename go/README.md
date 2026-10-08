@@ -117,11 +117,30 @@ The package contains the executable, `config.yml`, compatibility notes and `BUIL
 | --- | --- |
 | Compilation for freebsd/amd64 with Go 1.9.7 | Verified, including static FreeBSD ELF, architecture, executable permissions, package contents and checksums |
 | Shared source/runtime on Linux/amd64 with Go 1.9.7 | Go tests and synthetic HTTP checks verified; these do not execute the FreeBSD binary or test a real Thunderstorm service |
+| Runtime on a FreeBSD 14.3 amd64 VM | Reported successful with per-process ASLR disabled; exact tested artifact identity not yet recorded (see report below) |
 | Runtime on FreeBSD 8.4 | Pending |
 | Runtime on a named NetScaler appliance/firmware | Pending |
-| Customer-reported success for this package | None recorded |
 
 The repository records historical Go 1.9.7 use on FreeBSD 8.4 NetScaler gateways, but not their firmware, architecture or collector revision. The [official Go FreeBSD table](https://go.dev/wiki/FreeBSD) supports the amd64 toolchain choice; it does not prove appliance compatibility. No 386 legacy package is promised without a verified target need. Record future OS, firmware, architecture, source commit and test results in this section so compatibility evidence has one reference location.
+
+##### Reported FreeBSD 14.3 VM test (received 2026-10-08)
+
+A user supplied a local agent's test summary for `amd64-freebsd8-netscaler-thunderstorm-collector`, downloaded from GitHub Actions build artifacts and reported as built with Go 1.9.7. This is external runtime evidence, separate from the automated Linux tests. The report states that its checksum was verified, but the Actions run, archive name, SHA-256 value, source commit and raw logs have not yet been recorded here; it cannot yet be tied to an exact artifact or release.
+
+The reported results on a FreeBSD 14.3 amd64 VM were:
+
+- Direct execution failed with `runtime: address space conflict`.
+- With ASLR disabled for the invocation, `--help` and collection worked.
+- A dry run over `/etc` discovered 600 files: 302 selected, 100 excluded by type and 198 irregular files excluded.
+- An upload to Thunderstorm v10 on port 8082 reported 302 successful uploads and zero errors. Completed server-side analysis and HTTPS/TLS interoperability were not established by the supplied summary.
+
+The per-invocation workaround used for that VM test can be applied to a help check as follows:
+
+```sh
+proccontrol -m aslr -s disable ./amd64-freebsd8-netscaler-thunderstorm-collector --help
+```
+
+This result is consistent with an ASLR-sensitive legacy runtime. The [FreeBSD 13.2 release notes](https://www.freebsd.org/releases/13.2R/relnotes/#kernel) document default ASLR for 64-bit executables and this per-invocation control. The workaround is recorded for reproducing the modern-VM test; it is not a required NetScaler configuration change. FreeBSD 14.3 success does not establish FreeBSD 8.4 or appliance/firmware compatibility. Record those results separately when tested, together with the exact artifact identity and commands.
 
 **Go 1.9.7 is unsupported** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its shipped runtime and standard library, including HTTP/TLS code, lack later security fixes. An isolated build job does not remove these limitations. Retain certificate verification and server security settings; if secure interoperability fails, use a supported collector/platform rather than weakening them.
 
