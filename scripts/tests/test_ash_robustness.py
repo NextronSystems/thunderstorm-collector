@@ -172,6 +172,22 @@ class AshRobustnessTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, self.output)
                 self.assertFalse(any("scan_id=" in p for p in self.requests), self.requests)
 
+    def test_marker_json_parsing_has_a_separate_size_budget(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        prefix = b'{"scan_id":"bounded-id","metadata":"'
+        suffix = b'"}'
+        for size in (65536, 65537, 1048576):
+            with self.subTest(size=size):
+                self.requests = []
+                self.marker_response = prefix + b'x' * (size - len(prefix) - len(suffix)) + suffix
+                result = self.run_collector()
+                self.assertEqual(result.returncode, 0, self.output)
+                uploads = [path for path in self.requests if path.startswith("/api/check")]
+                self.assertEqual(len(uploads), 1)
+                self.assertEqual("scan_id=" in uploads[0], size == 65536)
+                if size > 65536:
+                    self.assertIn("Ignoring invalid or oversized collection marker JSON", self.output)
+
     def test_marker_unicode_escapes_are_preserved(self):
         (self.samples / "real.txt").write_bytes(b"readable")
         scan_id = 'scan-\u00e4-\U0001f600-"-\\'

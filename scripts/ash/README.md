@@ -41,6 +41,7 @@ Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SE
 - Async `/api/checkAsync` submission by default; `--sync` uses `/api/check`. Async success means accepted, not analysis completed. The collector does not poll async results.
 - Optional begin/end/interrupted `/api/collection` markers. HTTP 404/501 is nonfatal and supplies no scan ID. Other begin failures retry once after two seconds, then abort; end failures produce a nonzero exit.
 - Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
+- Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID and a warning is emitted. This bounds parser work on older awk runtimes.
 - `--retries 1..10` bounds total attempts per file, including HTTP 503. Retry-After integer seconds cap at 120; otherwise backoff starts at two seconds and caps at 60. A lost response can cause duplicates; no deduplication or resume.
 - Dry-run needs no upload tool and never contacts the server. CLI, file and optional syslog logging are supported.
 
