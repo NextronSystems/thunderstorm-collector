@@ -1,990 +1,400 @@
-##################################################
-# Script Title: THOR Thunderstorm Collector (PS 2)
-# Script File Name: thunderstorm-collector-ps2.ps1
-# Author: Florian Roth
-# Version: 0.1.0
-# Date Created: 22.02.2026
-# Last Modified: 22.02.2026
-# Compatibility: PowerShell 2.0+
-##################################################
-
-<#
-    .SYNOPSIS
-        The Thunderstorm Collector collects and submits files to THOR Thunderstorm servers for analysis.
-        This version is compatible with PowerShell 2.0+ (uses System.Net.HttpWebRequest instead of Invoke-WebRequest).
-    .DESCRIPTION
-        The Thunderstorm collector processes a local directory (C:\ by default) and selects files for submission.
-        This selection is based on various filters. The filters include file size, age, extension and location.
-    .PARAMETER ThunderstormServer
-        Server name (FQDN) or IP address of your Thunderstorm instance
-    .PARAMETER ThunderstormPort
-        Port number on which the Thunderstorm service is listening (default: 8080)
-    .PARAMETER Source
-        Source of the submission (default: hostname of the system)
-    .PARAMETER Folder
-        Folder to process (default: C:\)
-    .PARAMETER MaxAge
-        Select files based on the number of days in which the file has been created or modified (default: 14 days)
-    .PARAMETER MaxSize
-        Maximum file size in MegaBytes for submission (default: 2MB / 2048KB)
-    .PARAMETER Extensions
-        Extensions to select for submission (default: preset list)
-    .PARAMETER UseSSL
-        Use HTTPS instead of HTTP for Thunderstorm communication
-    .PARAMETER Debugging
-        Show debug output for troubleshooting purposes
-    .EXAMPLE
-        powershell.exe -ExecutionPolicy Bypass -File thunderstorm-collector-ps2.ps1 -ThunderstormServer ts.local
-    .EXAMPLE
-        powershell.exe -ExecutionPolicy Bypass -File thunderstorm-collector-ps2.ps1 -ThunderstormServer ts.local -MaxAge 1 -UseSSL
-#>
-
-# #####################################################################
-# Parameters ----------------------------------------------------------
-# #####################################################################
-
+#requires -Version 2.0
+# THOR Thunderstorm Collector - Florian Roth / Nextron Systems
+[CmdletBinding()]
 param(
-    [Parameter(HelpMessage='Server name (FQDN) or IP address of your Thunderstorm instance')]
-        [ValidateNotNullOrEmpty()]
-        [Alias('TS')]
-        [string]$ThunderstormServer,
-
-    [Parameter(HelpMessage='Port number on which the Thunderstorm service is listening (default: 8080)')]
-        [ValidateNotNullOrEmpty()]
-        [Alias('TP')]
-        [int]$ThunderstormPort = 8080,
-
-    [Parameter(HelpMessage='Source of the submission (default: hostname of the system)')]
-        [Alias('S')]
-        [string]$Source=$env:COMPUTERNAME,
-
-    [Parameter(HelpMessage='Folder to process (default: C:\)')]
-        [ValidateNotNullOrEmpty()]
-        [Alias('F')]
-        [string]$Folder = "C:\",
-
-    [Parameter(HelpMessage='Select files based on days since last modification (default: 14 days)')]
-        [ValidateNotNullOrEmpty()]
-        [Alias('MA')]
-        [int]$MaxAge = 14,
-
-    [Parameter(HelpMessage='Maximum file size in MegaBytes (default: 2MB / 2048KB)')]
-        [ValidateNotNullOrEmpty()]
-        [Alias('MS')]
-        [int]$MaxSize = 2,
-
-    [Parameter(HelpMessage='Extensions to select for submission')]
-        [ValidateNotNullOrEmpty()]
-        [Alias('E')]
-        [string[]]$Extensions,
-
-    [Parameter(HelpMessage='Submit all file extensions (overrides -Extensions)')]
-        [switch]$AllExtensions = $False,
-
-    [Parameter(HelpMessage='Use HTTPS instead of HTTP')]
-        [Alias('SSL')]
-        [switch]$UseSSL,
-
-    [Parameter(HelpMessage='Path to custom CA certificate bundle for TLS verification')]
-        [string]$CACert,
-
-    [Parameter(HelpMessage='Skip TLS certificate verification')]
-        [Alias('k')]
-        [switch]$Insecure,
-
-    [Parameter(HelpMessage='Force enable progress reporting')]
-        [switch]$Progress,
-
-    [Parameter(HelpMessage='Force disable progress reporting')]
-        [switch]$NoProgress,
-
-    [Parameter(HelpMessage='Enable debug output')]
-        [Alias('D')]
-        [switch]$Debugging
+    [Alias("TS")][string]$ThunderstormServer,
+    [Alias("TP")][int]$ThunderstormPort = 8080,
+    [Alias("F")][string[]]$Folder = @("C:\"),
+    [Alias("S")][string]$Source = [Environment]::MachineName,
+    [Alias("MA")][int]$MaxAge = 14,
+    [Alias("MS")][int]$MaxSize = 2,
+    [string[]]$Extensions = @(),
+    [switch]$AllExtensions,
+    [Alias("SSL")][switch]$UseSSL,
+    [string]$CACert = "",
+    [Alias("k")][switch]$Insecure,
+    [switch]$DryRun,
+    [switch]$Sync,
+    [int]$Retries = 3,
+    [Alias("D")][switch]$Debugging,
+    [switch]$Progress,
+    [switch]$NoProgress
 )
+$collectorId = "powershell2/0.3"
+$ErrorActionPreference = "Stop"
+$exitCode = 0
+$started = $false
+$scanId = ""
+$stats = @{ scanned = 0; submitted = 0; failed = 0; skipped = 0; scan_errors = 0 }
+$startTime = [DateTime]::UtcNow
+$oldProtocol = [Net.ServicePointManager]::SecurityProtocol
 
-# Fixing Certain Platform Environments --------------------------------
-$AutoDetectPlatform = ""
-$OutputPath = $PSScriptRoot
-# When run via 'powershell -Command', $PSScriptRoot is empty; fall back to TEMP
-if ( -not $OutputPath -or $OutputPath -eq "" ) {
-    $OutputPath = $env:TEMP
-}
-$global:NoLog = $false
+# C# delegates do not depend on a PowerShell runspace on the HTTP/console threads.
+$transportSource = @'
+// Legacy APIs are intentional: the standalone files also target old .NET.
+#pragma warning disable
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Reflection;
 
-# Microsoft Defender ATP - Live Response
-if ( $OutputPath -eq "" -or $OutputPath -like "*Advanced Threat Protection*" ) {
-    $AutoDetectPlatform = "MDATP"
-    if ( $OutputPath -eq "" ) {
-        $OutputPath = "$($env:ProgramData)\thor"
+namespace ThunderstormCollector {
+    public class Reply {
+        public int Code;
+        public string Body = "";
+        public string RetryAfter = "";
+        public string Error = "";
     }
-}
-
-# #####################################################################
-# Presets -------------------------------------------------------------
-# #####################################################################
-
-# Maximum Size - apply default only when not explicitly passed
-if (-not $PSBoundParameters.ContainsKey('MaxSize')) {
-    [int]$MaxSize = 2
-}
-
-# Extensions
-# -AllExtensions overrides any -Extensions value
-# Note: PS 2.0 permanently binds parameter validation to $Extensions,
-# so we use a separate $ActiveExtensions variable for the working copy.
-if ($AllExtensions) {
-    [string[]]$ActiveExtensions = @()
-} elseif ($PSBoundParameters.ContainsKey('Extensions')) {
-    [string[]]$ActiveExtensions = $Extensions
-} else {
-    # Apply recommended preset only when no -Extensions parameter was explicitly passed
-    [string[]]$ActiveExtensions = @('.asp','.vbs','.ps','.ps1','.rar','.tmp','.bas','.bat','.chm','.cmd','.com','.cpl','.crt','.dll','.exe','.hta','.js','.lnk','.msc','.ocx','.pcd','.pif','.pot','.reg','.scr','.sct','.sys','.url','.vb','.vbe','.vbs','.wsc','.wsf','.wsh','.ct','.t','.input','.war','.jsp','.php','.asp','.aspx','.doc','.docx','.pdf','.xls','.xlsx','.ppt','.pptx','.tmp','.log','.dump','.pwd','.w','.txt','.conf','.cfg','.conf','.config','.psd1','.psm1','.ps1xml','.clixml','.psc1','.pssc','.pl','.www','.rdp','.jar','.docm','.ace','.job','.temp','.plg','.asm')
-}
-
-# Debug
-$Debug = $Debugging
-
-# Progress reporting: auto-detect TTY unless overridden
-$ShowProgress = $false
-if ($Progress) {
-    $ShowProgress = $true
-} elseif ($NoProgress) {
-    $ShowProgress = $false
-} else {
-    # Auto-detect: check if stdout is interactive (TTY)
-    try {
-        # First check if the environment is interactive at all
-        if (-not [Environment]::UserInteractive) {
-            $ShowProgress = $false
-        } else {
-            # Check if output is redirected (.NET 4.5+ only)
-            $isRedirected = $false
-            try {
-                $isRedirected = [Console]::IsOutputRedirected
-            } catch {
-                # Property not available in older .NET; fall back to host check
-                $isRedirected = $false
+    public static class Transport {
+        public static volatile bool Interrupted;
+        private static HttpWebRequest active;
+        private static X509Certificate2 ca;
+        private static bool insecure;
+        private static ConsoleCancelEventHandler handler;
+        public static void Start() {
+            Interrupted = false;
+            handler = new ConsoleCancelEventHandler(Cancel);
+            Console.CancelKeyPress += handler;
+        }
+        public static void Stop() {
+            if (handler != null) Console.CancelKeyPress -= handler;
+            handler = null;
+            if (ca != null) ca.Reset();
+            ca = null;
+            insecure = false;
+            active = null;
+        }
+        private static void Cancel(object sender, ConsoleCancelEventArgs args) {
+            args.Cancel = true;
+            Interrupted = true;
+            HttpWebRequest request = active;
+            if (request != null) request.Abort();
+        }
+        private static void Expire(object state) { ((HttpWebRequest)state).Abort(); }
+        public static void Configure(string certificate, bool skipVerification) {
+            ca = null;
+            insecure = skipVerification;
+            if (certificate.Length > 0 || skipVerification) {
+                if (typeof(HttpWebRequest).GetProperty("ServerCertificateValidationCallback") == null)
+                    throw new InvalidOperationException("Custom CA / Insecure require per-request TLS validation (.NET 4.5+). Use OS trust on older .NET.");
             }
-            if ($isRedirected) {
-                $ShowProgress = $false
-            } else {
-                # Verify we have a real console window (not a non-interactive host)
-                $hostName = $Host.Name
-                if ($hostName -eq 'ConsoleHost') {
-                    $ShowProgress = [Console]::WindowWidth -gt 0
-                } else {
-                    # ISE, remoting, custom hosts -- no carriage-return progress
-                    $ShowProgress = $false
+            if (certificate.Length > 0) {
+                byte[] bytes = File.ReadAllBytes(certificate);
+                string text = Encoding.ASCII.GetString(bytes);
+                Match match = Regex.Match(text, "-----BEGIN CERTIFICATE-----([^-]+)-----END CERTIFICATE-----");
+                if (match.Success) bytes = Convert.FromBase64String(match.Groups[1].Value);
+                ca = new X509Certificate2(bytes);
+                if (ca.HasPrivateKey) throw new InvalidOperationException("Use a public CA certificate, not a private-key container.");
+            }
+        }
+        private static bool Validate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
+            if (insecure) return true;
+            // Keep the platform's hostname validation; never parse localized SAN text.
+            if ((errors & (SslPolicyErrors.RemoteCertificateNameMismatch | SslPolicyErrors.RemoteCertificateNotAvailable)) != 0)
+                return false;
+            if (ca == null) return errors == SslPolicyErrors.None;
+            X509Certificate2 leaf = new X509Certificate2(certificate);
+            X509Chain custom = new X509Chain();
+            try {
+                custom.ChainPolicy.ExtraStore.Add(ca);
+                custom.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
+                custom.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                custom.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"));
+                if (!custom.Build(leaf) || custom.ChainElements.Count == 0) return false;
+                X509Certificate2 root = custom.ChainElements[custom.ChainElements.Count - 1].Certificate;
+                if (root.Thumbprint != ca.Thumbprint) return false;
+                foreach (X509ChainStatus status in custom.ChainStatus)
+                    if (status.Status != X509ChainStatusFlags.NoError && status.Status != X509ChainStatusFlags.UntrustedRoot)
+                        return false;
+                return true;
+            } finally { leaf.Reset(); custom.Reset(); }
+        }
+        public static byte[] Snapshot(string path, long limit, DateTime cutoff) {
+            FileAttributes attributes = File.GetAttributes(path);
+            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+                throw new IOException("File became a link or directory.");
+            DateTime stamp = File.GetLastWriteTimeUtc(path);
+            if (stamp < cutoff) return null;
+            using (FileStream file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                long length = file.Length;
+                if (length > limit) return null;
+                using (MemoryStream data = new MemoryStream()) {
+                    byte[] buffer = new byte[65536];
+                    int count;
+                    while ((count = file.Read(buffer, 0, (int)Math.Min(buffer.Length, limit + 1 - data.Length))) > 0) {
+                        data.Write(buffer, 0, count);
+                        if (data.Length > limit || Interrupted) throw new IOException("File grew or collection was interrupted.");
+                    }
+                    if (data.Length != length || file.Length != length || File.GetLastWriteTimeUtc(path) != stamp ||
+                        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("File changed while being read.");
+                    return data.ToArray();
                 }
             }
         }
-    } catch {
-        $ShowProgress = $false
-    }
-}
-
-# Show Help -----------------------------------------------------------
-if ( $ThunderstormServer -eq "" ) {
-    Get-Help $MyInvocation.MyCommand.Definition -Detailed
-    Write-Host -ForegroundColor Yellow 'Note: You must at least define a Thunderstorm server (-ThunderstormServer)'
-    exit 2
-}
-
-# #####################################################################
-# Functions -----------------------------------------------------------
-# #####################################################################
-
-function Write-Log {
-    param (
-        [Parameter(Mandatory=$True, Position=0, HelpMessage="Log entry")]
-            [ValidateNotNullOrEmpty()]
-            [String]$Entry,
-
-        [Parameter(Position=1, HelpMessage="Log file to write into")]
-            [ValidateNotNullOrEmpty()]
-            [Alias('SS')]
-            [string]$LogFile = "thunderstorm-collector.log",
-
-        [Parameter(Position=3, HelpMessage="Level")]
-            [ValidateNotNullOrEmpty()]
-            [String]$Level = "Info"
-    )
-
-    # Indicator
-    $Indicator = "[+]"
-    if ( $Level -eq "Warning" ) {
-        $Indicator = "[!]"
-    } elseif ( $Level -eq "Error" ) {
-        $Indicator = "[E]"
-    } elseif ( $Level -eq "Progress" ) {
-        $Indicator = "[.]"
-    } elseif ($Level -eq "Note" ) {
-        $Indicator = "[i]"
-    }
-
-    # Output Pipe
-    if ( $Level -eq "Warning" ) {
-        Write-Warning "$($Indicator) $($Entry)"
-    } elseif ( $Level -eq "Error" ) {
-        [Console]::Error.WriteLine("$($Indicator) $($Entry)")
-    } elseif ( $Level -eq "Debug" -and $Debug -eq $False ) {
-        return
-    } else {
-        Write-Host "$($Indicator) $($Entry)"
-    }
-
-    # Log File
-    if ( $global:NoLog -eq $False ) {
-        try {
-            $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
-            $LogFilePath = $LogFile
-            if ($OutputPath -and (Test-Path $OutputPath -PathType Container)) {
-                $LogFilePath = Join-Path $OutputPath $LogFile
+        public static byte[] Multipart(string path, string boundary, byte[] data) {
+            string name = Regex.Replace(path, "[\\\\\";\\r\\n\\t\\x00-\\x1f\\x7f]", "_");
+            byte[] head = Encoding.UTF8.GetBytes("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" +
+                name + "\"\r\nContent-Type: application/octet-stream\r\n\r\n");
+            byte[] tail = Encoding.ASCII.GetBytes("\r\n--" + boundary + "--\r\n");
+            using (MemoryStream body = new MemoryStream()) {
+                body.Write(head, 0, head.Length);
+                body.Write(data, 0, data.Length);
+                body.Write(tail, 0, tail.Length);
+                return body.ToArray();
             }
-            "$ts $($env:COMPUTERNAME): $Entry" | Out-File -FilePath $LogFilePath -Append
-        } catch {
-            # Logging failure should not affect collection
         }
-    }
-}
-
-# Submit-File: uploads a file using System.Net.HttpWebRequest (PS 2.0 compatible)
-# Streams file content directly from disk to avoid loading entire file into memory.
-# Returns the HTTP status code (int) or 0 on connection failure.
-function Submit-File {
-    param(
-        [Parameter(Mandatory=$True)][string]$Url,
-        [Parameter(Mandatory=$True)][string]$FilePath,
-        [Parameter(Mandatory=$True)][long]$FileSize
-    )
-
-    $boundary = [System.Guid]::NewGuid().ToString()
-    $CRLF = "`r`n"
-
-    # Build multipart metadata fields for hostname, source, and filename
-    # Keep full client path in multipart filename for parity with other collectors.
-    $FileName = $FilePath
-    $EncodedFilename = [uri]::EscapeDataString($FileName)
-
-    # File part header and footer
-    # Use RFC 5987 encoding for filename to safely handle special characters
-    # Build ASCII-safe fallback filename: replace non-ASCII and control chars with underscores
-    $SafeAsciiFilename = ""
-    foreach ($ch in $FileName.ToCharArray()) {
-        $code = [int]$ch
-        if ($code -ge 0x20 -and $code -le 0x7E -and $ch -ne '"' -and $ch -ne '\') {
-            $SafeAsciiFilename += $ch
-        } else {
-            $SafeAsciiFilename += '_'
-        }
-    }
-    if ($SafeAsciiFilename -eq '') { $SafeAsciiFilename = 'upload' }
-    $fileHeaderText = "--$boundary$CRLF" +
-        "Content-Disposition: form-data; name=`"file`"; filename=`"$SafeAsciiFilename`"; filename*=UTF-8''$EncodedFilename$CRLF" +
-        "Content-Type: application/octet-stream$CRLF$CRLF"
-    $footerText = "$CRLF--$boundary--$CRLF"
-
-    $fileHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($fileHeaderText)
-    $footerBytes = [System.Text.Encoding]::UTF8.GetBytes($footerText)
-
-    try {
-        # Open the file first to get authoritative size and fail fast if locked/missing
-        $fileStream = $null
-        try {
-            $fileStream = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        } catch {
-            Write-Log "Cannot open file: $FilePath - $($_.Exception.Message)" -Level "Error"
-            return -1
-        }
-
-        $actualFileSize = $fileStream.Length
-        $contentLength = $fileHeaderBytes.Length + $actualFileSize + $footerBytes.Length
-
-        $request = [System.Net.HttpWebRequest]::Create($Url)
-        $request.Method = "POST"
-        $request.ContentType = "multipart/form-data; boundary=$boundary"
-        $request.ContentLength = $contentLength
-        $request.Timeout = 120000  # 120 seconds
-        $request.AllowAutoRedirect = $false
-        $request.AllowWriteStreamBuffering = $false
-        $request.Headers.Add("X-Hostname", $env:COMPUTERNAME)
-
-        # Stream metadata and file content directly into the request stream
-        $stream = $null
-        try {
-            $stream = $request.GetRequestStream()
-            
-            $stream.Write($fileHeaderBytes, 0, $fileHeaderBytes.Length)
-
+        public static Reply Send(string url, string contentType, byte[] data, int timeout) {
+            Reply result = new Reply();
+            HttpWebRequest request = null;
+            HttpWebResponse response = null;
+            System.Threading.Timer deadline = null;
             try {
-                $buffer = New-Object byte[] 65536
-                $totalBytesWritten = [long]0
-                $bytesRead = 0
-                do {
-                    $bytesRead = $fileStream.Read($buffer, 0, $buffer.Length)
-                    if ($bytesRead -gt 0) {
-                        # Clamp to declared size to prevent writing more than ContentLength
-                        $remaining = $actualFileSize - $totalBytesWritten
-                        if ($bytesRead -gt $remaining) { $bytesRead = [int]$remaining }
-                        if ($bytesRead -le 0) { break }
-                        $stream.Write($buffer, 0, $bytesRead)
-                        $totalBytesWritten += $bytesRead
+                request = (HttpWebRequest)WebRequest.Create(url);
+                request.Method = "POST";
+                request.Proxy = null;
+                request.AllowAutoRedirect = false;
+                request.Timeout = timeout;
+                request.ReadWriteTimeout = timeout;
+                request.ContentType = contentType;
+                request.ContentLength = data.Length;
+                request.AllowWriteStreamBuffering = true;
+                if (ca != null || insecure) {
+                    PropertyInfo callback = typeof(HttpWebRequest).GetProperty("ServerCertificateValidationCallback");
+                    callback.SetValue(request, new RemoteCertificateValidationCallback(Validate), null);
+                }
+                active = request;
+                deadline = new System.Threading.Timer(new System.Threading.TimerCallback(Expire), request, timeout, System.Threading.Timeout.Infinite);
+                using (Stream output = request.GetRequestStream()) output.Write(data, 0, data.Length);
+                try { response = (HttpWebResponse)request.GetResponse(); }
+                catch (WebException error) {
+                    response = error.Response as HttpWebResponse;
+                    if (response == null) throw;
+                }
+                result.Code = (int)response.StatusCode;
+                result.RetryAfter = response.Headers["Retry-After"] ?? "";
+                using (Stream input = response.GetResponseStream())
+                using (MemoryStream body = new MemoryStream()) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = input.Read(buffer, 0, buffer.Length)) > 0) {
+                        body.Write(buffer, 0, count);
+                        if (body.Length > 1048576) throw new IOException("Response exceeds 1 MiB.");
                     }
-                } while ($bytesRead -gt 0 -and $totalBytesWritten -lt $actualFileSize)
+                    if (response.ContentLength >= 0 && body.Length != response.ContentLength)
+                        throw new IOException("Incomplete HTTP response.");
+                    result.Body = Encoding.UTF8.GetString(body.ToArray());
+                }
+            } catch (Exception error) {
+                result.Error = error.Message;
             } finally {
-                if ($fileStream -ne $null) { $fileStream.Close() }
+                if (deadline != null) deadline.Dispose();
+                active = null;
+                if (response != null) response.Close();
             }
-
-            $stream.Write($footerBytes, 0, $footerBytes.Length)
-        } finally {
-            if ($stream -ne $null) { $stream.Close() }
+            return result;
         }
-
-        $response = $request.GetResponse()
-        $statusCode = [int]$response.StatusCode
-        $response.Close()
-        return $statusCode
-    }
-    catch [System.Net.WebException] {
-        $ex = $_.Exception
-        if ( $ex.Response -ne $null ) {
-            $errResponse = $ex.Response
-            $statusCode = [int]$errResponse.StatusCode
-
-            # Extract Retry-After header if present
-            $retryAfter = $errResponse.Headers["Retry-After"]
-            if ( $retryAfter -ne $null ) {
-                $script:LastRetryAfter = $retryAfter
-            }
-
-            $errResponse.Close()
-            return $statusCode
-        }
-        # No response at all (connection refused, DNS failure, etc.)
-        Write-Log "Connection error: $($ex.Message)" -Level "Error"
-        return 0
     }
 }
+'@
 
-# #####################################################################
-# Main Program --------------------------------------------------------
-# #####################################################################
-
-Write-Host "=============================================================="
-Write-Host "    ________                __            __                  "
-Write-Host "   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _    "
-Write-Host "    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \   "
-Write-Host "   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/   "
-Write-Host "                                                              "
-Write-Host "   Florian Roth, Nextron Systems GmbH, 2020-2026              "
-Write-Host "   PowerShell 2.0+ compatible version                         "
-Write-Host "                                                              "
-Write-Host "=============================================================="
-
-# Measure time
-$global:StartTime = Get-Date
-
-Write-Log "Started Thunderstorm Collector (PS2) with PowerShell v$($PSVersionTable.PSVersion)"
-
-# ---------------------------------------------------------------------
-# Evaluation ----------------------------------------------------------
-# ---------------------------------------------------------------------
-
-# Output Info on Auto-Detection
-if ( $AutoDetectPlatform -ne "" ) {
-    Write-Log "Auto Detect Platform: $($AutoDetectPlatform)"
-    Write-Log "Note: Some automatic changes have been applied"
+function Escape-Json([string]$text) {
+    $result = New-Object Text.StringBuilder
+    foreach ($character in $text.ToCharArray()) {
+        $number = [int]$character
+        if ($character -eq '"') { [void]$result.Append('\"') }
+        elseif ($character -eq '\') { [void]$result.Append('\\') }
+        elseif ($number -lt 32) { [void]$result.Append(('\u{0:x4}' -f $number)) }
+        else { [void]$result.Append($character) }
+    }
+    return $result.ToString()
 }
-
-# Validate folder exists
-if (-not (Test-Path -Path $Folder -PathType Container)) {
-    Write-Log "Folder not found: $Folder" -Level "Error"
-    exit 2
-}
-
-# TLS Configuration
-$Protocol = "http"
-if ( $UseSSL ) {
-    $Protocol = "https"
+function Read-ScanId([string]$body) {
     try {
-        # .NET 4.5+ enum values; TLS 1.2 = 3072, TLS 1.3 = 12288
-        [System.Net.ServicePointManager]::SecurityProtocol = 3072 -bor 12288
-    } catch {
-        try {
-            # Fall back to TLS 1.2 only
-            [System.Net.ServicePointManager]::SecurityProtocol = 3072
-        } catch {
-            Write-Log "WARNING: Could not set TLS 1.2. HTTPS may fail on this system." -Level "Warning"
+        if (Get-Command ConvertFrom-Json -ErrorAction SilentlyContinue) {
+            $object = ConvertFrom-Json -InputObject $body
+            if ($object -isnot [Array] -and $object.scan_id -is [string]) { return $object.scan_id }
+        } elseif ($script:jsonParser) {
+            $object = $script:jsonParser.DeserializeObject($body)
+            if ($object -is [Collections.IDictionary] -and $object["scan_id"] -is [string]) { return $object["scan_id"] }
         }
-    }
-    # Reject conflicting TLS options
-    if ( $Insecure -and $CACert ) {
-        Write-Log "Cannot use both -Insecure and -CACert at the same time" -Level "Error"
-        exit 2
-    }
-    # Handle --insecure: skip certificate validation
-    if ( $Insecure ) {
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-        Write-Log "TLS certificate verification DISABLED (insecure mode)" -Level "Warning"
-    }
-    # Handle --ca-cert: custom CA bundle (single cert or PEM bundle)
-    if ( $CACert ) {
-        if ( -not (Test-Path $CACert) ) {
-            Write-Log "CA certificate file not found: $CACert" -Level "Error"
-            exit 2
-        }
-        try {
-            # Try to load as a PEM bundle containing multiple certificates
-            $caCerts = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
-            $pemContent = [System.IO.File]::ReadAllText($CACert)
-            $pemPattern = '-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----'
-            $pemMatches = [regex]::Matches($pemContent, $pemPattern)
-            if ($pemMatches.Count -gt 0) {
-                foreach ($pemMatch in $pemMatches) {
-                    $certText = $pemMatch.Value -replace '-----BEGIN CERTIFICATE-----', '' -replace '-----END CERTIFICATE-----', ''
-                    $certText = $certText.Trim()
-                    $certBytes = [Convert]::FromBase64String($certText)
-                    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,$certBytes)
-                    $caCerts.Add($cert) | Out-Null
-                }
-                Write-Log "Loaded $($caCerts.Count) certificate(s) from CA bundle: $CACert"
-            } else {
-                # Try loading as a single DER/PFX certificate file
-                $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CACert)
-                $caCerts.Add($cert) | Out-Null
-                Write-Log "Loaded single CA certificate: $CACert"
-            }
-            if ($caCerts.Count -eq 0) {
-                Write-Log "No certificates found in CA file: $CACert" -Level "Error"
-                exit 2
-            }
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {
-                param($sender, $certificate, $chain, $sslPolicyErrors)
-                # Build a chain using the provided CA certificates
-                $chainObj = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-                foreach ($ca in $caCerts) {
-                    $chainObj.ChainPolicy.ExtraStore.Add($ca) | Out-Null
-                }
-                $chainObj.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::AllowUnknownCertificateAuthority
-                $chainObj.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-                $valid = $chainObj.Build($certificate)
-                if (-not $valid) { return $false }
-                # Verify that the chain root is one of the supplied CA certificates
-                $chainRoot = $chainObj.ChainElements[$chainObj.ChainElements.Count - 1].Certificate
-                $rootThumbprint = $chainRoot.Thumbprint
-                $anchored = $false
-                foreach ($ca in $caCerts) {
-                    if ($ca.Thumbprint -eq $rootThumbprint) {
-                        $anchored = $true
-                        break
-                    }
-                }
-                return $anchored
-            }
-        } catch {
-            Write-Log "Failed to load CA certificate: $_" -Level "Error"
-            exit 2
-        }
-    }
-    Write-Log "HTTPS mode enabled"
-}
-
-# URL Creation
-$SourceParam = ""
-if ( $Source -ne "" ) {
-    Write-Log "Using Source: $($Source)"
-    # URL-encode the source parameter
-    $EncodedSource = [uri]::EscapeDataString($Source)
-    $SourceParam = "?source=$EncodedSource"
-}
-$BaseUrl = "$($Protocol)://$($ThunderstormServer):$($ThunderstormPort)"
-$Url = "$BaseUrl/api/checkAsync$($SourceParam)"
-Write-Log "Sending to URI: $($Url)" -Level "Debug"
-$ScanId = ""
-
-# PS 2.0 compatible JSON escape helper -- single-pass over original string
-function Escape-JsonString {
-    param([string]$s)
-    if ($s -eq $null) { return "" }
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($c in $s.ToCharArray()) {
-        $code = [int]$c
-        switch ($c) {
-            '"'  { $sb.Append('\"') | Out-Null }
-            '\'  { $sb.Append('\\') | Out-Null }
-            "`r" { $sb.Append('\r') | Out-Null }
-            "`n" { $sb.Append('\n') | Out-Null }
-            "`t" { $sb.Append('\t') | Out-Null }
-            default {
-                if ($code -eq 0x08) {
-                    $sb.Append('\b') | Out-Null
-                } elseif ($code -eq 0x0C) {
-                    $sb.Append('\f') | Out-Null
-                } elseif ($code -lt 0x20) {
-                    $sb.Append(('\u{0:X4}' -f $code)) | Out-Null
-                } else {
-                    $sb.Append($c) | Out-Null
-                }
-            }
-        }
-    }
-    return $sb.ToString()
-}
-
-# PS 2.0 compatible: extract a JSON string value by key (handles escaped characters)
-function Get-JsonValue {
-    param([string]$Json, [string]$Key)
-    $pattern = '"' + [regex]::Escape($Key) + '"\s*:\s*"((?:\\.|[^"\\])*)"'
-    if ($Json -match $pattern) {
-        # Unescape JSON string escapes
-        # Order matters: \\ must be replaced last to avoid corrupting sequences like \\n
-        # We use a placeholder to avoid double-replacement issues
-        $val = $matches[1]
-        $val = $val.Replace('\\', "`0BACKSLASH`0")
-        $val = $val.Replace('\"', '"')
-        $val = $val.Replace('\/', '/')
-        $val = $val.Replace('\n', "`n")
-        $val = $val.Replace('\r', "`r")
-        $val = $val.Replace('\t', "`t")
-        $val = $val.Replace('\b', "`b")
-        $val = $val.Replace('\f', [string][char]0x0C)
-        $val = $val.Replace("`0BACKSLASH`0", '\')
-        # Unescape \uXXXX sequences (including surrogate pairs)
-        $val = [regex]::Replace($val, '\\u([0-9a-fA-F]{4})(?:\\u([0-9a-fA-F]{4}))?', {
-            param($m)
-            $cp1 = [int]('0x' + $m.Groups[1].Value)
-            if ($m.Groups[2].Success) {
-                $cp2 = [int]('0x' + $m.Groups[2].Value)
-                # Check if this is a surrogate pair (high surrogate + low surrogate)
-                if ($cp1 -ge 0xD800 -and $cp1 -le 0xDBFF -and $cp2 -ge 0xDC00 -and $cp2 -le 0xDFFF) {
-                    return [char]::ConvertFromUtf32((($cp1 - 0xD800) * 0x400) + ($cp2 - 0xDC00) + 0x10000)
-                } else {
-                    # Not a surrogate pair, decode independently (second \uXXXX will be re-matched)
-                    return [char]$cp1 + [char]$cp2
-                }
-            } else {
-                # Single code unit - reject lone surrogates, decode normally
-                if ($cp1 -ge 0xD800 -and $cp1 -le 0xDFFF) {
-                    return $m.Value  # Leave lone surrogate escaped
-                }
-                return [char]$cp1
-            }
-        })
-        return $val
-    }
+    } catch { Write-Host "[WARN] No usable scan_id in collection response." }
     return ""
 }
-
-function Send-CollectionMarker {
-    param(
-        [string]$MarkerType,
-        [string]$ScanId = "",
-        [hashtable]$Stats = $null
-    )
-    $MarkerUrl = "$BaseUrl/api/collection"
-    $SourceVal = $Source
-    if (-not $SourceVal) { $SourceVal = $env:COMPUTERNAME }
-    $Timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-
-    # Build JSON manually for PS 2.0 compatibility
-    $JsonParts = New-Object System.Collections.ArrayList
-    $JsonParts.Add(('"type":"{0}"' -f (Escape-JsonString $MarkerType))) | Out-Null
-    $JsonParts.Add(('"source":"{0}"' -f (Escape-JsonString $SourceVal))) | Out-Null
-    $JsonParts.Add('"collector":"powershell2/1.0"') | Out-Null
-    $JsonParts.Add(('"timestamp":"{0}"' -f (Escape-JsonString $Timestamp))) | Out-Null
-    if ($ScanId) {
-        $JsonParts.Add(('"scan_id":"{0}"' -f (Escape-JsonString $ScanId))) | Out-Null
+function Send-Marker([string]$kind) {
+    if ($DryRun -or -not $script:markersEnabled) { return $true }
+    $fields = '"type":"' + (Escape-Json $kind) + '","source":"' + (Escape-Json $Source) +
+        '","hostname":"' + (Escape-Json ([Environment]::MachineName)) + '","collector":"' +
+        $collectorId + '","timestamp":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") + '"'
+    if ($scanId) { $fields += ',"scan_id":"' + (Escape-Json $scanId) + '"' }
+    if ($kind -ne "begin") {
+        $fields += ',"stats":{'
+        $parts = @()
+        foreach ($key in $stats.Keys) { $parts += '"' + $key + '":' + $stats[$key] }
+        $fields += ($parts -join ",") + ',"elapsed_seconds":' + [int]([DateTime]::UtcNow - $startTime).TotalSeconds + '}'
     }
-    if ($Stats) {
-        $StatParts = New-Object System.Collections.ArrayList
-        foreach ($key in $Stats.Keys) {
-            $val = $Stats[$key]
-            if ($val -is [int] -or $val -is [long] -or $val -is [double]) {
-                $StatParts.Add(('"' + (Escape-JsonString $key) + '":' + $val.ToString())) | Out-Null
-            } else {
-                $StatParts.Add(('"' + (Escape-JsonString $key) + '":"' + (Escape-JsonString ([string]$val)) + '"')) | Out-Null
-            }
+    $body = [Text.Encoding]::UTF8.GetBytes('{' + $fields + '}')
+    $attempts = 1
+    if ($kind -eq "begin") { $attempts = 2 }
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        if ($Debugging) { Write-Host "[DEBUG] Marker $kind attempt $attempt" }
+        $reply = [ThunderstormCollector.Transport]::Send($baseUrl + "/api/collection", "application/json", $body, 10000)
+        if ($Debugging) { Write-Host "[DEBUG] Marker returned HTTP $($reply.Code) $($reply.Error)" }
+        if (-not $reply.Error -and ($reply.Code -eq 404 -or $reply.Code -eq 501)) {
+            Write-Host "[WARN] Collection markers unsupported (HTTP $($reply.Code))."
+            $script:markersEnabled = $false
+            return $true
         }
-        $JsonParts.Add(('"stats":{{{0}}}' -f ($StatParts -join ','))) | Out-Null
+        if (-not $reply.Error -and $reply.Code -ge 200 -and $reply.Code -lt 300) {
+            if ($kind -eq "begin") { $script:scanId = Read-ScanId $reply.Body }
+            return $true
+        }
+        Write-Host "[ERROR] Collection $kind failed: HTTP $($reply.Code) $($reply.Error)"
+        if ($attempt -lt $attempts -and -not [ThunderstormCollector.Transport]::Interrupted) { Start-Sleep -Seconds 2 }
     }
-    $JsonBody = '{' + ($JsonParts -join ',') + '}'
-
+    return $false
+}
+function Is-Excluded([string]$path) {
+    return $path -match '(?i)(^|[\\/])(OneDrive([ -][^\\/]*)?|Dropbox|Google Drive|GoogleDrive|iCloud Drive|Nextcloud|Owncloud|Mega|Syncthing)([\\/]|$)'
+}
+function Submit-File($file) {
+    $stats.scanned++
+    if ($file.Length -gt $limit -or ($MaxAge -gt 0 -and $file.LastWriteTimeUtc -lt $cutoff) -or
+        (-not $AllExtensions -and $extensionSet -notcontains $file.Extension.ToLowerInvariant())) {
+        $stats.skipped++
+        return
+    }
+    if ($DryRun) { Write-Host "[DRY-RUN] Would submit $($file.FullName)"; return }
     try {
-        $JsonBytes = [System.Text.Encoding]::UTF8.GetBytes($JsonBody)
-        $Req = [System.Net.HttpWebRequest]::Create($MarkerUrl)
-        $Req.Method = "POST"
-        $Req.ContentType = "application/json"
-        $Req.ContentLength = $JsonBytes.Length
-        $Req.Timeout = 10000
-        $Req.AllowAutoRedirect = $false
-        $Stream = $Req.GetRequestStream()
-        $Stream.Write($JsonBytes, 0, $JsonBytes.Length)
-        $Stream.Close()
-        $Resp = $Req.GetResponse()
-        $httpStatus = [int]$Resp.StatusCode
-        $Reader = New-Object System.IO.StreamReader($Resp.GetResponseStream())
-        $RespBody = $Reader.ReadToEnd()
-        $Reader.Close()
-        $Resp.Close()
-
-        # Validate HTTP success first, then attempt scan_id extraction
-        if ($httpStatus -lt 200 -or $httpStatus -ge 300) {
-            Write-Log "Collection marker '$MarkerType' returned unexpected HTTP $httpStatus" -Level "Error"
-            Write-Log "Response body: $RespBody" -Level "Debug"
-            return ""
-        }
-
-        $scanIdResult = Get-JsonValue -Json $RespBody -Key "scan_id"
-        if (-not $scanIdResult) {
-            Write-Log "Collection marker '$MarkerType' HTTP $httpStatus OK but no scan_id found in response" -Level "Warning"
-            Write-Log "Response body: $RespBody" -Level "Debug"
-            # Return a sentinel value to distinguish "HTTP success but no scan_id" from total failure
-            # This allows the caller to know the server was reached successfully
-            return "__NO_SCAN_ID__"
-        }
-        return $scanIdResult
-    } catch [System.Net.WebException] {
-        $ex = $_.Exception
-        if ($ex.Response -ne $null) {
-            $errCode = [int]$ex.Response.StatusCode
-            # 404 or 501 means the server doesn't support collection markers -- continue without scan_id
-            if ($errCode -eq 404 -or $errCode -eq 501) {
-                Write-Log "Collection marker '$MarkerType' not supported (HTTP $errCode) -- server does not implement /api/collection" -Level "Debug"
-                return "__MARKER_UNSUPPORTED__"
+        $data = [ThunderstormCollector.Transport]::Snapshot($file.FullName, $limit, $cutoff)
+        if ($null -eq $data) { $stats.skipped++; return }
+        $boundary = "thunderstorm-" + [Guid]::NewGuid().ToString("N")
+        $body = [ThunderstormCollector.Transport]::Multipart($file.FullName, $boundary, $data)
+        for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+            if ([ThunderstormCollector.Transport]::Interrupted) { break }
+            $reply = [ThunderstormCollector.Transport]::Send($uploadUrl, "multipart/form-data; boundary=$boundary", $body, 30000)
+            if (-not $reply.Error -and $reply.Code -ge 200 -and $reply.Code -lt 300) {
+                $stats.submitted++
+                if ($Progress -and -not $NoProgress) { Write-Host "Submitted: $($stats.submitted)" }
+                return
             }
-            Write-Log "Collection marker '$MarkerType' failed with HTTP $errCode" -Level "Error"
-            try {
-                $errReader = New-Object System.IO.StreamReader($ex.Response.GetResponseStream())
-                $errBody = $errReader.ReadToEnd()
-                $errReader.Close()
-                Write-Log "Error response body: $errBody" -Level "Debug"
-            } catch {}
-            $ex.Response.Close()
-        } else {
-            Write-Log "Collection marker '$MarkerType' failed: $($ex.Message)" -Level "Error"
+            Write-Host "[ERROR] Upload $($file.FullName): HTTP $($reply.Code) $($reply.Error)"
+            $delay = [Math]::Min(60, [Math]::Pow(2, $attempt - 1))
+            if ($reply.Code -eq 503) {
+                $delay = 2
+                if ($reply.RetryAfter -match '^\d+$') { $delay = [Math]::Min(120, [double]$reply.RetryAfter) }
+            }
+            if ($attempt -lt $Retries -and -not [ThunderstormCollector.Transport]::Interrupted) { Start-Sleep -Seconds $delay }
         }
-        return ""
-    } catch {
-        Write-Log "Collection marker '$MarkerType' failed: $_" -Level "Error"
-        return ""
+        $stats.failed++
+    } catch { $stats.failed++; Write-Host "[ERROR] Cannot read/submit $($file.FullName): $($_.Exception.Message)" }
+}
+function Walk([string]$root) {
+    $stack = New-Object 'Collections.Generic.Stack[string]'
+    $stack.Push($root)
+    while ($stack.Count -gt 0 -and -not [ThunderstormCollector.Transport]::Interrupted) {
+        $directory = $stack.Pop()
+        if (Is-Excluded $directory) { continue }
+        try {
+            $entry = Get-Item -LiteralPath $directory -Force
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $children = @(Get-ChildItem -LiteralPath $directory -Force)
+        } catch { $stats.scan_errors++; Write-Host "[ERROR] Cannot traverse $directory"; continue }
+        foreach ($file in $children) {
+            if ([ThunderstormCollector.Transport]::Interrupted) { break }
+            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $stats.skipped++; continue }
+            if ($file.PSIsContainer) { if (-not (Is-Excluded $file.FullName)) { $stack.Push($file.FullName) } }
+            else { Submit-File $file }
+        }
     }
 }
 
-# ---------------------------------------------------------------------
-# Run THOR Thunderstorm Collector -------------------------------------
-# ---------------------------------------------------------------------
-
-$global:SubmittedCount = 0
-$global:ErrorCount = 0
-$global:ScannedCount = 0
-$global:SkippedCount = 0
-$global:MarkersSupported = $true
-
-# Send collection begin marker with single retry on failure
-$global:ScanId = Send-CollectionMarker -MarkerType "begin"
-if ($global:ScanId -eq "__MARKER_UNSUPPORTED__") {
-    $global:MarkersSupported = $false
-    $global:ScanId = ""
-} elseif (-not $global:ScanId) {
-    Write-Log "Begin marker failed - retrying in 2 seconds..." -Level "Warning"
-    Start-Sleep -Seconds 2
-    $global:ScanId = Send-CollectionMarker -MarkerType "begin"
-    if ($global:ScanId -eq "__MARKER_UNSUPPORTED__") {
-        $global:MarkersSupported = $false
-        $global:ScanId = ""
-    }
-}
-if (-not $global:MarkersSupported) {
-    Write-Log "Collection marker endpoint unavailable -- continuing without markers" -Level "Debug"
-} elseif (-not $global:ScanId) {
-    Write-Log "Could not connect to Thunderstorm server at $BaseUrl - exiting" -Level "Error"
-    exit 2
-}
-# Handle case where server responded OK but did not return a scan_id
-if ($global:ScanId -eq "__NO_SCAN_ID__") {
-    Write-Log "Begin marker succeeded but server did not return a scan_id -- continuing without scan_id" -Level "Warning"
-    $global:ScanId = ""
-}
-if ($global:ScanId) {
-    Write-Log "Collection scan_id: $($global:ScanId)"
-    # First parameter uses '?' so subsequent ones use '&'
-    if ($SourceParam -ne "") {
-        $Url = "$Url&scan_id=$([uri]::EscapeDataString($global:ScanId))"
-    } else {
-        $Url = "$Url`?scan_id=$([uri]::EscapeDataString($global:ScanId))"
-    }
-}
-
-# Signal handling: register handler to send interrupted marker on Ctrl+C / SIGTERM
-$global:Interrupted = $false
-$global:InterruptedMarkerSent = $false
-
-# Function to send interrupted marker exactly once
-function Send-InterruptedMarkerOnce {
-    if (-not $global:MarkersSupported) { return }
-    if ($global:InterruptedMarkerSent) { return }
-    $global:InterruptedMarkerSent = $true
-    $global:Interrupted = $true
-    try {
-        Write-Log "Sending interrupted collection marker" -Level "Warning"
-        Send-CollectionMarker -MarkerType "interrupted" -ScanId $global:ScanId -Stats @{
-            scanned         = $global:ScannedCount
-            submitted       = $global:SubmittedCount
-            skipped         = $global:SkippedCount
-            failed          = $global:ErrorCount
-            elapsed_seconds = [int]((Get-Date) - $global:StartTime).TotalSeconds
-        } | Out-Null
-    } catch {
-        # Best-effort: don't let marker send failure prevent shutdown
-    }
-}
-
-
-# PS 2.0 compatible Ctrl+C handling via Register-ObjectEvent on [Console]::CancelKeyPress
 try {
-    [Console]::TreatControlCAsInput = $false
-    Register-ObjectEvent -InputObject ([Console]) -EventName CancelKeyPress -Action {
-        $Event.SourceEventArgs.Cancel = $true
-        $global:Interrupted = $true
-        Send-InterruptedMarkerOnce
-    } | Out-Null
-    Write-Log "Registered Ctrl+C handler via Register-ObjectEvent" -Level "Debug"
+    if ($ThunderstormServer -notmatch '^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$' -or
+        $ThunderstormPort -lt 1 -or $ThunderstormPort -gt 65535 -or $MaxAge -lt 0 -or $MaxAge -gt 36500 -or
+        $MaxSize -lt 1 -or $MaxSize -gt 200 -or $Retries -lt 1 -or $Retries -gt 10) {
+        throw "Invalid server/port, MaxAge (0..36500), MaxSize (1..200 MiB) or Retries (1..10 total attempts)."
+    }
+    if (($CACert -or $Insecure) -and -not $UseSSL) { throw "CACert/Insecure require UseSSL." }
+    if ($CACert -and $Insecure) { throw "CACert and Insecure are mutually exclusive." }
+    if (-not ("ThunderstormCollector.Transport" -as [type])) { Add-Type -TypeDefinition $transportSource }
+    [ThunderstormCollector.Transport]::Start()
+    [ThunderstormCollector.Transport]::Configure($CACert, $Insecure.IsPresent)
+    if ($UseSSL) {
+        # Enable TLS 1.2 where supported without installing trust or enabling SSL 3.
+        try { [Net.ServicePointManager]::SecurityProtocol = $oldProtocol -bor 3072 }
+        catch { Write-Host "[WARN] TLS 1.2 unavailable; HTTPS depends on this OS/.NET. Verification remains enabled." }
+        if ($Insecure) { Write-Host "[WARN] TLS verification explicitly disabled for this run." }
+    }
+    $scheme = "http"
+    if ($UseSSL) { $scheme = "https" }
+    $baseUrl = $scheme + "://" + $ThunderstormServer + ":" + $ThunderstormPort
+    $endpoint = "/api/checkAsync"
+    if ($Sync) { $endpoint = "/api/check" }
+    $limit = [long]$MaxSize * 1048576
+    $cutoff = [DateTime]::MinValue
+    if ($MaxAge -gt 0) { $cutoff = $startTime.AddDays(-$MaxAge) }
+    $extensionSet = @(".asp",".vbs",".ps",".ps1",".rar",".tmp",".bas",".bat",".chm",".cmd",".com",".cpl",".crt",
+        ".dll",".exe",".hta",".js",".lnk",".msc",".ocx",".pcd",".pif",".pot",".reg",".scr",".sct",".sys",".url",
+        ".vb",".vbe",".wsc",".wsf",".wsh",".ct",".t",".input",".war",".jsp",".php",".aspx",".doc",".docx",
+        ".pdf",".xls",".xlsx",".ppt",".pptx",".log",".dump",".pwd",".w",".txt",".conf",".cfg",".config",
+        ".psd1",".psm1",".ps1xml",".clixml",".psc1",".pssc",".pl",".www",".rdp",".jar",".docm",".ace",
+        ".job",".temp",".plg",".asm")
+    if ($Extensions.Count -gt 0) {
+        $extensionSet = @()
+        foreach ($extension in $Extensions) {
+            if ($extension -notmatch '^\.[A-Za-z0-9_-]+$') { throw "Extensions require literal dot-prefixed suffixes." }
+            $extensionSet += $extension.ToLowerInvariant()
+        }
+    }
+    $roots = @()
+    foreach ($path in $Folder) {
+        try {
+            $item = Get-Item -LiteralPath $path -Force
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Not a regular directory."
+            }
+            $roots += $item.FullName
+        } catch { $stats.scan_errors++; Write-Host "[ERROR] Missing/unsafe directory: $path" }
+    }
+    if ($roots.Count -eq 0) { throw "No usable input directories." }
+    $script:jsonParser = $null
+    $script:markersEnabled = $true
+    if (-not (Get-Command ConvertFrom-Json -ErrorAction SilentlyContinue)) {
+        try {
+            Add-Type -AssemblyName System.Web.Extensions
+            $script:jsonParser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        } catch {
+            $script:markersEnabled = $false
+            Write-Host "[WARN] JSON parser unavailable (.NET 3.5 System.Web.Extensions required on PS2); no collection markers."
+        }
+    }
+    if (-not (Send-Marker "begin")) { throw "Cannot begin collection." }
+    $started = -not $DryRun
+    $uploadUrl = $baseUrl + $endpoint + "?source=" + [Uri]::EscapeDataString($Source)
+    if ($scanId) { $uploadUrl += "&scan_id=" + [Uri]::EscapeDataString($scanId) }
+    foreach ($root in $roots) { Walk $root }
+    if ([ThunderstormCollector.Transport]::Interrupted) {
+        $exitCode = 1
+    } elseif (-not (Send-Marker "end")) { $exitCode = 1 }
+    if ($stats.failed -gt 0 -or $stats.scan_errors -gt 0) { $exitCode = 1 }
 } catch {
-    # Fallback: try direct .NET event subscription
-    try {
-        $handler = [System.ConsoleCancelEventHandler]{
-            param($sender, $e)
-            $e.Cancel = $true
-            $global:Interrupted = $true
-            Send-InterruptedMarkerOnce
+    Write-Host "[ERROR] $($_.Exception.Message)"
+    $exitCode = 2
+} finally {
+    if ("ThunderstormCollector.Transport" -as [type]) {
+        if ([ThunderstormCollector.Transport]::Interrupted) {
+            $exitCode = 1
+            if ($started) { [void](Send-Marker "interrupted") }
+            Write-Host "Thunderstorm Collector Run interrupted"
         }
-        [Console]::add_CancelKeyPress($handler)
-        Write-Log "Registered Ctrl+C handler via add_CancelKeyPress" -Level "Debug"
-    } catch {
-        Write-Log "Could not register Ctrl+C handler - interrupted markers on SIGINT not available" -Level "Debug"
+        [ThunderstormCollector.Transport]::Stop()
     }
+    [Net.ServicePointManager]::SecurityProtocol = $oldProtocol
 }
-
-# Note: PowerShell.Exiting fires on ALL exits (including normal completion),
-# so we do NOT register it -- it would incorrectly send an "interrupted" marker
-# on clean runs. SIGTERM handling in PS 2.0 is a known limitation.
-
-# trap statement for catchable terminating errors within the script scope
-trap {
-    Send-InterruptedMarkerOnce
-    break
-}
-
-# PS 2 compatible file enumeration (Get-ChildItem -File not available in PS 2)
-# Use incremental enumeration to avoid loading entire file tree into memory.
-# When progress is enabled, do a lightweight count pass first; otherwise process incrementally.
-Write-Log "Scanning files in $Folder ..."
-$TotalFiles = 0
-if ($ShowProgress) {
-    Write-Log "Counting files for progress reporting ..."
-    # Count pass: use Measure-Object to avoid storing all FileInfo objects
-    $countResult = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } | Measure-Object
-    $TotalFiles = $countResult.Count
-    Write-Log "Found $TotalFiles files to evaluate in $Folder"
-}
-
-# Use GetEnumerator on the pipeline output to allow 'break' without materializing all results
-$fileEnumerator = $null
-try {
-    $fileEnumerator = (Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }).GetEnumerator()
-} catch {
-    # GetEnumerator may fail if result is $null (empty folder) or a single item
-    $singleResult = Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer }
-    if ($singleResult -eq $null) {
-        $fileEnumerator = @().GetEnumerator()
-    } else {
-        $fileEnumerator = @($singleResult).GetEnumerator()
-    }
-}
-
-while ($fileEnumerator.MoveNext()) {
-    $file = $fileEnumerator.Current
-
-    # Check for interruption
-    if ($global:Interrupted) {
-        Write-Log "Interrupted by user signal" -Level "Warning"
-        break
-    }
-
-    # -----------------------------------------------------------------
-    # Filter ----------------------------------------------------------
-
-    $global:ScannedCount++
-
-    # -----------------------------------------------------------------
-    # Progress --------------------------------------------------------
-    if ($ShowProgress -and $TotalFiles -gt 0) {
-        $Pct = [int](($global:ScannedCount / $TotalFiles) * 100)
-        if ($Pct -gt 100) { $Pct = 100 }
-        Write-Host -NoNewline ("`r[{0}/{1}] {2}%  " -f $global:ScannedCount, $TotalFiles, $Pct)
-    } elseif ($ShowProgress) {
-        # No total count available; show scanned count only
-        Write-Host -NoNewline ("`r[{0}] scanning...  " -f $global:ScannedCount)
-    }
-
-    # Symlink Check — skip symbolic links (security: prevent directory escape)
-    # PS 2.0 compatible: check Attributes for ReparsePoint flag
-    if ( $file.Attributes -band [System.IO.FileAttributes]::ReparsePoint ) {
-        Write-Log "$($file.Name) skipped (symbolic link)" -Level "Debug"
-        $global:SkippedCount++
-        continue
-    }
-
-    # Size Check
-    if ( ( $file.Length / 1MB ) -gt $MaxSize ) {
-        Write-Log "$($file.Name) skipped due to size filter" -Level "Debug"
-        $global:SkippedCount++
-        continue
-    }
-
-    # Age Check
-    if ( $MaxAge -gt 0 ) {
-        if ( $file.LastWriteTime -lt (Get-Date).AddDays(-$MaxAge) ) {
-            Write-Log "$($file.Name) skipped due to age filter" -Level "Debug"
-            $global:SkippedCount++
-            continue
-        }
-    }
-
-    # Extensions Check
-    if ( $ActiveExtensions.Length -gt 0 ) {
-        $match = $false
-        foreach ( $ext in $ActiveExtensions ) {
-            if ( $file.Extension -eq $ext ) { $match = $true; break }
-        }
-        if ( -not $match ) {
-            Write-Log "$($file.Name) skipped due to extension filter" -Level "Debug"
-            $global:SkippedCount++
-            continue
-        }
-    }
-
-    # -----------------------------------------------------------------
-    # Submission ------------------------------------------------------
-
-    Write-Log "Processing $($file.FullName) ..." -Level "Debug"
-
-    # Submit with retry logic (file is streamed from disk, not loaded into memory)
-    $StatusCode = 0
-    $Retries = 0
-    $MaxRetries = 3
-    $Max503Retries = 10
-    $Retries503 = 0
-    $script:LastRetryAfter = $null
-    $FileSubmitted = $false
-    $FileRetryStart = Get-Date
-    $MaxRetrySeconds = 300  # Cap total retry time per file at 5 minutes
-
-    while ( $StatusCode -lt 200 -or $StatusCode -ge 300 ) {
-        if ($global:Interrupted) { break }
-        # Check total elapsed retry time for this file
-        if (((Get-Date) - $FileRetryStart).TotalSeconds -gt $MaxRetrySeconds) {
-            Write-Log "Total retry time exceeded ${MaxRetrySeconds}s - giving up on $($file.FullName)" -Level "Error"
-            $global:ErrorCount++
-            break
-        }
-
-        Write-Log "Submitting to Thunderstorm server: $($file.FullName) ..." -Level "Info"
-        $StatusCode = Submit-File -Url $Url -FilePath $file.FullName -FileSize $file.Length
-
-        if ( $StatusCode -ge 200 -and $StatusCode -lt 300 ) {
-            $global:SubmittedCount++
-            $FileSubmitted = $true
-            break
-        }
-        elseif ( $StatusCode -eq -1 ) {
-            # File could not be opened (missing, locked, permission denied) -- no retry
-            Write-Log "Skipping file due to open failure: $($file.FullName)" -Level "Error"
-            $global:ErrorCount++
-            break
-        }
-        elseif ( $StatusCode -eq 503 ) {
-            $Retries503++
-            if ( $Retries503 -ge $Max503Retries ) {
-                Write-Log "503: Server still busy after $Max503Retries retries - giving up on $($file.FullName)" -Level "Warning"
-                $global:ErrorCount++
-                break
-            }
-            $WaitSecs = 3
-            if ( $script:LastRetryAfter -ne $null ) {
-                try {
-                    $WaitSecs = [int]$script:LastRetryAfter
-                    if ($WaitSecs -lt 1) { $WaitSecs = 3 }
-                    if ($WaitSecs -gt 60) { $WaitSecs = 60 }
-                } catch { $WaitSecs = 3 }
-            }
-            Write-Log "503: Server seems busy - retrying in $WaitSecs seconds ($Retries503/$Max503Retries)" -Level "Warning"
-            Start-Sleep -Seconds $WaitSecs
-        }
-        elseif ( $StatusCode -eq 0 ) {
-            # Connection failure
-            $Retries++
-            if ( $Retries -ge $MaxRetries ) {
-                Write-Log "Connection failed after $MaxRetries retries - giving up on $($file.FullName)" -Level "Error"
-                $global:ErrorCount++
-                break
-            }
-            $SleepTime = [int](2 * [Math]::Pow(2, $Retries - 1))
-            Write-Log "Connection failed - retrying in $SleepTime seconds ($Retries/$MaxRetries)" -Level "Warning"
-            Start-Sleep -Seconds $SleepTime
-        }
-        else {
-            $Retries++
-            if ( $Retries -ge $MaxRetries ) {
-                Write-Log "$($StatusCode): Server error after $MaxRetries retries - giving up on $($file.FullName)" -Level "Error"
-                $global:ErrorCount++
-                break
-            }
-            $SleepTime = [int](2 * [Math]::Pow(2, $Retries - 1))
-            Write-Log "$($StatusCode): Server has problems - retrying in $SleepTime seconds ($Retries/$MaxRetries)" -Level "Warning"
-            Start-Sleep -Seconds $SleepTime
-        }
-    }
-}
-
-# Clear progress line if it was shown
-if ($ShowProgress -and $TotalFiles -gt 0) {
-    Write-Host ("`r" + (" " * 60) + "`r") -NoNewline
-}
-
-# ---------------------------------------------------------------------
-# End -----------------------------------------------------------------
-# ---------------------------------------------------------------------
-$ElapsedTime = (Get-Date) - $global:StartTime
-$TotalTime = "{0:HH:mm:ss}" -f ([datetime]$ElapsedTime.Ticks)
-Write-Log "Submitted $($global:SubmittedCount) files ($($global:ErrorCount) errors) in $TotalTime" -Level "Info"
-Write-Log "Results: scanned=$($global:ScannedCount) submitted=$($global:SubmittedCount) skipped=$($global:SkippedCount) failed=$($global:ErrorCount)"
-
-# Send collection end or interrupted marker with stats
-# If interrupted marker was already sent by signal handler, skip duplicate
-if (-not $global:MarkersSupported) {
-    Write-Log "Collection marker endpoint unavailable - skipping end/interrupted marker" -Level "Debug"
-} elseif ($global:InterruptedMarkerSent) {
-    Write-Log "Interrupted marker already sent by signal handler - skipping end marker"
-} else {
-    $EndMarkerType = "end"
-    if ($global:Interrupted) {
-        $EndMarkerType = "interrupted"
-        Write-Log "Sending interrupted collection marker" -Level "Warning"
-    }
-    Send-CollectionMarker -MarkerType $EndMarkerType -ScanId $global:ScanId -Stats @{
-        scanned         = $global:ScannedCount
-        submitted       = $global:SubmittedCount
-        skipped         = $global:SkippedCount
-        failed          = $global:ErrorCount
-        elapsed_seconds = [int]$ElapsedTime.TotalSeconds
-    } | Out-Null
-}
-
-# Exit codes: 0 = success, 1 = partial failure, 2 = fatal error
-if ($global:ErrorCount -gt 0) {
-    exit 1
-} else {
-    exit 0
-}
+Write-Host "Thunderstorm Collector Run finished (Checked: $($stats.scanned) Submitted: $($stats.submitted) Failed: $($stats.failed) Skipped: $($stats.skipped) Scan errors: $($stats.scan_errors))"
+exit $exitCode

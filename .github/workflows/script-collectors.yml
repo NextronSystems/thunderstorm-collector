@@ -124,6 +124,22 @@ jobs:
       - name: Test harness safeguards
         run: python -B scripts/tests/test_harness.py
 
+      - name: PowerShell robustness (Windows PowerShell 5.1, not PS2)
+        if: hashFiles('scripts/tests/test_powershell_robustness.py') != ''
+        shell: pwsh
+        env:
+          POWERSHELL_RUNTIME: powershell.exe
+        run: |
+          python -B scripts/tests/test_powershell_robustness.py
+          if ($LASTEXITCODE -ne 0) { throw "Modern PowerShell regression failures" }
+          $env:POWERSHELL_COLLECTOR = Join-Path $PWD 'scripts/powershell/thunderstorm-collector-ps2.ps1'
+          python -B scripts/tests/test_powershell_robustness.py
+          if ($LASTEXITCODE -ne 0) { throw "PS2-compatible script regression failures (5.1 host)" }
+
+      - name: Batch robustness (real cmd, WSH and curl)
+        if: hashFiles('scripts/tests/test_batch_robustness.py') != ''
+        run: python -B scripts/tests/test_batch_robustness.py
+
       - name: Checkout thunderstorm-stub-server
         if: steps.collectors.outputs.count != '0'
         uses: actions/checkout@v4

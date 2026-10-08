@@ -1,442 +1,222 @@
-@ECHO OFF
-SETLOCAL EnableDelayedExpansion
-
-:: ----------------------------------------------------------------
-:: THOR Thunderstorm Collector
-:: Windows Batch
-:: Florian Roth, Nextron Systems GmbH
-:: v0.5
-::
-:: A Windows Batch script that uses Curl for Windows
-:: to upload files to a THOR Thunderstorm server
-::
-:: Requirements:
-:: Curl for Windows (place curl.exe into the script folder or PATH)
-:: https://curl.se/windows/
-::
-:: Note on Windows 10+
-:: Windows 10 already includes curl since build 17063 (version 1709+)
-::
-:: Note on Windows 7 / Server 2008 R2:
-:: Curl 8.x requires the Universal C Runtime (KB2999226 or KB3118401).
-:: Install the Visual C++ 2015 Redistributable or the UCRT update,
-:: then place the curl.exe + libcurl DLL in the script folder.
-::
-:: Known Limitations (cmd.exe platform constraints):
-:: - No collection markers: begin/end markers and scan_id tracking require
-::   JSON parsing which is impractical in pure batch. Use the PowerShell
-::   collector (.ps1 or .ps2.ps1) for collection marker support.
-:: - No --ca-cert / --insecure support: Use CURL_CA_BUNDLE env var or
-::   URL_SCHEME=http as workarounds.
-:: - No progress reporting: cmd.exe cannot detect interactive terminals.
-:: - No signal handling: Ctrl+C terminates without cleanup.
-:: - MAX_AGE filtering: FORFILES /D -N has inverted semantics (files ≥N days
-::   OLD, not files from last N days). This script applies age filtering
-::   per-file in PROCESSFILE as a workaround.
-:: - FINDSTR regex: Windows 7 has limited regex support ($ anchors and
-::   negated character classes [^...] are broken). Hostname validation
-::   provides defense-in-depth; server-side validation is authoritative.
-:: ----------------------------------------------------------------
-
-:: CONFIGURATION -------------------------------------------------
-
-:: THUNDERSTORM SERVER
-SET _TS=%THUNDERSTORM_SERVER%
-SET _TP=%THUNDERSTORM_PORT%
-SET _SCHEME=%URL_SCHEME%
-IF "%_TS%"=="" SET _TS=ygdrasil.nextron
-IF "%_TP%"=="" SET _TP=8080
-IF "%_SCHEME%"=="" SET _SCHEME=http
-IF /I NOT "%_SCHEME%"=="http" IF /I NOT "%_SCHEME%"=="https" (
-    ECHO [ERROR] Invalid URL_SCHEME: %_SCHEME%. Must be http or https. 1>&2
-    EXIT /b 2
-)
-
-:: SELECTION
-SET _DIRS=%COLLECT_DIRS%
-SET _EXTS=%RELEVANT_EXTENSIONS%
-SET _MAXSZ=%COLLECT_MAX_SIZE%
-SET _MAXAGE=%MAX_AGE%
-IF "%_DIRS%"=="" SET "_DIRS=C:\Users;C:\Temp;C:\Windows"
-IF "%_EXTS%"=="" SET _EXTS=.vbs .ps1 .rar .tmp .bat .chm .dll .exe .hta .js .lnk .sct .war .jsp .jspx .php .asp .aspx .log .dmp .txt .jar .job
-IF "%_MAXSZ%"=="" SET _MAXSZ=3000000
-IF "%_MAXAGE%"=="" SET _MAXAGE=30
-
-:: DEBUG & SOURCE
-SET _DBG=%DEBUG%
-SET _SRC=%SOURCE%
-IF "%_DBG%"=="" SET _DBG=0
-
-:: Basic server hostname validation: reject empty and values containing characters
-:: outside the allowed set (alphanumeric, hyphens, dots, colons, brackets for IPv6).
-:: Full URL validation is delegated to curl.
-IF "!_TS!"=="" (
-    ECHO [ERROR] Server hostname is empty. Set THUNDERSTORM_SERVER. 1>&2
-    EXIT /b 2
-)
-ECHO !_TS!| FINDSTR /R "[^a-zA-Z0-9.\-\[\]:]" >nul 2>&1
-IF NOT ERRORLEVEL 1 (
-    ECHO [ERROR] Server hostname contains invalid characters: !_TS! 1>&2
-    EXIT /b 2
-)
-
-:: Validate numeric parameters
-SET /A _TP=%_TP% 2>nul
-SET /A _MAXSZ=%_MAXSZ% 2>nul
-SET /A _MAXAGE=%_MAXAGE% 2>nul
-IF !_TP! LEQ 0 SET _TP=8080
-IF !_TP! GTR 65535 SET _TP=8080
-IF !_MAXSZ! LEQ 0 SET _MAXSZ=3000000
-IF !_MAXAGE! LSS 0 SET _MAXAGE=30
-
-:: Counters
-SET /A _SUBMITTED=0
-SET /A _SKIPPED=0
-SET /A _FAILED=0
-SET /A _SCANNED=0
-
-:: WELCOME -------------------------------------------------------
-
-ECHO =============================================================
-ECHO    ________                __            __
-ECHO   /_  __/ /  __ _____  ___/ /__ _______ / /____  ______ _
-ECHO    / / / _ \/ // / _ \/ _  / -_) __(_--/ __/ _ \/ __/  ' \
-ECHO   /_/ /_//_/\_,_/_//_/\_,_/\__/_/ /___/\__/\___/_/ /_/_/_/
-ECHO.
-ECHO   Windows Batch Collector v0.5
-ECHO   Florian Roth, Nextron Systems GmbH, 2020-2026
-ECHO.
-ECHO =============================================================
-ECHO.
-
-:: REQUIREMENTS --------------------------------------------------
-:: Prefer curl next to the script (bundled with UCRT DLLs), then current dir, then PATH
-SET _CURL=
-IF EXIST "%~dp0curl.exe" (
-    SET "_CURL=%~dp0curl.exe"
-    GOTO :CURLOK
-)
-IF EXIST "%CD%\curl.exe" (
-    SET "_CURL=%CD%\curl.exe"
-    GOTO :CURLOK
-)
-where /q curl.exe
-IF NOT ERRORLEVEL 1 (
-    FOR /F "tokens=*" %%C IN ('where curl.exe') DO (
-        IF NOT DEFINED _CURL SET "_CURL=%%C"
-    )
-    GOTO :CURLOK
-)
-ECHO [ERROR] Cannot find curl in PATH or the script directory. 1>&2
-ECHO     Download from https://curl.se/windows/ and place curl.exe next to this script. 1>&2
-EXIT /b 2
-:CURLOK
-ECHO [+] Curl found: %_CURL%
-
-:: SOURCE --------------------------------------------------------
-IF "%_SRC%"=="" (
-    FOR /F "tokens=*" %%i IN ('hostname') DO SET _SRC=%%i
-    ECHO [+] Source: !_SRC!
-)
-
-:: Create temp files for file listing and curl responses
-SET "_FILELIST=%TEMP%\ts-collector-%RANDOM%%RANDOM%.tmp"
-SET "_RESPTMP=%TEMP%\ts-collector-resp-%RANDOM%%RANDOM%.tmp"
-IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
-IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
-
-:: URL-encode the source for use in query strings
-:: Only encode characters problematic in URLs
-SET "_SRCURL=!_SRC!"
-SET "_SRCURL=!_SRCURL:%%=%%25!"
-SET "_SRCURL=!_SRCURL: =%%20!"
-SET "_SRCURL=!_SRCURL:&=%%26!"
-SET "_SRCURL=!_SRCURL:+=%%2B!"
-SET "_SRCURL=!_SRCURL:#=%%23!"
-SET "_SRCURL=!_SRCURL:==%%3D!"
-
-:: NOTE: Collection markers (begin/end) and scan_id tracking are not
-:: supported in the batch collector. Use the PowerShell collector
-:: (.ps1 or .ps2.ps1) for collection marker support.
-SET _IDPARAM=
-
-:: BUILD FILE LIST -----------------------------------------------
-:: Phase 1: Use FORFILES to generate a filtered file list.
-:: FORFILES does NOT follow junctions/reparse points, solving the infinite loop issue.
-
-:: NOTE: Age filtering is NOT performed in the FORFILES phase because
-:: FORFILES /D -N has INVERTED semantics: it means "files modified ON OR BEFORE
-:: N days ago" (old files), not "files from the last N days". Age filtering
-:: is handled during file iteration in PROCESSFILE instead.
-:: See: https://ss64.com/nt/forfiles.html - "/D -dd selects files with a
-:: last modified date less than or equal to the current date minus dd days."
-
-ECHO [+] Scanning !_DIRS! ...
-ECHO [+] Filters: MAX_SIZE=%_MAXSZ% bytes, MAX_AGE=%_MAXAGE% days, EXTENSIONS=%_EXTS%
-:: NOTE: MAX_AGE is applied per file in PROCESSFILE (not in FORFILES /D).
-
-:: Iterate directories using semicolon delimiter (supports paths with spaces)
-:: COLLECT_DIRS can be semicolon-separated, e.g. "C:\Program Files;C:\Temp"
-:: Write directory list to a temp file, then iterate with delayed expansion off
-:: to protect paths containing '!' characters.
-SET "_DIRLIST=!_FILELIST!.dirs"
-:: Split semicolon-separated directory list into lines
-FOR %%T IN ("!_DIRS:;=" "!") DO (
-    IF NOT "%%~T"=="" ECHO %%~T>>"!_DIRLIST!"
-)
-FOR /F "usebackq delims=" %%T IN ("!_DIRLIST!") DO (
-    CALL :SCANDIR "%%T"
-)
-DEL "!_DIRLIST!" 2>nul
-GOTO :SCANDONE
-
-:SCANDIR
-SETLOCAL DisableDelayedExpansion
-SET "_TDIR=%~1"
-IF "%_TDIR%"=="" (
-    ENDLOCAL
-    GOTO :EOF
-)
-IF NOT EXIST "%_TDIR%" (
-    ECHO [ERROR] Warning: %_TDIR% does not exist, skipping. 1>&2
-    ENDLOCAL
-    GOTO :EOF
-)
-IF %_DBG% == 1 ECHO [D] Scanning %_TDIR% ...
-:: FORFILES /S = recurse (skips junctions), /C = command per file
-:: @path outputs quoted full path, @isdir filters out directories
-:: Note: Age filtering via /D has inverted semantics and is not used here.
-:: Age is checked during iteration in PROCESSFILE.
-FORFILES /P "%_TDIR%" /S /C "cmd /c if @isdir==FALSE echo @path" >>"%_FILELIST%" 2>nul
-ENDLOCAL
-GOTO :EOF
-
-:SCANDONE
-
-:: Count total files found
-SET /A _TOTAL=0
-IF EXIST "!_FILELIST!" (
-    FOR /F "usebackq" %%C IN (`type "!_FILELIST!" ^| find /c /v ""`) DO SET /A _TOTAL=%%C
-)
-ECHO [+] Found !_TOTAL! files.
-
-:: PHASE 2: FILTER AND UPLOAD ------------------------------------
-IF !_TOTAL! == 0 GOTO :DONE
-
-:: Disable delayed expansion for the file-processing loop so paths
-:: containing '!' characters are not corrupted during %%F expansion.
-SET "_FILELIST_SAVED=!_FILELIST!"
-SETLOCAL DisableDelayedExpansion
-FOR /F "usebackq delims=" %%F IN ("%_FILELIST_SAVED%") DO (
-    CALL :PROCESSFILE "%%~F"
-)
-ENDLOCAL
-GOTO :DONE
-
-:: ---------------------------------------------------------------
-:: Subroutine: PROCESSFILE
-:: Processes a single file path passed as %1.
-:: Uses SETLOCAL/ENDLOCAL to toggle delayed expansion, protecting
-:: file paths that contain '!' characters from being corrupted.
-:: ---------------------------------------------------------------
-:PROCESSFILE
-:: First, capture the raw path with delayed expansion OFF so '!' is preserved
-SETLOCAL DisableDelayedExpansion
-SET "_FILE=%~1"
-SET _SZ=
-SET "_FEXT="
-SET "_AGEDIR="
-SET "_AGENAME="
-FOR %%S IN ("%_FILE%") DO (
-    SET "_SZ=%%~zS"
-    SET "_FEXT=%%~xS"
-    SET "_AGEDIR=%%~dpS"
-    SET "_AGENAME=%%~nxS"
-)
-:: Now re-enable delayed expansion for counter logic and comparisons
-SETLOCAL EnableDelayedExpansion
-
-:: Extension check
-SET _EXTMATCH=0
-FOR %%E IN (%_EXTS%) DO (
-    IF /I "!_FEXT!"=="%%E" SET _EXTMATCH=1
-)
-IF !_EXTMATCH! == 0 (
-    IF !_DBG! == 1 ECHO [D] Skip current file ^(extension^)
-    SET /A _SKIPPED+=1
-    :: Propagate all counters back to parent scope
-    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
-        ENDLOCAL & ENDLOCAL
-        SET /A _SCANNED=%%A
-        SET /A _SUBMITTED=%%B
-        SET /A _SKIPPED=%%C
-        SET /A _FAILED=%%D
-    )
-    GOTO :EOF
-)
-:: Size check (file may have been deleted since listing)
-IF "!_SZ!"=="" (
-    IF !_DBG! == 1 ECHO [D] Skip current file ^(file not found^)
-    SET /A _SKIPPED+=1
-    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
-        ENDLOCAL & ENDLOCAL
-        SET /A _SCANNED=%%A
-        SET /A _SUBMITTED=%%B
-        SET /A _SKIPPED=%%C
-        SET /A _FAILED=%%D
-    )
-    GOTO :EOF
-)
-IF !_SZ! GTR !_MAXSZ! (
-    IF !_DBG! == 1 ECHO [D] Skip current file ^(size: !_SZ!^)
-    SET /A _SKIPPED+=1
-    FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
-        ENDLOCAL & ENDLOCAL
-        SET /A _SCANNED=%%A
-        SET /A _SUBMITTED=%%B
-        SET /A _SKIPPED=%%C
-        SET /A _FAILED=%%D
-    )
-    GOTO :EOF
-)
-:: Age check — FORFILES /D -N matches old files (<= today-N), so we check per-file
-:: and skip those that are too old.
-IF !_MAXAGE! GTR 0 (
-    SET "_ISOLD=0"
-    CALL :ISFILEOLD_RAW
-    IF "!_ISOLD!"=="1" (
-        IF !_DBG! == 1 ECHO [D] Skip current file ^(age: older than !_MAXAGE! days^)
-        SET /A _SKIPPED+=1
-        FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
-            ENDLOCAL & ENDLOCAL
-            SET /A _SCANNED=%%A
-            SET /A _SUBMITTED=%%B
-            SET /A _SKIPPED=%%C
-            SET /A _FAILED=%%D
-        )
-        GOTO :EOF
-    )
-)
-:: Upload — increment _SCANNED only for files that pass filters
-SET /A _SCANNED+=1
-ECHO [+] Uploading: %_FILE%
-SET _HTTPCODE=
-CALL :RUNUPLOAD_RAW
-IF !_CURLRC! == 0 (
-    SET /P _HTTPCODE=<"!_RESPTMP!"
-    DEL "!_RESPTMP!" 2>nul
-    IF "!_HTTPCODE!"=="" (
-        ECHO [ERROR] Failed current file ^(empty response^) 1>&2
-        SET /A _FAILED+=1
-    ) ELSE IF "!_HTTPCODE!"=="503" (
-        :: Respect Retry-After header, capped at 60s, default 5s
-        SET _RETRYWAIT=5
-        IF EXIST "!_RESPTMP!.hdr" (
-            FOR /F "tokens=2 delims=: " %%H IN ('FINDSTR /I "^Retry-After:" "!_RESPTMP!.hdr"') DO (
-                SET /A _RETRYWAIT=%%H 2>nul
-                IF !_RETRYWAIT! LEQ 0 SET _RETRYWAIT=5
-                IF !_RETRYWAIT! GTR 60 SET _RETRYWAIT=60
-            )
-        )
-        DEL "!_RESPTMP!.hdr" 2>nul
-        ECHO [!] Server busy ^(503^), waiting !_RETRYWAIT!s before retry... 1>&2
-        SET /A _PINGCOUNT=!_RETRYWAIT!+1
-        PING -n !_PINGCOUNT! 127.0.0.1 >nul 2>&1
-        SET _HTTPCODE2=
-        CALL :RUNUPLOAD_RAW
-        SET "_CURLRC2=!_CURLRC!"
-        IF !_CURLRC2! == 0 (
-            SET /P _HTTPCODE2=<"!_RESPTMP!"
-            DEL "!_RESPTMP!" 2>nul
-            DEL "!_RESPTMP!.hdr" 2>nul
-            IF "!_HTTPCODE2!"=="503" (
-                ECHO [ERROR] Failed current file ^(server still busy^) 1>&2
-                SET /A _FAILED+=1
-            ) ELSE IF "!_HTTPCODE2:~0,1!"=="2" (
-                SET /A _SUBMITTED+=1
-            ) ELSE (
-                ECHO [ERROR] Failed current file ^(HTTP !_HTTPCODE2! on retry^) 1>&2
-                SET /A _FAILED+=1
-            )
-        ) ELSE (
-            DEL "!_RESPTMP!" 2>nul
-            DEL "!_RESPTMP!.hdr" 2>nul
-            ECHO [ERROR] Failed current file ^(curl exit: !_CURLRC2!^) 1>&2
-            SET /A _FAILED+=1
-        )
-    ) ELSE IF "!_HTTPCODE:~0,1!"=="2" (
-        DEL "!_RESPTMP!.hdr" 2>nul
-        SET /A _SUBMITTED+=1
-    ) ELSE (
-        DEL "!_RESPTMP!.hdr" 2>nul
-        ECHO [ERROR] Failed current file ^(HTTP !_HTTPCODE!^) 1>&2
-        SET /A _FAILED+=1
-    )
-) ELSE (
-    DEL "!_RESPTMP!" 2>nul
-    DEL "!_RESPTMP!.hdr" 2>nul
-    ECHO [ERROR] Failed current file ^(curl exit: !_CURLRC!^) 1>&2
-    SET /A _FAILED+=1
-)
-:: Clean up any leftover temp files from this iteration
-IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
-IF EXIST "!_RESPTMP!.hdr" DEL "!_RESPTMP!.hdr" 2>nul
-:: Propagate all counters back to parent scope
-FOR /F "tokens=1-4" %%A IN ("!_SCANNED! !_SUBMITTED! !_SKIPPED! !_FAILED!") DO (
-    ENDLOCAL & ENDLOCAL
-    SET /A _SCANNED=%%A
-    SET /A _SUBMITTED=%%B
-    SET /A _SKIPPED=%%C
-    SET /A _FAILED=%%D
-)
-GOTO :EOF
-
-:: ---------------------------------------------------------------
-:: Subroutine: RUNUPLOAD_RAW
-:: Runs curl with delayed expansion disabled so paths containing '!'
-:: are preserved in both the file lookup and multipart filename metadata.
-:: ---------------------------------------------------------------
-:RUNUPLOAD_RAW
-SETLOCAL DisableDelayedExpansion
-"%_CURL%" -s -o nul -D "%_RESPTMP%.hdr" -w "%%{http_code}" -F "file=@%_FILE%;filename=%_FILE%" "%_SCHEME%://%_TS%:%_TP%/api/checkAsync?source=%_SRCURL%%_IDPARAM%" >"%_RESPTMP%" 2>nul
-SET "_CURLRC=%ERRORLEVEL%"
-ENDLOCAL & SET "_CURLRC=%_CURLRC%"
-GOTO :EOF
-
-:: ---------------------------------------------------------------
-:: Subroutine: ISFILEOLD_RAW
-:: Sets _ISOLD=1 if the current file is older than/equal to MAX_AGE days,
-:: else 0, while delayed expansion is disabled.
-:: ---------------------------------------------------------------
-:ISFILEOLD_RAW
-SETLOCAL DisableDelayedExpansion
-SET "_ISOLD=0"
-IF "%_AGEDIR%"=="" GOTO :ISFILEOLDRETURN
-IF "%_AGENAME%"=="" GOTO :ISFILEOLDRETURN
-
-FORFILES /P "%_AGEDIR%" /M "%_AGENAME%" /D -%_MAXAGE% /C "cmd /c if @isdir==FALSE exit /b 0" >nul 2>nul
-IF NOT ERRORLEVEL 1 SET "_ISOLD=1"
-
-:ISFILEOLDRETURN
-ENDLOCAL & SET "_ISOLD=%_ISOLD%"
-GOTO :EOF
-
-:DONE
-
-:: CLEANUP -------------------------------------------------------
-IF EXIST "!_FILELIST!" DEL "!_FILELIST!" 2>nul
-IF EXIST "!_RESPTMP!" DEL "!_RESPTMP!" 2>nul
-IF EXIST "!_RESPTMP!.hdr" DEL "!_RESPTMP!.hdr" 2>nul
-IF EXIST "!_RESPTMP!.code" DEL "!_RESPTMP!.code" 2>nul
-
-:: SUMMARY -------------------------------------------------------
-ECHO.
-ECHO [+] Done. scanned=!_SCANNED! submitted=!_SUBMITTED! skipped=!_SKIPPED! failed=!_FAILED!
-
-:: EXIT CODE: 1 if any uploads failed, 0 otherwise
-IF !_FAILED! GTR 0 (
-    ENDLOCAL
-    EXIT /b 1
-)
-ENDLOCAL
-EXIT /b 0
+@if (@a)==(@b) @end /*
+@echo off
+setlocal DisableDelayedExpansion
+"%SystemRoot%\System32\cscript.exe" //E:JScript //Nologo "%~f0"
+exit /b %errorlevel%
+*/
+// THOR Thunderstorm Collector - Florian Roth / Nextron Systems
+// Single release asset. WSH handles data; cmd never evaluates discovered paths.
+var fso, shell, environment, workspace = "", exitCode = 0;
+var stats = {scanned: 0, submitted: 0, failed: 0, skipped: 0, scan_errors: 0};
+function log(text) { WScript.Echo(text); }
+function setting(name, fallback) {
+    var value = environment(name);
+    return value === "" ? fallback : value;
+}
+function number(name, fallback, minimum, maximum) {
+    var text = setting(name, String(fallback));
+    if (!/^\d+$/.test(text)) throw new Error(name + " must be an integer.");
+    var value = Number(text);
+    if (value < minimum || value > maximum) throw new Error(name + " outside permitted range.");
+    return value;
+}
+function flag(name) {
+    var value = setting(name, "0").toLowerCase();
+    if (!/^(0|1|false|true)$/.test(value)) throw new Error(name + " must be 0 or 1.");
+    return value === "1" || value === "true";
+}
+function quote(text) {
+    if (/["%\r\n\x00]/.test(text)) throw new Error("Invalid process path (quotes, percent signs or controls).");
+    return '"' + text + '"';
+}
+function execute(command) {
+    var process = shell.Exec(command), deadline = new Date().getTime() + 40000;
+    while (process.Status === 0) {
+        if (new Date().getTime() > deadline) {
+            process.Terminate();
+            throw new Error("curl exceeded its 40-second watchdog.");
+        }
+        WScript.Sleep(50);
+    }
+    return {code: process.ExitCode, output: process.StdOut.ReadAll(), error: process.StdErr.ReadAll()};
+}
+function resolveCurl() {
+    var configured = setting("CURL_PATH", "");
+    var candidates = configured ? [configured] :
+        [fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "curl.exe"),
+         fso.BuildPath(shell.ExpandEnvironmentStrings("%SystemRoot%"), "System32\\curl.exe")];
+    if (!configured) {
+        var paths = setting("PATH", "").split(";");
+        for (var i = 0; i < paths.length; i++)
+            if (paths[i]) candidates.push(fso.BuildPath(paths[i].replace(/^"|"$/g, ""), "curl.exe"));
+    }
+    for (var i = 0; i < candidates.length; i++) {
+        if (!fso.FileExists(candidates[i])) continue;
+        var path = fso.GetAbsolutePathName(candidates[i]);
+        var version = execute(quote(path) + " --disable --version");
+        var match = /^curl (\d+)\.(\d+)\./.exec(version.output);
+        if (version.code !== 0 || !match || Number(match[1]) < 8 ||
+            (Number(match[1]) === 8 && Number(match[2]) < 4))
+            throw new Error("curl 8.4+ required for bounded response downloads.");
+        return path;
+    }
+    throw new Error("curl.exe not found. Set CURL_PATH to a trusted absolute path.");
+}
+function createWorkspace() {
+    var temporary = fso.GetSpecialFolder(2);
+    for (var attempt = 0; attempt < 20; attempt++) {
+        var candidate = fso.BuildPath(temporary, "thunderstorm-" + fso.GetTempName());
+        try { fso.CreateFolder(candidate); workspace = candidate; return; } catch (error) {}
+    }
+    throw new Error("Cannot create an exclusively owned temporary directory.");
+}
+function excluded(path) {
+    if (workspace && path.toLowerCase() === workspace.toLowerCase()) return true;
+    return /(^|[\\\/])(OneDrive([ -][^\\\/]*)?|Dropbox|Google Drive|GoogleDrive|iCloud Drive|Nextcloud|Owncloud|Mega|Syncthing)([\\\/]|$)/i.test(path);
+}
+function appendText(body, text) {
+    var stream = new ActiveXObject("ADODB.Stream");
+    try {
+        stream.Type = 2;
+        stream.Charset = "utf-8";
+        stream.Open();
+        stream.WriteText(text);
+        stream.Position = 0;
+        stream.Type = 1;
+        stream.Position = 3; // Remove the UTF-8 BOM from each multipart header.
+        stream.CopyTo(body);
+    } finally { if (stream.State) stream.Close(); }
+}
+function snapshot(file, boundary) {
+    var before = fso.GetFile(file.Path), length = Number(before.Size);
+    var stamp = new Date(before.DateLastModified).getTime();
+    if ((before.Attributes & 1024) !== 0) throw new Error("File became a link.");
+    if (length > maxSize || (maxAge > 0 && stamp < cutoff)) return false;
+    var data = new ActiveXObject("ADODB.Stream"), body = new ActiveXObject("ADODB.Stream");
+    try {
+        data.Type = 1; data.Open(); data.LoadFromFile(file.Path);
+        var after = fso.GetFile(file.Path);
+        if (Number(data.Size) !== length || Number(after.Size) !== length ||
+            new Date(after.DateLastModified).getTime() !== stamp || (after.Attributes & 1024) !== 0)
+            throw new Error("File changed while being read.");
+        body.Type = 1; body.Open();
+        var name = file.Path.replace(/[\\\";\x00-\x1f\x7f]/g, "_");
+        appendText(body, "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" +
+            name + "\"\r\nContent-Type: application/octet-stream\r\n\r\n");
+        data.Position = 0; data.CopyTo(body);
+        appendText(body, "\r\n--" + boundary + "--\r\n");
+        body.SaveToFile(fso.BuildPath(workspace, "body.bin"), 2);
+        return true;
+    } finally {
+        if (data.State) data.Close();
+        if (body.State) body.Close();
+    }
+}
+function upload(file) {
+    stats.scanned++;
+    var extension = "." + fso.GetExtensionName(file.Name).toLowerCase();
+    if (Number(file.Size) > maxSize || (maxAge > 0 && new Date(file.DateLastModified).getTime() < cutoff) ||
+        (!allExtensions && !extensions[extension])) { stats.skipped++; return; }
+    if (dryRun) { log("[DRY-RUN] Would submit " + file.Path); return; }
+    try {
+        var boundary = "thunderstorm-" + new Date().getTime() + "-" + Math.floor(Math.random() * 1000000000);
+        if (!snapshot(file, boundary)) { stats.skipped++; return; }
+        var response = fso.BuildPath(workspace, "response.txt"), headers = fso.BuildPath(workspace, "headers.txt");
+        var config = fso.BuildPath(workspace, "request.cfg");
+        var configFile = fso.CreateTextFile(config, true, false);
+        try { configFile.WriteLine('url = "' + url + '"'); } finally { configFile.Close(); }
+        var command = quote(curl) + ' --disable --silent --show-error --globoff --noproxy "*" --connect-timeout 10' +
+            ' --max-time 30 --max-filesize 1048576 --proto "=http,https" --output ' + quote(response) +
+            " --dump-header " + quote(headers) + ' --write-out "%{http_code}" --header ' +
+            quote("Content-Type: multipart/form-data; boundary=" + boundary) +
+            " --data-binary " + quote("@" + fso.BuildPath(workspace, "body.bin")) + " --config " + quote(config);
+        for (var attempt = 1; attempt <= attempts; attempt++) {
+            var result = execute(command), status = result.output.replace(/^\s+|\s+$/g, "");
+            if (result.code === 0 && /^2\d\d$/.test(status) && fso.FileExists(response) &&
+                Number(fso.GetFile(response).Size) <= 1048576) {
+                stats.submitted++; return;
+            }
+            log("[ERROR] Upload " + file.Path + ": HTTP " + status + " curl " + result.code);
+            var delay = Math.min(60, Math.pow(2, attempt - 1));
+            if (status === "503") {
+                delay = 2;
+                if (fso.FileExists(headers) && Number(fso.GetFile(headers).Size) <= 65536) {
+                    var stream = fso.OpenTextFile(headers, 1);
+                    var text;
+                    try { text = stream.ReadAll(); } finally { stream.Close(); }
+                    var match = /^Retry-After:\s*(\d+)\s*$/im.exec(text);
+                    if (match) delay = Math.min(120, Number(match[1]));
+                }
+            }
+            if (attempt < attempts) WScript.Sleep(delay * 1000);
+        }
+        stats.failed++;
+    } catch (error) { stats.failed++; log("[ERROR] Cannot read/upload " + file.Path + ": " + error.message); }
+}
+function walk(root) {
+    var stack = [root];
+    while (stack.length) {
+        var path = stack.pop();
+        if (excluded(path)) continue;
+        try {
+            var directory = fso.GetFolder(path);
+            if ((directory.Attributes & 1024) !== 0) { stats.skipped++; continue; }
+            var folders = new Enumerator(directory.SubFolders);
+            for (; !folders.atEnd(); folders.moveNext()) {
+                var child = folders.item();
+                if ((child.Attributes & 1024) === 0 && !excluded(child.Path)) stack.push(child.Path);
+            }
+            var files = new Enumerator(directory.Files);
+            for (; !files.atEnd(); files.moveNext()) {
+                var file = files.item();
+                if ((file.Attributes & 1024) !== 0) { stats.skipped++; continue; }
+                upload(file);
+            }
+        } catch (error) { stats.scan_errors++; log("[ERROR] Cannot traverse " + path + ": " + error.message); }
+    }
+}
+try {
+    fso = new ActiveXObject("Scripting.FileSystemObject");
+    shell = new ActiveXObject("WScript.Shell");
+    environment = shell.Environment("PROCESS");
+    var server = setting("THUNDERSTORM_SERVER", ""), port = number("THUNDERSTORM_PORT", 8080, 1, 65535);
+    if (!/^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$/.test(server)) throw new Error("Invalid THUNDERSTORM_SERVER.");
+    var scheme = setting("URL_SCHEME", "http").toLowerCase();
+    if (scheme !== "http" && scheme !== "https") throw new Error("URL_SCHEME must be http or https.");
+    var maxSize = number("COLLECT_MAX_SIZE", 3000000, 1, 209715200);
+    var maxAge = number("MAX_AGE", 30, 0, 36500), attempts = number("UPLOAD_ATTEMPTS", 3, 1, 10);
+    var dryRun = flag("DRY_RUN"), sync = flag("SYNC");
+    var cutoff = new Date().getTime() - maxAge * 86400000;
+    var source = setting("SOURCE", shell.ExpandEnvironmentStrings("%COMPUTERNAME%"));
+    var url = scheme + "://" + server + ":" + port + (sync ? "/api/check" : "/api/checkAsync") +
+        "?source=" + encodeURIComponent(source);
+    var selected = setting("RELEVANT_EXTENSIONS", ".exe;.dll;.ps1;.bat;.txt").split(";");
+    var allExtensions = selected.length === 1 && selected[0] === "*", extensions = {};
+    for (var i = 0; i < selected.length && !allExtensions; i++) {
+        if (!/^\.[A-Za-z0-9_-]+$/.test(selected[i])) throw new Error("Invalid RELEVANT_EXTENSIONS suffix.");
+        extensions[selected[i].toLowerCase()] = true;
+    }
+    var directories = setting("COLLECT_DIRS", "");
+    if (!directories) throw new Error("Set explicit COLLECT_DIRS; there is no broad default scan.");
+    var roots = [], values = directories.split(";");
+    for (var i = 0; i < values.length; i++) {
+        try {
+            var directory = fso.GetFolder(values[i]);
+            if ((directory.Attributes & 1024) !== 0) throw new Error("Root is a link.");
+            roots.push(directory.Path);
+        } catch (error) { stats.scan_errors++; log("[ERROR] Missing/unsafe directory: " + values[i]); }
+    }
+    if (!roots.length) throw new Error("No usable input directories.");
+    if (!dryRun) { var curl = resolveCurl(); createWorkspace(); }
+    for (var i = 0; i < roots.length; i++) walk(roots[i]);
+    if (stats.failed || stats.scan_errors) exitCode = 1;
+} catch (error) { log("[ERROR] " + error.message); exitCode = 2; }
+finally {
+    if (workspace) {
+        try { fso.DeleteFolder(workspace, true); }
+        catch (error) { log("[ERROR] Cannot remove owned temporary payloads: " + workspace); exitCode = 1; }
+    }
+}
+log("Thunderstorm Collector Run finished (Checked: " + stats.scanned + " Submitted: " + stats.submitted +
+    " Failed: " + stats.failed + " Skipped: " + stats.skipped + " Scan errors: " + stats.scan_errors + ")");
+WScript.Quit(exitCode);

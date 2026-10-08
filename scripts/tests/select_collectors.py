@@ -12,8 +12,8 @@ import sys
 SHELL_FLAGS = ("--server", "--port", "--dir", "--max-age", "--source", "--dry-run")
 PYTHON_FLAGS = ("--server", "--port", "--dirs", "--max-age", "--source", "--dry-run")
 PS_FLAGS = ("ThunderstormServer", "ThunderstormPort", "Folder", "Source", "MaxAge", "MaxSize", "AllExtensions")
-BATCH_FLAGS = ("SET _TS=%THUNDERSTORM_SERVER%", "SET _TP=%THUNDERSTORM_PORT%",
-               "SET _DIRS=%COLLECT_DIRS%", "SET _MAXSZ=%COLLECT_MAX_SIZE%", "SET _SRC=%SOURCE%")
+BATCH_FLAGS = ("THUNDERSTORM_SERVER", "THUNDERSTORM_PORT", "COLLECT_DIRS",
+               "COLLECT_MAX_SIZE", "SOURCE", "//E:JScript", "DRY_RUN")
 COLLECTORS = {
     "bash": ("linux", "bash/thunderstorm-collector.sh", SHELL_FLAGS),
     "ash": ("linux", "ash/thunderstorm-collector-ash.sh", SHELL_FLAGS),
