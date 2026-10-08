@@ -19,7 +19,7 @@ Choose the collector for your appliance before selecting a generic OS download.
 
 | Appliance or target | Recommended collector | Requirements and testing status | Download or instructions |
 | --- | --- | --- | --- |
-| VMware ESXi | Python collector (`scripts/thunderstorm-collector.py`) | Python 3.6+ and standard library only. Nextron has used it successfully on ESXi; exact firmware versions and collector revisions are not recorded. | [ESXi quick start and compatibility notes](scripts/README.md#vmware-esxi-use-the-python-collector) |
+| VMware ESXi | Python collector (`scripts/python/thunderstorm-collector.py`) | Revised collector: Python 3.4+ and standard library only; separate Python 2.7 file for legacy hosts. Earlier Python collectors have been used on ESXi, but this revision still needs target-system validation. | [ESXi quick start and compatibility notes](scripts/README.md#vmware-esxi-use-the-python-collector) |
 | Older Citrix NetScaler based on FreeBSD 8.4 (amd64) | Separate legacy Go collector built with Go 1.9.7 | A regular FreeBSD package is not interchangeable. Check release availability; appliance validation remains pending. | [NetScaler package selection and testing status](go/README.md#citrix-netscaler-and-freebsd-84) |
 | Other NetScaler versions | Select for the actual OS version and architecture | Verify compatibility for your appliance; neither Go 1.9.7 nor a generic FreeBSD package is suitable for every NetScaler. | [NetScaler compatibility guidance](go/README.md#citrix-netscaler-and-freebsd-84) |
 
@@ -48,11 +48,21 @@ cd thunderstorm-collector-amd64-linux
 ./amd64-linux-thunderstorm-collector --help
 ```
 
-### Collection Scripts
+### Script Assets
 
-Published releases currently provide individual, versioned script files such as `thunderstorm-collector-1.0.1.py`. Download the Python, Bash, PowerShell, Perl or Batch file from the [Releases](../../releases) page. Use the [scripts README](scripts/README.md) for usage instructions. For ESXi, start with the [Python guidance](scripts/README.md#vmware-esxi-use-the-python-collector).
+Releases provide separate, versioned script assets, for example `thunderstorm-collector-<version>.sh`; a release containing the Python 2 collector also provides `thunderstorm-collector-py2-<version>.py`. There is no combined scripts ZIP archive. A release contains the collectors and behavior from its tagged revision.
 
-A scripts ZIP package is not available in the currently published releases. If a future release provides one, check that release's contents and instructions.
+As of 8 October 2026, v1.0.1 is the latest published release and v1.0.2 has not been published. The reorganized scripts and additional legacy variants described below are not in v1.0.1. Use the instructions matching your downloaded version; the [ESXi quick start](scripts/README.md#vmware-esxi-use-the-python-collector) explains the Python differences.
+
+Source code and per-collector documentation are organized in:
+- `scripts/bash/` (Bash)
+- `scripts/ash/` (POSIX sh / ash)
+- `scripts/python/` (Python 3 and Python 2)
+- `scripts/perl/` (Perl)
+- `scripts/powershell/` (PowerShell 3+ and PowerShell 2)
+- `scripts/batch/` (Windows Batch)
+
+See the [scripts README](scripts/README.md) for usage instructions.
 
 ## Building from Source
 
@@ -73,13 +83,15 @@ make help   # Show all available build targets
 From the repository root:
 
 ```bash
-make release           # Build binary packages and versioned script files
+make release           # Build binary packages and individual script assets
+make release-binary    # Build binary packages and copy standalone config
+make release-scripts   # Copy individual script assets only
 make help              # Show all available targets
 ```
 
 This creates:
 - **Binary packages:** `go/dist/*.tar.gz` and `go/dist/*.zip` (46+ platforms)
-- **Scripts:** individual versioned files in `release/`
+- **Release assets:** versioned binary packages, individual collector scripts, and `config-<version>.yml` in `release/`
 
 ## Which Collector Should You Choose?
 
@@ -100,8 +112,8 @@ This creates:
 When a version tag is pushed (e.g., `v1.2.3`), GitHub Actions automatically:
 1. Builds binaries for all 46 supported platforms
 2. Creates compressed packages (tar.gz/zip) with binary + config
-3. Copies the individual collection scripts as versioned release files
-4. Publishes a GitHub release with all packages attached
+3. Copies each available collector script and the standalone configuration into versioned release assets
+4. Publishes a GitHub release with binary packages and individual assets attached
 
 ## Craft Your Own Collector
 
