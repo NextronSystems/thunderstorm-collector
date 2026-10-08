@@ -92,6 +92,8 @@ Missing roots are errors, not successful empty collections.
   Marker IDs must be top-level JSON strings of at most 256 bytes without control
   characters. Nested, duplicate, non-string, or malformed IDs are ignored with a
   warning. Unicode escapes are decoded without changing the identifier.
+  Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID
+  and a warning is emitted. This bounds parser work on older awk runtimes.
 - SIGKILL, power loss, or an unresponsive filesystem can prevent cleanup/markers.
   Retries after ambiguous network failures can duplicate a server-side submission;
   the collector cannot promise exactly-once delivery.

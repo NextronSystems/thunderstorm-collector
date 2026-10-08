@@ -395,6 +395,10 @@ response_is_bounded() {
 # Parse the entire JSON document, not a substring that happens to name scan_id.
 # Keep this POSIX awk implementation standalone for machines without Python/jq.
 read_scan_id() {
+    local marker_bytes
+    marker_bytes="$(wc -c < "$1")" || return 1
+    # Bound parser work as well as transport storage on older awk runtimes.
+    [ "$marker_bytes" -le 65536 ] || return 1
     LC_ALL=C awk '
     BEGIN { for (i=1;i<256;i++) byte[sprintf("%c",i)]=i }
     function ws() { while (substr(s,p,1) ~ /^[ \t\r\n]$/) p++ }
@@ -783,7 +787,7 @@ collection_marker() {
     [ "$_marker_rc" -eq 0 ] || return "$_marker_rc"
 
     scan_id_out="$(read_scan_id "$resp_file")" || {
-        log_msg warn "Ignoring invalid collection marker JSON or scan_id"
+        log_msg warn "Ignoring invalid or oversized collection marker JSON or scan_id"
         scan_id_out=""
     }
 
