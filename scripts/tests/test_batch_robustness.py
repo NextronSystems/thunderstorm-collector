@@ -87,6 +87,9 @@ class BatchRobustness(shared.PowerShellRobustness):
     def test_profiles_share_the_reviewed_core(self):
         self.skipTest("PowerShell-only drift guard")
 
+    def test_tls_root_trust_and_hostname_remain_independent(self):
+        self.skipTest("PowerShell custom TLS callback; Batch uses curl OS/CA verification")
+
     def test_failed_end_marker_is_failure(self):
         self.skipTest("Batch deliberately has no collection markers")
 

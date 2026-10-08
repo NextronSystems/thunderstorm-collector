@@ -54,6 +54,7 @@ namespace ThunderstormCollector {
         private static HttpWebRequest active;
         private static X509Certificate2 ca;
         private static bool insecure;
+        private static string tlsError = "";
         private static ConsoleCancelEventHandler handler;
         public static void Start() {
             Interrupted = false;
@@ -94,8 +95,10 @@ namespace ThunderstormCollector {
         private static bool Validate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
             if (insecure) return true;
             // Keep the platform's hostname validation; never parse localized SAN text.
-            if ((errors & (SslPolicyErrors.RemoteCertificateNameMismatch | SslPolicyErrors.RemoteCertificateNotAvailable)) != 0)
+            if ((errors & (SslPolicyErrors.RemoteCertificateNameMismatch | SslPolicyErrors.RemoteCertificateNotAvailable)) != 0) {
+                tlsError = "TLS policy error: " + errors;
                 return false;
+            }
             if (ca == null) return errors == SslPolicyErrors.None;
             X509Certificate2 leaf = new X509Certificate2(certificate);
             X509Chain custom = new X509Chain();
@@ -104,14 +107,18 @@ namespace ThunderstormCollector {
                 custom.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
                 custom.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                 custom.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"));
-                if (!custom.Build(leaf) || custom.ChainElements.Count == 0) return false;
+                if (!custom.Build(leaf) || custom.ChainElements.Count == 0) {
+                    tlsError = "TLS custom chain rejected.";
+                    return false;
+                }
                 X509Certificate2 root = custom.ChainElements[custom.ChainElements.Count - 1].Certificate;
-                if (root.Thumbprint != ca.Thumbprint) return false;
+                if (root.Thumbprint != ca.Thumbprint) { tlsError = "TLS root differs from supplied CA."; return false; }
                 foreach (X509ChainStatus status in custom.ChainStatus)
                     if (status.Status != X509ChainStatusFlags.NoError && status.Status != X509ChainStatusFlags.UntrustedRoot)
-                        return false;
+                        { tlsError = "TLS chain status: " + status.Status; return false; }
                 return true;
-            } finally { leaf.Reset(); custom.Reset(); }
+            } catch (Exception error) { tlsError = "TLS chain validation: " + error.Message; return false; }
+            finally { leaf.Reset(); custom.Reset(); }
         }
         public static byte[] Snapshot(string path, long limit, DateTime cutoff) {
             FileAttributes attributes = File.GetAttributes(path);
@@ -154,6 +161,7 @@ namespace ThunderstormCollector {
             HttpWebResponse response = null;
             System.Threading.Timer deadline = null;
             try {
+                tlsError = "";
                 request = (HttpWebRequest)WebRequest.Create(url);
                 request.Method = "POST";
                 request.Proxy = null;
@@ -190,7 +198,7 @@ namespace ThunderstormCollector {
                     result.Body = Encoding.UTF8.GetString(body.ToArray());
                 }
             } catch (Exception error) {
-                result.Error = error.Message;
+                result.Error = error.Message + (tlsError.Length > 0 ? " " + tlsError : "");
             } finally {
                 if (deadline != null) deadline.Dispose();
                 active = null;

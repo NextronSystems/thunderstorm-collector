@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -126,6 +127,12 @@ class PowerShellRobustness(unittest.TestCase):
             if option in ("--dry-run", "--sync"):
                 flags.append("DryRun" if option == "--dry-run" else "Sync")
                 index += 1
+            elif option in ("--tls", "--insecure"):
+                flags.append("UseSSL" if option == "--tls" else "Insecure")
+                index += 1
+            elif option == "--ca-cert":
+                options["CACert"] = extra[index + 1]
+                index += 2
             else:
                 options[names[option]] = extra[index + 1]
                 index += 2
@@ -318,6 +325,46 @@ class PowerShellRobustness(unittest.TestCase):
         self.assertEqual(self.run_collector(), 1, self.output)
         self.assertIn("Submitted: 0", self.output)
         self.assertEqual(sum("/api/check" in path for path in self.paths), 1)
+
+    def test_tls_root_trust_and_hostname_remain_independent(self):
+        openssl = shutil.which("openssl")
+        if not openssl:
+            self.skipTest("requires OpenSSL on the test host to generate ephemeral TLS fixtures")
+        ca = os.path.join(self.root, "ca.pem")
+        key = os.path.join(self.root, "ca-key.pem")
+        leaf = os.path.join(self.root, "leaf.pem")
+        leaf_key = os.path.join(self.root, "leaf-key.pem")
+        csr = os.path.join(self.root, "leaf.csr")
+        extensions = os.path.join(self.root, "extensions.cnf")
+        with open(extensions, "w") as stream:
+            stream.write("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+                         "extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n")
+        commands = [
+            [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=TestRoot",
+             "-keyout", key, "-out", ca, "-addext", "basicConstraints=critical,CA:TRUE"],
+            [openssl, "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", leaf_key, "-out", csr],
+            [openssl, "x509", "-req", "-in", csr, "-CA", ca, "-CAkey", key, "-CAcreateserial", "-days", "1",
+             "-out", leaf, "-extfile", extensions],
+        ]
+        for command in commands:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout)
+        self.server.shutdown()
+        self.thread.join(5)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(leaf, leaf_key)
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.file()
+        self.assertEqual(self.run_collector("--tls", "--server", "localhost"), 2, self.output)
+        self.assertEqual(self.uploads, [])
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", ca, "--server", "localhost"), 0, self.output)
+        self.assertEqual(len(self.uploads), 1)
+        self.uploads[:] = []
+        # The CA is correct, but the certificate deliberately has no IP SAN.
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", ca), 2, self.output)
+        self.assertEqual(self.uploads, [])
 
     def test_profiles_share_the_reviewed_core(self):
         directory = os.path.dirname(SCRIPT)
