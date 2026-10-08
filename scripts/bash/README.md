@@ -9,7 +9,7 @@ THOR Thunderstorm service. It does not scan files locally.
 | Requirement | Detail |
 |---|---|
 | Runtime | Bash 3.2 or newer; not `sh`, `dash`, or BusyBox ash |
-| Upload tool | `curl` (preferred) or **GNU wget**, not BusyBox wget |
+| Upload tool | `curl` (preferred) or **GNU wget** with `--no-config`, not BusyBox wget |
 | System tools | GNU/BSD `find`, `stat`, `mktemp`, and standard Unix text utilities |
 | Permissions | Only files readable by the current user can be uploaded |
 | Service | HTTP/HTTPS Thunderstorm; no built-in HTTP authentication options |
@@ -42,6 +42,8 @@ Use the ash collector for BusyBox environments instead of weakening Bash's scope
   Begin/end markers and returned scan IDs are supported. Marker HTTP 404/501 are
   nonfatal for older services without `/api/collection`.
 - Only complete HTTP 2xx uploads count as successful. Redirects are not followed.
+  Curl/wget configuration files and proxy environment settings are ignored, so
+  they cannot silently disable TLS checks or redirect uploads elsewhere.
   Default: three normal attempts per file, configurable with `--retries 1..10`,
   with capped exponential backoff. HTTP 503 has a separate budget of five busy
   responses; numeric `Retry-After` values are honored up to 120 seconds.
@@ -84,6 +86,12 @@ Missing roots are errors, not successful empty collections.
   keeps sending data. Prefer curl.
 - Marker requests have 10-second timeouts; begin is tried twice. Large collections
   and repeated busy responses can take much longer than a smoke test.
+- Responses are limited to 1 MiB. Each transport output file has an additional
+  operating-system write limit of at most 2 MiB, including headers and diagnostics.
+  Oversized responses fail the request; error-body logging is limited to 4 KiB.
+  Marker IDs must be top-level JSON strings of at most 256 bytes without control
+  characters. Nested, duplicate, non-string, or malformed IDs are ignored with a
+  warning. Unicode escapes are decoded without changing the identifier.
 - SIGKILL, power loss, or an unresponsive filesystem can prevent cleanup/markers.
   Retries after ambiguous network failures can duplicate a server-side submission;
   the collector cannot promise exactly-once delivery.

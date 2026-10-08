@@ -365,6 +365,141 @@ escape_find_path() {
     printf '%s' "$path"
 }
 
+# The sentinel preserves trailing newlines; command substitution alone does not.
+resolve_directory() {
+    local resolved
+    resolved="$(CDPATH='' cd -- "$1" && pwd -P && printf '.')" || return 1
+    resolved="${resolved%.}"
+    RESOLVED_DIR="${resolved%$'\n'}"
+}
+
+# Bound every response/header/error file even with older curl/wget versions.
+# Shells express this limit in 512- or 1024-byte units, so the physical cap is
+# at most 2 MiB. Apply the logical 1 MiB response limit before parsing anything.
+run_http() (
+    ulimit -f 2048 || exit 97
+    "$@"
+)
+
+response_is_bounded() {
+    local file bytes
+    for file in "$@"; do
+        bytes="$(wc -c < "$file")" || return 1
+        if [ "$bytes" -gt 1048576 ]; then
+            log_msg error "HTTP response exceeds the 1 MiB limit"
+            return 1
+        fi
+    done
+}
+
+# Parse the entire JSON document, not a substring that happens to name scan_id.
+# Keep this POSIX awk implementation standalone for machines without Python/jq.
+read_scan_id() {
+    LC_ALL=C awk '
+    BEGIN { for (i=1;i<256;i++) byte[sprintf("%c",i)]=i }
+    function ws() { while (substr(s,p,1) ~ /^[ \t\r\n]$/) p++ }
+    function fail() { exit 1 }
+    function hex4(    i,c,n) {
+        n=0
+        for (i=0;i<4;i++) {
+            c=index("0123456789abcdef",tolower(substr(s,p+i,1)))-1
+            if (length(substr(s,p+i,1)) != 1 || c<0) fail()
+            n=n*16+c
+        }
+        p+=4
+        return n
+    }
+    function utf8(n) {
+        if (n<128) return sprintf("%c",n)
+        if (n<2048) return sprintf("%c%c",192+int(n/64),128+n%64)
+        if (n<65536) return sprintf("%c%c%c",224+int(n/4096),128+int(n/64)%64,128+n%64)
+        return sprintf("%c%c%c%c",240+int(n/262144),128+int(n/4096)%64,128+int(n/64)%64,128+n%64)
+    }
+    function string(    out,c,n,lo,lead,count,j,nextbyte) {
+        if (substr(s,p++,1)!="\"") fail()
+        out=""
+        while (p<=length(s)) {
+            c=substr(s,p++,1)
+            if (c=="\"") { parsed=out; return }
+            if (c ~ /[[:cntrl:]]/) fail()
+            lead=byte[c]
+            if (lead>=128) {
+                if (lead<194 || lead>244) fail()
+                count=(lead<224 ? 1 : (lead<240 ? 2 : 3))
+                for (j=1;j<=count;j++) {
+                    nextbyte=byte[substr(s,p,1)]
+                    if (nextbyte<128 || nextbyte>191) fail()
+                    if (j==1 && ((lead==224 && nextbyte<160) ||
+                        (lead==237 && nextbyte>159) || (lead==240 && nextbyte<144) ||
+                        (lead==244 && nextbyte>143))) fail()
+                    c=c substr(s,p++,1)
+                }
+            }
+            if (c=="\\") {
+                c=substr(s,p++,1)
+                if (c=="u") {
+                    n=hex4()
+                    # Some awk implementations cannot preserve embedded NULs.
+                    if (n==0) fail()
+                    if (n>=55296 && n<=56319) {
+                        if (substr(s,p,2)!="\\u") fail()
+                        p+=2; lo=hex4()
+                        if (lo<56320 || lo>57343) fail()
+                        n=65536+(n-55296)*1024+lo-56320
+                    } else if (n>=56320 && n<=57343) fail()
+                    c=utf8(n)
+                } else if (c=="n") c="\n"
+                else if (c=="r") c="\r"
+                else if (c=="t") c="\t"
+                else if (c=="b") c=sprintf("%c",8)
+                else if (c=="f") c=sprintf("%c",12)
+                else if (c!="\"" && c!="\\" && c!="/") fail()
+            }
+            out=out c
+        }
+        fail()
+    }
+    function value(depth,    c,key,closing) {
+        if (depth>32) fail()
+        ws(); c=substr(s,p,1)
+        if (c=="\"") { string(); kind="string"; return }
+        if (c=="{" || c=="[") {
+            closing=(c=="{" ? "}" : "]"); p++; ws()
+            if (substr(s,p,1)!=closing) {
+                while (1) {
+                    if (c=="{") {
+                        ws(); string(); key=parsed; ws()
+                        if (substr(s,p++,1)!=":") fail()
+                    }
+                    value(depth+1)
+                    if (depth==1 && c=="{" && key=="scan_id") {
+                        if (++ids>1 || kind!="string") invalid_id=1
+                        else id=parsed
+                    }
+                    ws()
+                    if (substr(s,p,1)==closing) break
+                    if (substr(s,p++,1)!=",") fail()
+                }
+            }
+            p++; kind=(c=="{" ? "object" : "array"); return
+        }
+        if (match(substr(s,p),/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+            p+=RLENGTH; kind="number"; return
+        }
+        if (match(substr(s,p),/^(true|false|null)/)) {
+            p+=RLENGTH; kind="literal"; return
+        }
+        fail()
+    }
+    { s=s $0 "\n" }
+    END {
+        p=1; value(1); ws()
+        if (p<=length(s) || kind!="object" || invalid_id) fail()
+        if (length(id)>256 || id ~ /[[:cntrl:]]/) fail()
+        printf "%s",id
+    }' "$1"
+}
+
 detect_upload_tool() {
     if command -v curl >/dev/null 2>&1; then
         UPLOAD_TOOL="curl"
@@ -397,17 +532,18 @@ upload_with_curl() {
     # Read through stdin so curl never interprets delimiters in the local path.
     local form_arg="file=@-;filename=\"${safe_filename}\""
 
-    curl -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
+    run_http curl --disable --noproxy '*' --globoff -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
         --connect-timeout 10 --max-time 300 \
         -D "$header_file" \
         "$endpoint" \
         -F "$form_arg" \
         < "$filepath" > "$resp_file" 2>"$err_file"
     code=$?
+    response_is_bounded "$resp_file" "$header_file" || return 97
 
     if [ $code -ne 0 ]; then
         local _curl_err
-        _curl_err="$(cat "$err_file" 2>/dev/null)"
+        _curl_err="$(head -c 4096 "$err_file" 2>/dev/null)"
         [ -n "$_curl_err" ] && log_msg debug "curl error: $_curl_err"
     fi
 
@@ -435,7 +571,7 @@ upload_with_curl() {
         2[0-9][0-9]) ;;
         *)
             local body
-            body="$(cat "$resp_file" 2>/dev/null)"
+            body="$(head -c 4096 "$resp_file" 2>/dev/null)"
             body="${body//$'\r'/ }"
             body="${body//$'\n'/ }"
             log_msg error "Server returned HTTP ${http_code:-unknown} for '$filepath': $body"
@@ -491,12 +627,13 @@ upload_with_wget() {
         printf '\r\n--%s--\r\n' "$boundary"
     } > "$body_file" 2>/dev/null || return 95
 
-    wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
+    run_http wget --no-config --no-proxy -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
         --tries=1 --max-redirect=0 --connect-timeout=10 --read-timeout=300 \
         --header="Content-Type: multipart/form-data; boundary=${boundary}" \
         --post-file="$body_file" \
         "$endpoint" 2>"$header_file"
     code=$?
+    response_is_bounded "$resp_file" "$header_file" || return 97
 
     # Extract HTTP status code from headers (wget -S writes headers to stderr with leading spaces)
     local http_code
@@ -523,7 +660,7 @@ upload_with_wget() {
         2[0-9][0-9]) ;;
         *)
             local body
-            body="$(tr '\r\n' '  ' < "$resp_file" 2>/dev/null)"
+            body="$(head -c 4096 "$resp_file" 2>/dev/null | tr '\r\n' '  ')"
             log_msg error "Server returned HTTP ${http_code:-unknown} for '$filepath': $body"
             return 96
             ;;
@@ -593,20 +730,21 @@ collection_marker() {
         : > "$resp_file"
         # Attempt POST — capture HTTP status to detect server-side errors
         if command -v curl >/dev/null 2>&1; then
-            curl -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
+            run_http curl --disable --noproxy '*' --globoff -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
                 -H "Content-Type: application/json" \
                 -d "$body" \
                 --connect-timeout 10 --max-time 10 \
                 "$marker_url" 2>/dev/null
             _marker_rc=$?
         elif command -v wget >/dev/null 2>&1; then
-            wget -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
+            run_http wget --no-config --no-proxy -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
                 --header "Content-Type: application/json" \
                 --post-data "$body" \
                 --tries=1 --max-redirect=0 --timeout=10 \
                 "$marker_url" 2>"$header_file"
             _marker_rc=$?
         fi
+        response_is_bounded "$resp_file" "$header_file" || return 97
         # Validate the HTTP status code even when wget exits non-zero on 4xx/5xx.
         # 404/501 means the server doesn't implement marker endpoint; continue without scan_id.
         _http_code="$(grep -oE '^[[:space:]]*HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
@@ -617,7 +755,8 @@ collection_marker() {
                     ;;
                 404|501)
                     log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
-                    _marker_rc=0
+                    # Wget uses 8 for complete HTTP error responses.
+                    case "$_marker_rc" in 0|8) return 0 ;; esac
                     ;;
                 *)
                     log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
@@ -638,88 +777,10 @@ collection_marker() {
 
     [ "$_marker_rc" -eq 0 ] || return "$_marker_rc"
 
-    # Extract scan_id from response, handling JSON escapes (e.g. \" and \\ inside the value).
-    # Uses awk to find the "scan_id" key and parse the JSON string value properly.
-    scan_id_out="$(awk '
-    BEGIN { found = 0 }
-    {
-        s = s $0
-    }
-    END {
-        # Find "scan_id" key
-        idx = index(s, "\"scan_id\"")
-        if (idx == 0) exit
-        rest = substr(s, idx + length("\"scan_id\""))
-        # Skip whitespace and colon
-        gsub(/^[[:space:]]*:[[:space:]]*/, "", rest)
-        # Must start with quote
-        if (substr(rest, 1, 1) != "\"") exit
-        rest = substr(rest, 2)
-        val = ""
-        while (length(rest) > 0) {
-            c = substr(rest, 1, 1)
-            if (c == "\\") {
-                # Escaped character
-                nc = substr(rest, 2, 1)
-                if (nc == "\"") { val = val "\""; rest = substr(rest, 3) }
-                else if (nc == "\\") { val = val "\\"; rest = substr(rest, 3) }
-                else if (nc == "n") { val = val "\n"; rest = substr(rest, 3) }
-                else if (nc == "r") { val = val "\r"; rest = substr(rest, 3) }
-                else if (nc == "t") { val = val "\t"; rest = substr(rest, 3) }
-                else if (nc == "/") { val = val "/"; rest = substr(rest, 3) }
-                else if (nc == "b") { val = val "\b"; rest = substr(rest, 3) }
-                else if (nc == "f") { val = val "\f"; rest = substr(rest, 3) }
-                else if (nc == "u") {
-                    # \uXXXX unicode escape
-                    hex = substr(rest, 3, 4)
-                    rest = substr(rest, 7)
-                    if (length(hex) == 4) {
-                        # Convert hex to decimal
-                        cp = 0
-                        for (hi = 1; hi <= 4; hi++) {
-                            hc = substr(hex, hi, 1)
-                            if (hc >= "0" && hc <= "9") cp = cp * 16 + (hc + 0)
-                            else if (hc == "a" || hc == "A") cp = cp * 16 + 10
-                            else if (hc == "b" || hc == "B") cp = cp * 16 + 11
-                            else if (hc == "c" || hc == "C") cp = cp * 16 + 12
-                            else if (hc == "d" || hc == "D") cp = cp * 16 + 13
-                            else if (hc == "e" || hc == "E") cp = cp * 16 + 14
-                            else if (hc == "f" || hc == "F") cp = cp * 16 + 15
-                            else { cp = -1; break }
-                        }
-                        if (cp >= 32 && cp <= 126) {
-                            val = val sprintf("%c", cp)
-                        } else if (cp >= 0) {
-                            # Non-ASCII or control char: replace with underscore
-                            val = val "_"
-                        }
-                        # cp == -1: invalid hex, skip silently
-                    }
-                }
-                else { val = val nc; rest = substr(rest, 3) }
-            } else if (c == "\"") {
-                break
-            } else {
-                val = val c
-                rest = substr(rest, 2)
-            }
-        }
-        printf "%s", val
-    }' "$resp_file" 2>/dev/null)"
-
-    # Validate scan_id: reject empty values, control characters, and unreasonably long values.
-    # The value is JSON-escaped for markers and URL-encoded for query parameters, so we only
-    # need to guard against control characters and excessive length.
-    if [ ${#scan_id_out} -gt 256 ]; then
+    scan_id_out="$(read_scan_id "$resp_file")" || {
+        log_msg warn "Ignoring invalid collection marker JSON or scan_id"
         scan_id_out=""
-    else
-        # Remove any control characters (0x00-0x1f, 0x7f) — if the result differs, reject it
-        local _sanitized
-        _sanitized="$(printf '%s' "$scan_id_out" | tr -d '\000-\037\177')"
-        if [ "$_sanitized" != "$scan_id_out" ]; then
-            scan_id_out=""
-        fi
-    fi
+    }
 
     printf '%s' "$scan_id_out"
     return "$_marker_rc"
@@ -943,7 +1004,8 @@ main() {
 
     WORK_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/thunderstorm.XXXXXX")" ||
         die "Cannot create private temporary directory"
-    WORK_DIR="$(cd -- "$WORK_DIR" && pwd -P)" || die "Cannot access temporary directory"
+    resolve_directory "$WORK_DIR" || die "Cannot access temporary directory"
+    WORK_DIR="$RESOLVED_DIR"
 
     if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
         log_msg warn "Running without root privileges; some files may be inaccessible"
@@ -1030,10 +1092,13 @@ main() {
     find_excludes+=(-path "$(escape_find_path "$WORK_DIR")" -prune -o)
     if [ "$LOG_TO_FILE" -eq 1 ]; then
         local log_dir log_path
-        log_dir="$(dirname -- "$LOGFILE")"
-        if log_dir="$(cd -- "$log_dir" && pwd -P)"; then
-            log_path="$log_dir/$(basename -- "$LOGFILE")"
-            find_excludes+=(-path "$(escape_find_path "$log_path")" -prune -o)
+        log_dir="${LOGFILE%/*}"
+        [ "$log_dir" != "$LOGFILE" ] || log_dir=.
+        [ -n "$log_dir" ] || log_dir=/
+        if resolve_directory "$log_dir"; then
+            log_path="$RESOLVED_DIR/${LOGFILE##*/}"
+            log_path="$(escape_find_path "$log_path"; printf '.')"
+            find_excludes+=(-path "${log_path%.}" -prune -o)
         fi
     fi
     local _ep
@@ -1075,11 +1140,12 @@ main() {
             continue
         fi
 
-        if ! scandir="$(cd -- "$scandir" && pwd -P)"; then
+        if ! resolve_directory "$scandir"; then
             log_msg warn "Cannot access scan directory"
             SCAN_ERRORS=$((SCAN_ERRORS + 1))
             continue
         fi
+        scandir="$RESOLVED_DIR"
 
         log_msg info "Scanning '$scandir'"
         find_results_file="$(mktemp_portable)" || {

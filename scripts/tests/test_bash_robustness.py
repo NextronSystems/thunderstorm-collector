@@ -6,10 +6,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import ssl
 import subprocess
 import tempfile
 import threading
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,6 +35,10 @@ class BashRobustnessTests(unittest.TestCase):
         self.end_status = 200
         self.retry_after = "0"
         self.diagnostic_header = False
+        self.marker_response = b'{}'
+        self.upload_response = b'{}'
+        self.redirect = False
+        self.markers = []
         test = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -45,8 +51,11 @@ class BashRobustnessTests(unittest.TestCase):
                 response = b'{}'
                 if self.path.startswith("/api/collection"):
                     marker = json.loads(data)
+                    test.markers.append(marker)
+                    response = test.marker_response
                     status = test.end_status if marker["type"] == "end" else test.marker_status
                 else:
+                    response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
                     if 200 <= status < 300:
                         headers = ("Content-Type: " + self.headers["Content-Type"] +
@@ -55,13 +64,18 @@ class BashRobustnessTests(unittest.TestCase):
                         test.uploads.extend((part.get_filename(), part.get_payload(decode=True))
                                             for part in message.iter_parts())
                 self.send_response(status)
+                if test.redirect:
+                    self.send_header("Location", "/unapproved-sink")
                 if test.diagnostic_header:
                     self.send_header("X-Diagnostic", "HTTP/1.1 200 OK")
                 if status == 503:
                     self.send_header("Retry-After", test.retry_after)
                 self.send_header("Content-Length", str(len(response)))
                 self.end_headers()
-                self.wfile.write(response)
+                try:
+                    self.wfile.write(response)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -115,6 +129,111 @@ class BashRobustnessTests(unittest.TestCase):
         result = self.run_collector()
         self.assertEqual(result.returncode, 0, self.output)
         self.assert_payloads([("payload:" + name).encode() for name in names])
+
+    def test_newline_root_does_not_scan_its_sibling(self):
+        selected = self.root / "selected\n"
+        selected.mkdir()
+        sibling = self.root / "selected"
+        sibling.mkdir()
+        (selected / "approved.txt").write_bytes(b"approved")
+        (sibling / "outside.txt").write_bytes(b"outside")
+        result = self.run_collector(roots=[selected])
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([b"approved"])
+
+    def test_physical_newline_paths_exclude_internal_files_and_log(self):
+        selected = self.root / "selected\n"
+        selected.mkdir()
+        alias = self.root / "alias"
+        alias.symlink_to(selected, target_is_directory=True)
+        (selected / "approved.txt").write_bytes(b"approved")
+        result = self.run_collector(roots=[alias], log_file=alias / "log\n",
+                                    env={"TMPDIR": str(alias), "CDPATH": str(self.root)})
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([b"approved"])
+
+    def test_only_complete_object_string_marker_ids_are_used(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        invalid = [b'{"metadata":{"scan_id":"nested"}}',
+                   b'[{"scan_id":"array"}]', b'{"scan_id":123}',
+                   b'{"scan_id":"unterminated}', b'{"scan_id":"ok"}garbage',
+                   b'{"scan_id":"one","scan_id":"two"}',
+                   b'{"scan_id":"bad\\q"}', b'{"scan_id":"bad\\u0000"}',
+                   b'{"scan_id":"bad\\ud800"}', b'{"scan_id":null}',
+                   b'{"scan_id":"bad\xff"}', b'{"scan_id":"bad\xc0\x80"}']
+        for body in invalid:
+            with self.subTest(body=body):
+                self.marker_response = body
+                self.requests.clear()
+                result = self.run_collector()
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertFalse(any("scan_id=" in p for p in self.requests), self.requests)
+
+    def test_marker_unicode_escapes_are_preserved(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        scan_id = 'scan-\u00e4-\U0001f600-"-\\'
+        self.marker_response = json.dumps({"scan_id": scan_id, "metadata": [True, None, 1.2]}).encode()
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 0, self.output)
+        query = next(p for p in self.requests if p.startswith("/api/check"))
+        self.assertEqual(parse_qs(urlsplit(query).query)["scan_id"], [scan_id])
+        self.assertEqual(self.markers[-1]["scan_id"], scan_id)
+
+    def test_unsupported_marker_body_never_supplies_scan_id(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        self.marker_response = b'{"scan_id":"untrusted-error-id"}'
+        for status in [404, 501]:
+            with self.subTest(status=status):
+                self.marker_status = self.end_status = status
+                self.requests.clear()
+                result = self.run_collector()
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertFalse(any("scan_id=" in p for p in self.requests), self.requests)
+
+    def test_curlrc_cannot_enable_redirects(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        (self.root / ".curlrc").write_text("location\n")
+        self.redirect = True
+        self.upload_statuses = [307]
+        result = self.run_collector(env={"CURL_HOME": str(self.root)})
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertNotIn("/unapproved-sink", self.requests)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl required for local TLS fixture")
+    def test_curlrc_cannot_disable_tls_verification(self):
+        key, cert = self.root / "key.pem", self.root / "cert.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(key), "-out", str(cert), "-days", "1",
+                        "-subj", "/CN=localhost"], check=True, capture_output=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        (self.root / ".curlrc").write_text("insecure\n")
+        result = self.run_collector("--ssl", env={"CURL_HOME": str(self.root)})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertEqual(self.requests, [])
+
+    def test_large_responses_are_rejected_for_curl_and_wget(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        for name, env in transports:
+            for size, status in [(1048576, 200), (1048577, 200), (4 * 1048576, 500)]:
+                with self.subTest(transport=name, size=size, status=status):
+                    self.upload_response = b"x" * size
+                    self.upload_statuses = [status]
+                    result = self.run_collector(env=env)
+                    self.assertEqual(result.returncode, 0 if size == 1048576 else 1, self.output)
+                    if size > 1048576:
+                        self.assertIn("submitted=0", self.output)
+                    self.assertLess(len(self.output), 20000)
+            self.marker_response = b"x" * 1048577
+            result = self.run_collector(env=env)
+            self.assertEqual(result.returncode, 2, self.output)
+            self.marker_response = b'{}'
 
     def test_internal_files_and_log_are_not_uploaded(self):
         samples = self.root / "self [scan]"
