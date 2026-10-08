@@ -1,4 +1,3 @@
-//go:build aix || android || dragonfly || illumos || linux || solaris || openbsd
 // +build aix android dragonfly illumos linux solaris openbsd
 
 package main

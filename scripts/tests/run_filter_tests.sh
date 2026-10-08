@@ -178,6 +178,14 @@ log_lines() {
     wc -l < "$STUB_LOG" 2>/dev/null | tr -d ' '
 }
 
+require_stub_log() {
+    if [ ! -f "$STUB_LOG" ] || [ ! -r "$STUB_LOG" ]; then
+        echo "ERROR: Stub audit log is missing or unreadable: $STUB_LOG" >&2
+        echo "Start the local stub with -log-file pointing to this path." >&2
+        return 1
+    fi
+}
+
 assert_uploaded() {
     local start="$1" filename="$2" label="$3"
     if get_uploaded_files "$start" | grep -qF "$filename"; then
@@ -274,10 +282,12 @@ collector_available() {
 }
 
 # Ensure stub server is running
-if ! curl -s "http://${STUB_HOST}:${STUB_PORT}/api/status" >/dev/null 2>&1; then
+if ! curl -fsS --connect-timeout 5 --max-time 10 "http://${STUB_HOST}:${STUB_PORT}/api/status" >/dev/null 2>&1; then
     echo "ERROR: Stub server not running on ${STUB_HOST}:${STUB_PORT}"
     exit 1
 fi
+
+require_stub_log
 
 if [ ! -d "$FIXTURES_DIR" ]; then
     echo "ERROR: Fixtures directory not found: $FIXTURES_DIR"
