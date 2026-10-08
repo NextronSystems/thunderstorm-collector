@@ -6,9 +6,9 @@ help:
 	@echo "============================================="
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make release         - Build binary packages and script package"
+	@echo "  make release         - Build binary packages and individual script assets"
 	@echo "  make release-binary  - Build binary packages"
-	@echo "  make release-scripts - Build script package"
+	@echo "  make release-scripts - Copy individual script assets"
 	@echo "  make clean           - Remove all release artifacts"
 	@echo "  make test            - Run tests"
 	@echo "  make help            - Show this help menu"
@@ -18,7 +18,7 @@ help:
 # Define version if not provided by the environment
 VERSION ?= $(shell git describe --tags --always --dirty)
 VERSION := ${VERSION:refs/tags/%=%}
-RELEASE_VERSION := ${VERSION:v%=%}
+RELEASE_VERSION := $(patsubst v%,%,$(VERSION:refs/tags/%=%))
 
 .PHONY: release
 release: release-binary release-scripts
@@ -31,7 +31,8 @@ release-binary:
 	@$(MAKE) --no-print-directory -C go release
 	@for f in go/dist/thunderstorm-collector*; do \
 		suffix=$${f##*thunderstorm-collector-}; \
-		cp "$$f" "release/thunderstorm-collector-${RELEASE_VERSION}-$${suffix}"; done
+		cp "$$f" "release/thunderstorm-collector-${RELEASE_VERSION}-$${suffix}" || exit 1; done
+	@cp go/config.yml "release/config-${RELEASE_VERSION}.yml"
 
 .PHONY: release-scripts
 release-scripts:
@@ -40,17 +41,15 @@ release-scripts:
 	@find scripts \
 		-path 'scripts/tests' -prune -o \
 		-path '*/__pycache__' -prune -o \
-		-type f -name 'thunderstorm-collector*' -print | \
+		-type f \( -name 'thunderstorm-collector*.sh' -o \
+			-name 'thunderstorm-collector*.py' -o -name 'thunderstorm-collector*.pl' -o \
+			-name 'thunderstorm-collector*.ps1' -o -name 'thunderstorm-collector*.bat' \) -print | \
 	while IFS= read -r f; do \
 		base=$$(basename "$$f"); \
 		ext=$${base##*.}; \
-		if [ "$$ext" = "$$base" ]; then \
-			target="release/$${base}-${RELEASE_VERSION}"; \
-		else \
-			stem=$${base%.$$ext}; \
-			target="release/$${stem}-${RELEASE_VERSION}.$$ext"; \
-		fi; \
-		cp "$$f" "$$target"; \
+		stem=$${base%.$$ext}; \
+		target="release/$${stem}-${RELEASE_VERSION}.$$ext"; \
+		cp "$$f" "$$target" || exit 1; \
 	done
 
 .PHONY: clean

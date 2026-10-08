@@ -20,6 +20,8 @@ Review and merge the PRs in this order:
 
 PRs #43 and #49 are prerequisite infrastructure PRs. The actual collector behavior acceptance happens in PRs #44 through #48.
 
+After #49, the collector PRs are independent; their order in the table is not a dependency order. Retarget each dependent PR to `master` once its prerequisite PR has merged. Do not merge collector changes into the harness or documentation branches.
+
 ## Local Setup
 
 Fetch all PR branches:
@@ -118,6 +120,29 @@ For each collector PR, record whether these points pass:
 - Limitations documented in the collector README match observed behavior.
 
 ## Manual Test Preparation
+
+### Collector-Specific Feature Scope
+
+The general checklist is not a uniform feature contract. Before changing a collector, agree on its supported features and accepted limitations using that collector's README and intended runtime.
+
+Use these statuses for each feature or test:
+
+| Status | Meaning |
+|---|---|
+| PASS | Supported feature verified on the recorded runtime. |
+| FAIL | Supported feature does not behave as specified; fix it before merging. |
+| NOT SUPPORTED | An intentional, reviewed limitation documented in the collector README. |
+| NOT TESTED | Missing runtime, service access, or evidence; this is not a pass. |
+
+Record Python 2 separately from Python 3, and PowerShell 2 separately from PowerShell 3+. A successful PowerShell 2 script run under a modern PowerShell does not prove compatibility with the actual PowerShell 2 runtime. Likewise, dash is not a substitute for acceptance on the intended BusyBox/ash system.
+
+CI's shared smoke-test interface probes only decide which scripts can use that harness during the rollout. They do not define all required collector features. Python 2 is not provisioned in the default CI runner and requires separate legacy-host validation; an explicit Python 2 selection without that runtime must fail rather than silently skip.
+
+### Test Harness Prerequisites
+
+The integration harness in `tests/` requires Bash 4.3 or newer, GNU-compatible file utilities, and the mock server/API proxy. These are test-host requirements, not new dependencies of the collectors. On macOS, ensure the newer Bash and GNU utilities are on `PATH`; the system Bash is too old for this harness.
+
+### Acceptance Record
 
 Use one acceptance record per collector PR. Do not mix results from different collectors under the same source identifier.
 
