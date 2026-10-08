@@ -105,4 +105,9 @@ When a version tag is pushed (e.g., `v1.2.3`), GitHub Actions automatically:
 
 ## Craft Your Own Collector
 
+Use the [collector construction guide](scripts/COLLECTOR_CONSTRUCTION_GUIDE.md)
+to build a standalone collector in another language or for an unusual platform.
+It covers the HTTP upload contract, optional features, security/resource limits,
+tests and a reusable coding-agent assignment.
+
 Interested in creating a unique collector? A Python module, `thunderstormAPI`, is available in [this](https://github.com/NextronSystems/thunderstormAPI) repository for your use.
