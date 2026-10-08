@@ -142,6 +142,11 @@ responses exceeding a declared cap. The focused replacements commonly use a
 containing `HTTP/1.1 200` is not a status line. Do not follow 3xx redirects
 implicitly: they may forward samples to another host or replay a POST as a GET.
 
+Chunked responses must reach a complete terminal zero chunk and trailer section.
+EOF during chunk data or before the final trailer delimiter is a transport
+failure, even if an older HTTP library returns it as a normal end-of-body. Test
+valid chunks and trailers as well as truncation over both HTTP and HTTPS.
+
 The async service returns a sample job identifier, for example:
 
 ```json
@@ -192,8 +197,14 @@ A successful response without a usable scan ID can continue without one, with
 an explicit diagnostic. A regex matching arbitrary JSON text is not a safe parser;
 if the runtime cannot parse this response reliably, omit/disable this capability.
 
+Validate the root shape before any runtime feature that unwraps single-element
+arrays. Preserve the string type: JSON `123` is not the string `"123"`. Decode
+escapes without replacing identifier characters; reject unsupported encodings
+instead of silently changing the ID. The shell profiles reject duplicate IDs,
+control characters, IDs over 256 bytes, and JSON deeper than 32 levels.
+
 HTTP 404/501 means markers are unsupported: continue uploads without inventing a
-scan ID. Other begin transport/HTTP failures must not silently look successful.
+scan ID, even if that error body contains a plausible `scan_id` field. Other begin transport/HTTP failures must not silently look successful.
 The replacement marker profiles try begin twice with a two-second pause, then
 fail before uploading. Document any intentionally different policy.
 
@@ -250,6 +261,10 @@ Do not follow discovered symlinks/junctions/reparse entries or upload sockets,
 FIFOs and devices. Explicit root-link resolution needs its own documented rule.
 Use literal path APIs, not wildcard expansion. Newline/delimiter filenames must
 either work or fail visibly without being split into additional paths.
+Apply that rule after resolving explicit root symlinks too. Shell command
+substitution strips trailing newlines; plain `root=$(cd ... && pwd)` can therefore
+select a different existing sibling. Preserve path bytes or reject them without
+scanning the altered path, including workspace and log-exclusion paths.
 
 Where feasible, read a bounded snapshot before opening a network connection,
 check regular-file identity/size/time before and after reading, and retry the
@@ -284,6 +299,14 @@ sending data. Close response streams and request resources on success AND failur
 test unreachable endpoints and aborted requests for runtime-specific deadlocks.
 Use a separate bounded test watchdog even if the collector has its own limits.
 
+Enforce response limits while receiving, not only after reading the entire body
+into RAM or disk. Include headers, error bodies and diagnostics in the storage
+budget. Bash/ash isolate each HTTP process under a file-size limit, then apply
+their logical 1 MiB response cap before parsing; the physical per-output-file
+cap is at most 2 MiB across their supported shell limit units. Netcat includes
+headers in its 1 MiB cap. Do not accidentally apply a response cap to legitimate
+multipart sample spooling, and bound error-body logging separately.
+
 A lost response can follow a successful server-side submission. Retrying then
 can create duplicate samples. Do not promise exactly-once delivery without an
 actual idempotency protocol. An HTTP error or stub audit event alone does not
@@ -310,6 +333,10 @@ Windows CALL/delayed expansion and `%...%` process expansion require particular
 care. Old curl builds differ in response limiting: unknown-length enforcement
 for `--max-filesize` requires 8.4+, which is why the Batch profile requires it.
 See the [official curl documentation](https://curl.se/docs/manpage.html#--max-filesize).
+For curl, disabling automatic configuration must be the first argument. For
+GNU wget, use a version that supports disabling both user and system startup
+configuration. Test hostile temporary tool settings that request insecure TLS
+or redirect following; neither may override the collector profile silently.
 
 ## 6. Define Operator Visible Outcomes
 
@@ -342,7 +369,7 @@ shared production service. Repeat target-dependent tests on the actual runtime.
 |---|---|
 | Text, NUL/binary, empty, nested | Every eligible payload arrives unchanged; compare count, size and SHA-256, not just one upload |
 | Spaces, Unicode, quote, comma, semicolon, percent, exclamation | No shell expansion/header injection; bytes unchanged; unsupported names fail visibly |
-| Literal-newline paths | Correct literal handling OR documented refusal; never reinterpret a name as two files |
+| Literal-newline paths and symlink roots resolving to them | Correct literal handling OR documented refusal; never reinterpret a name or scan its newline-stripped sibling |
 | Exact size and plus one | Exact limit uploaded, plus one skipped; verify KiB/MiB/byte conversion |
 | Recent, old, age zero | Only intended mtime cutoff applies; zero includes both |
 | Repeated roots, mixed valid/missing, all missing | Root-option semantics hold; readable work continues; missing work causes nonzero status |
@@ -355,11 +382,12 @@ shared production service. Repeat target-dependent tests on the actual runtime.
 | Closed local port | Clear nonzero result within a watchdog; no deadlock/unbounded retries |
 | 503 then success; permanent 503 | Correct attempt count/backoff, recovery or bounded failure; include malformed/huge Retry-After |
 | 3xx, 4xx/5xx, misleading header text | Not counted as success; no unintended redirect or status-header confusion |
-| Truncated 2xx and oversized response | Nonzero failure even when a 2xx status was received |
+| Truncated Content-Length/chunked 2xx, incomplete trailers, oversized response | Nonzero failure even with 2xx headers; response storage remains bounded, including errors |
 | Marker 404/501 and other begin failures | Optional endpoint degrades as declared; real handshake failures do not masquerade as success |
-| Marker JSON with null/number/array/lookalike text | No fake scan ID propagated; valid string IDs are safely encoded |
+| Marker JSON with null/number/single-element array/nested lookalike text | No fake scan ID propagated; valid escaped strings are preserved and safely encoded |
 | End 500 after accepted uploads | Nonzero result; accepted uploads remain visible and are not silently retransmitted |
 | Untrusted CA, unrelated CA, correct CA, wrong hostname | Verified failures stay failures; correct CA+hostname succeeds; insecure tested separately if supported |
+| Tool config enabling insecure TLS or redirects | Defaults remain enforced; no upload to an unapproved redirect target |
 | Graceful interruption | Nonzero status, no false normal completion; best-effort marker only if implemented |
 | Actual oldest supported runtime | Execute the same applicable cases, including dependencies and TLS; syntax checks alone are insufficient |
 | Real service completion | Accepted payloads stored/processed, async jobs completed; attribution/detection verified only if observable |
@@ -370,6 +398,9 @@ silently produce a green empty run. Its interface probes are routing, not a
 universal feature contract. Add a new selector intentionally, with tests.
 Pin the stub revision in CI and compile it for the test host. An incompatible
 release binary's Exec format error is not a collector result.
+After launching a local stub, verify that the owned process is still alive as
+well as checking readiness. A different listener on the port is not the spawned
+stub; failed startup must stop before any reset or fixture request reaches it.
 
 Separate deterministic regression tests from real-service acceptance. Stub-only
 `/api/test/...` endpoints must never become collector dependencies. A stub audit
