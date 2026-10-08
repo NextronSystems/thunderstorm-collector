@@ -11,15 +11,26 @@ has not been independently established. Verify your own appliance architecture.
 Automated validation: compilation and ELF/package checks; shared source and HTTP
 submission executed with Go 1.9.7 on a Linux/amd64 test host. This does NOT execute the
 FreeBSD binary or prove operation against a real Thunderstorm service.
-Runtime testing on FreeBSD 8.4: pending.
+External VM validation as of 2026-10-08:
+- FreeBSD 8.4-RELEASE amd64 (r251259), KVM/QEMU: ran without a workaround;
+  dry run selected 253 files from /etc; 253 HTTP uploads, zero errors.
+- FreeBSD 14.3-RELEASE amd64, KVM/QEMU: direct start failed with
+  "runtime: address space conflict"; with per-process ASLR disabled, dry run
+  selected 302 files from 600 discovered and 302 uploads completed with zero errors.
+- Server: Thunderstorm v10, THOR 10.7.32 (build 1cabaee), HTTP port 8082;
+  the report records 555 scanned samples, zero denied requests and zero upload errors.
 Runtime testing on a named NetScaler appliance/firmware: pending.
-External report received 2026-10-08: an Actions-downloaded legacy binary ran on a
-FreeBSD 14.3 amd64 VM with ASLR disabled for that invocation using proccontrol.
-Direct execution failed with "runtime: address space conflict". The report
-recorded working help/dry-run and 302 uploads to Thunderstorm v10 with zero errors.
-The Actions run, archive name, SHA-256 value and source commit are not yet recorded;
-this report does not validate this exact artifact, FreeBSD 8.4 or any firmware.
-For the full report and the per-invocation VM workaround, see the canonical record:
+The VM report does not establish appliance/firmware or HTTPS/TLS compatibility.
+
+Test report:
+https://github.com/NextronSystems/thunderstorm-collector/pull/51#issuecomment-6056935463
+Tested CI run: 37743060852; artifact netscaler-freebsd8, ID 11534377782.
+Tested source commit: ed70dd980d4e4132e319f15090a58f927cd85035 (PR test merge).
+Tested executable SHA-256:
+3cf8abd09c964095f795dc8f680d646c24e91541e01da605d94c5bc803dee3d4
+This evidence identifies one artifact; subsequent builds are not automatically
+VM-tested. BUILD-INFO.txt runtime fields describe CI validation at build time.
+For full artifact checksums, VM details and the per-invocation ASLR workaround:
 https://github.com/NextronSystems/thunderstorm-collector/blob/master/go/README.md#citrix-netscaler-and-freebsd-84
 
 Go 1.9.7 is unsupported. The shipped runtime and standard library, including TLS

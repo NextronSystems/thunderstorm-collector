@@ -28,7 +28,7 @@ def prepare(directory, version, config):
     (directory / "release-notes.md").write_text(
         "Collector selection:\n\n"
         "- **VMware ESXi:** use the Python collector. Nextron reports historical success; exact tested firmware/revisions are not recorded. Check the Python requirements and [script instructions](" + docs + "/scripts/README.md).\n"
-        "- **Older NetScaler / FreeBSD 8.4 amd64:** use `" + required.name + "`, built with exactly Go 1.9.7. Regular FreeBSD packages are not interchangeable. Compilation/package checks and Linux-hosted runtime tests are verified; FreeBSD 8.4 and named appliance/firmware runtime validation remain pending. Read the [compatibility notes](" + docs + "/go/README.md#citrix-netscaler-and-freebsd-84) and packaged BUILD-INFO.txt. Go 1.9.7 is unsupported and lacks later runtime/standard-library security fixes.\n"
+        "- **Older NetScaler / FreeBSD 8.4 amd64:** use `" + required.name + "`, built with exactly Go 1.9.7. Regular FreeBSD packages are not interchangeable. Compilation/package checks and Linux-hosted runtime tests are verified. External tests reported on 2026-10-08 succeeded on FreeBSD 8.4 amd64 without a workaround and FreeBSD 14.3 amd64 with ASLR disabled for the invocation; the compatibility notes identify the tested CI artifact. Named NetScaler appliance/firmware validation remains pending. Read the [compatibility notes](" + docs + "/go/README.md#citrix-netscaler-and-freebsd-84) and packaged BUILD-INFO.txt. Go 1.9.7 is unsupported and lacks later runtime/standard-library security fixes.\n"
         "- **Other NetScaler versions:** verify the actual OS, architecture and collector compatibility before selecting a package.\n\n"
         "Verify downloads against `SHA256SUMS`.\n"
     )
