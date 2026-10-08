@@ -721,7 +721,7 @@ collection_marker() {
     local _marker_attempts=1
     [ "$marker_type" = "begin" ] && _marker_attempts=2
 
-    local _http_code
+    local _http_code _marker_transport
     local _attempt=0
     while [ "$_attempt" -lt "$_marker_attempts" ]; do
         _attempt=$((_attempt + 1))
@@ -730,6 +730,7 @@ collection_marker() {
         : > "$resp_file"
         # Attempt POST — capture HTTP status to detect server-side errors
         if command -v curl >/dev/null 2>&1; then
+            _marker_transport=curl
             run_http curl --disable --noproxy '*' --globoff -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
                 -H "Content-Type: application/json" \
                 -d "$body" \
@@ -737,6 +738,7 @@ collection_marker() {
                 "$marker_url" 2>/dev/null
             _marker_rc=$?
         elif command -v wget >/dev/null 2>&1; then
+            _marker_transport=wget
             run_http wget --no-config --no-proxy -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
                 --header "Content-Type: application/json" \
                 --post-data "$body" \
@@ -756,7 +758,10 @@ collection_marker() {
                 404|501)
                     log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
                     # Wget uses 8 for complete HTTP error responses.
-                    case "$_marker_rc" in 0|8) return 0 ;; esac
+                    if [ "$_marker_rc" -eq 0 ] ||
+                        { [ "$_marker_transport" = wget ] && [ "$_marker_rc" -eq 8 ]; }; then
+                        return 0
+                    fi
                     ;;
                 *)
                     log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"

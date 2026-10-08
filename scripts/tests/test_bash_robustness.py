@@ -160,7 +160,8 @@ class BashRobustnessTests(unittest.TestCase):
                    b'{"scan_id":"one","scan_id":"two"}',
                    b'{"scan_id":"bad\\q"}', b'{"scan_id":"bad\\u0000"}',
                    b'{"scan_id":"bad\\ud800"}', b'{"scan_id":null}',
-                   b'{"scan_id":"bad\xff"}', b'{"scan_id":"bad\xc0\x80"}']
+                   b'{"scan_id":"bad\xff"}', b'{"scan_id":"bad\xc0\x80"}',
+                   b'{"scan_id":"bad\x00suffix"}']
         for body in invalid:
             with self.subTest(body=body):
                 self.marker_response = body
@@ -395,9 +396,9 @@ case "$endpoint" in
         [ "$FAIL_MARKER" = 1 ] || exec "$CURL_REAL" "$@"
         ;;
 esac
-printf 'HTTP/1.1 200 OK\\r\\n\\r\\n' > "$header"
+printf 'HTTP/1.1 %s Status\\r\\n\\r\\n' "${HTTP_STATUS:-200}" > "$header"
 [ -z "$output" ] || printf '{}' > "$output"
-exit 18
+exit "${CURL_EXIT:-18}"
 ''')
 
     def test_2xx_upload_with_failed_transport_is_not_success(self):
@@ -411,6 +412,12 @@ exit 18
     def test_2xx_begin_marker_with_failed_transport_is_fatal(self):
         result = self.run_collector(env={"PATH": self.partial_curl_path(),
                                          "CURL_REAL": shutil.which("curl"), "FAIL_MARKER": "1"})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("begin marker failed after retry", self.output)
+
+    def test_404_begin_with_curl_transport_error_is_fatal(self):
+        result = self.run_collector(env={"PATH": self.partial_curl_path(),
+                                         "FAIL_MARKER": "1", "HTTP_STATUS": "404", "CURL_EXIT": "8"})
         self.assertEqual(result.returncode, 2, self.output)
         self.assertIn("begin marker failed after retry", self.output)
 
