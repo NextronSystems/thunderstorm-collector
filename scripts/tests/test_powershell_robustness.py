@@ -265,14 +265,23 @@ class PowerShellRobustness(unittest.TestCase):
 
     def test_non_object_marker_json_does_not_crash(self):
         self.file()
-        self.marker_body = []
-        self.assertEqual(self.run_collector(), 0, self.output)
+        for body in [[], [{"scan_id": "wrong-array-id"}],
+                     [[{"scan_id": "wrong-nested-id"}]],
+                     {"metadata": {"scan_id": "wrong-nested-id"}}, "string", 123, None]:
+            with self.subTest(body=body):
+                self.marker_body = body
+                self.paths = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
 
     def test_non_string_scan_id_is_not_used(self):
         self.file()
-        self.marker_body = {"scan_id": {"invalid": True}}
-        self.assertEqual(self.run_collector(), 0, self.output)
-        self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+        for value in [{"invalid": True}, 123, 0, True, None, ["nested"]]:
+            with self.subTest(value=value):
+                self.marker_body = {"scan_id": value}
+                self.paths = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
 
     def test_incomplete_2xx_upload_is_failure(self):
         self.file()

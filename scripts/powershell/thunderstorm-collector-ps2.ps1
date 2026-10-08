@@ -222,6 +222,9 @@ function Escape-Json([string]$text) {
     return $result.ToString()
 }
 function Read-ScanId([string]$body) {
+    # ConvertFrom-Json can unwrap a one-element array into a single object.
+    # Check the root shape before parsing, not after pipeline enumeration.
+    if ($body -notmatch '^\s*\{') { return "" }
     try {
         if (Get-Command ConvertFrom-Json -ErrorAction SilentlyContinue) {
             $object = ConvertFrom-Json -InputObject $body

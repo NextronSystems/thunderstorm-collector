@@ -15,6 +15,7 @@ same reviewed core and a drift regression test. Neither needs curl or a Go binar
 | Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
 | Upload | Binary-safe multipart file; empty files included. Async default, Sync optional; does not poll analysis results. |
 | Collection markers | Optional /api/collection. Only 404/501 disable markers; other begin failures are fatal. Failed end markers cause nonzero exit. |
+| Marker IDs | Only top-level JSON object string IDs are used. Arrays, including single-element arrays, nested-only IDs and non-string IDs are ignored. |
 | Legacy JSON | PS2 needs .NET 3.5 System.Web.Extensions for marker parsing; if absent, markers are explicitly disabled, not parsed with regex. Uploads still work. |
 | TLS | OS certificate AND hostname verification by default. TLS 1.2 enabled where the OS/.NET supports it; old systems may not connect to modern servers. |
 | Custom TLS | CACert (one PEM/DER public root) and Insecure need per-request callbacks, available on .NET 4.5+. Older CLR rejects these options; use OS trust instead. No global trust installation. |
