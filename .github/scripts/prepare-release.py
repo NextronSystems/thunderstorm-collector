@@ -13,9 +13,11 @@ def prepare(directory, version, config):
     version = version.removeprefix("refs/tags/")
     if re.match(r"v[0-9]", version):
         version = version[1:]
-    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version), "Invalid release version"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version):
+        raise ValueError("Invalid release version")
     required = directory / ("thunderstorm-collector-" + version + "-amd64-freebsd8-netscaler.tar.gz")
-    assert required.is_file(), "Missing required NetScaler legacy release package: " + str(required)
+    if not required.is_file():
+        raise ValueError("Missing required NetScaler legacy release package: " + str(required))
     runpy.run_path(str(Path(__file__).with_name("verify-legacy-package.py")))["verify"](required, config)
     assets = sorted(p for p in directory.iterdir() if p.is_file() and p.name not in ("SHA256SUMS", "release-notes.md"))
     manifest = "".join(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n" for p in assets)
@@ -26,7 +28,7 @@ def prepare(directory, version, config):
     (directory / "release-notes.md").write_text(
         "Collector selection:\n\n"
         "- **VMware ESXi:** use the Python collector. Nextron reports historical success; exact tested firmware/revisions are not recorded. Check the Python requirements and [script instructions](" + docs + "/scripts/README.md).\n"
-        "- **Older NetScaler / FreeBSD 8.4 amd64:** use `" + required.name + "`, built with exactly Go 1.9.7. Regular FreeBSD packages are not interchangeable. Compilation/package checks and Linux-hosted runtime tests are verified; FreeBSD 8.4 and named appliance/firmware runtime validation remain pending. Read the [compatibility/build notes](" + docs + "/go/legacy/README.md) and packaged BUILD-INFO.txt. Go 1.9.7 is unsupported and lacks later runtime/standard-library security fixes.\n"
+        "- **Older NetScaler / FreeBSD 8.4 amd64:** use `" + required.name + "`, built with exactly Go 1.9.7. Regular FreeBSD packages are not interchangeable. Compilation/package checks and Linux-hosted runtime tests are verified; FreeBSD 8.4 and named appliance/firmware runtime validation remain pending. Read the [compatibility notes](" + docs + "/go/README.md#citrix-netscaler-and-freebsd-84) and packaged BUILD-INFO.txt. Go 1.9.7 is unsupported and lacks later runtime/standard-library security fixes.\n"
         "- **Other NetScaler versions:** verify the actual OS, architecture and collector compatibility before selecting a package.\n\n"
         "Verify downloads against `SHA256SUMS`.\n"
     )
