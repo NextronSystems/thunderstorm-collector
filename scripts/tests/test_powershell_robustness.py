@@ -338,19 +338,66 @@ class PowerShellRobustness(unittest.TestCase):
         leaf_key = os.path.join(self.root, "leaf-key.pem")
         csr = os.path.join(self.root, "leaf.csr")
         extensions = os.path.join(self.root, "extensions.cnf")
+        database = os.path.join(self.root, "index.txt")
+        crl_config = os.path.join(self.root, "crl.cnf")
+        crl_pem = os.path.join(self.root, "ca.crl.pem")
+        crl_der = os.path.join(self.root, "ca.crl.der")
+        crl_body = [b""]
+
+        class CRLHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if self.path != "/ca.crl":
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pkix-crl")
+                self.send_header("Content-Length", str(len(crl_body[0])))
+                self.end_headers()
+                self.wfile.write(crl_body[0])
+
+        crl_server = Server(("127.0.0.1", 0), CRLHandler)
+        crl_server.errors = []
+        self.addCleanup(crl_server.server_close)
+        with open(database, "w"):
+            pass
+        config_path = lambda value: '"' + value.replace("\\", "/") + '"'
+        with open(crl_config, "w") as stream:
+            stream.write("[ca]\ndefault_ca=issuer\n[issuer]\n" +
+                         "database=" + config_path(database) + "\n" +
+                         "certificate=" + config_path(ca) + "\n" +
+                         "private_key=" + config_path(key) + "\n" +
+                         "default_md=sha256\ndefault_crl_days=1\n")
         with open(extensions, "w") as stream:
             stream.write("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
-                         "extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n")
+                         "extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n" +
+                         "crlDistributionPoints=URI:http://127.0.0.1:" + str(crl_server.server_port) + "/ca.crl\n")
         commands = [
             [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=TestRoot",
              "-keyout", key, "-out", ca, "-addext", "basicConstraints=critical,CA:TRUE"],
             [openssl, "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", leaf_key, "-out", csr],
             [openssl, "x509", "-req", "-in", csr, "-CA", ca, "-CAkey", key, "-CAcreateserial", "-days", "1",
              "-out", leaf, "-extfile", extensions],
+            [openssl, "ca", "-gencrl", "-config", crl_config, "-out", crl_pem],
+            [openssl, "crl", "-in", crl_pem, "-outform", "DER", "-out", crl_der],
         ]
         for command in commands:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout)
+        with open(crl_der, "rb") as stream:
+            crl_body[0] = stream.read()
+        # Schannel keeps revocation checks enabled, so supply a real signed CRL.
+        crl_thread = threading.Thread(target=crl_server.serve_forever, daemon=True)
+        crl_thread.start()
+
+        def stop_crl_server():
+            crl_server.shutdown()
+            crl_thread.join(5)
+            self.assertEqual(crl_server.errors, [])
+
+        self.addCleanup(stop_crl_server)
         self.server.shutdown()
         self.thread.join(5)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

@@ -138,6 +138,7 @@ function upload(file) {
                 stats.submitted++; return;
             }
             log("[ERROR] Upload " + file.Path + ": HTTP " + status + " curl " + result.code);
+            if (result.error) log("[ERROR] " + result.error.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1024));
             var delay = Math.min(60, Math.pow(2, attempt - 1));
             if (status === "503") {
                 delay = 2;
