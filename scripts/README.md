@@ -58,7 +58,7 @@ Use `THUNDERSTORM_TEST_REQUIRE_MATCH=1` when CI or manual test runs must fail if
 
 ## Building a Collector for Another Platform
 
-The [collector construction guide](COLLECTOR_CONSTRUCTION_GUIDE.md) describes the
+The [collector construction guide](../docs/COLLECTOR_CONSTRUCTION_GUIDE.md) describes the
 upload protocol, optional capability profiles, safety requirements and acceptance
 tests without prescribing a language-specific implementation. It includes a
 reusable assignment for a coding agent targeting a new language, OS or architecture.

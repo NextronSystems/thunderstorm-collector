@@ -53,12 +53,12 @@ collector's own README at the exact revision being deployed.
 
 | Profile | Intended target and important differences |
 |---|---|
-| [Bash](bash/README.md) | Bash 3.2+, curl or GNU wget. All extensions; KiB size units. Optional markers. Wget uses idle-read limits, not a total deadline. HTTP 503 has a separate bounded busy-response budget. |
-| [POSIX sh / ash](ash/README.md) | Minimal Unix/BusyBox. All extensions; KiB units. curl/GNU wget preferred. nc plus timeout is HTTP-only, accepts only a restricted complete Content-Length response, and omits markers. BusyBox wget alone is refused. Literal-newline paths are unsupported and reported, never split into other paths. |
-| [Python 3 and 2](python/README.md) | Standalone standard-library scripts, Python 3.4+ or 2.7. KiB units, optional markers, bounded in-memory snapshots. Python before 2.7.9 refuses verified HTTPS. Socket timeouts are idle-I/O limits. |
-| [Perl](perl/README.md) | Perl 5.8.1 syntax floor, LWP 6+, JSON::PP and Encode; additional HTTPS modules. KiB units; optional markers. Signal handling may be deferred until network I/O returns. The syntax floor is not certification of every old module/SSL combination. |
-| [PowerShell 3+ and 2](powershell/README.md) | Separate standalone files, full .NET/Add-Type. MiB units; extension allowlist by default. PS2 marker parsing needs System.Web.Extensions or markers are explicitly disabled. Custom CA/insecure options require a per-request callback on .NET 4.5+; old CLR fails closed. |
-| [Windows Batch](batch/README.md) | Single cmd/JScript hybrid, enabled WSH, FileSystemObject, ADODB.Stream and trusted curl 8.4+. Size units are bytes; roots required. No markers, resume, polling or insecure TLS. ADODB reading is not hard memory-bounded against a growing file. |
+| [Bash](../scripts/bash/README.md) | Bash 3.2+, curl or GNU wget. All extensions; KiB size units. Optional markers. Wget uses idle-read limits, not a total deadline. HTTP 503 has a separate bounded busy-response budget. |
+| [POSIX sh / ash](../scripts/ash/README.md) | Minimal Unix/BusyBox. All extensions; KiB units. curl/GNU wget preferred. nc plus timeout is HTTP-only, accepts only a restricted complete Content-Length response, and omits markers. BusyBox wget alone is refused. Literal-newline paths are unsupported and reported, never split into other paths. |
+| [Python 3 and 2](../scripts/python/README.md) | Standalone standard-library scripts, Python 3.4+ or 2.7. KiB units, optional markers, bounded in-memory snapshots. Python before 2.7.9 refuses verified HTTPS. Socket timeouts are idle-I/O limits. |
+| [Perl](../scripts/perl/README.md) | Perl 5.8.1 syntax floor, LWP 6+, JSON::PP and Encode; additional HTTPS modules. KiB units; optional markers. Signal handling may be deferred until network I/O returns. The syntax floor is not certification of every old module/SSL combination. |
+| [PowerShell 3+ and 2](../scripts/powershell/README.md) | Separate standalone files, full .NET/Add-Type. MiB units; extension allowlist by default. PS2 marker parsing needs System.Web.Extensions or markers are explicitly disabled. Custom CA/insecure options require a per-request callback on .NET 4.5+; old CLR fails closed. |
+| [Windows Batch](../scripts/batch/README.md) | Single cmd/JScript hybrid, enabled WSH, FileSystemObject, ADODB.Stream and trusted curl 8.4+. Size units are bytes; roots required. No markers, resume, polling or insecure TLS. ADODB reading is not hard memory-bounded against a growing file. |
 
 Python 2 means an actual Python 2 run, not a Python 3 run of a similar file.
 PowerShell 5.1/7 execution of the PS2 file is not an actual PowerShell 2 test.
@@ -430,4 +430,4 @@ target acceptance. Check the final PR's exact head, not a previous green commit.
 List skipped/unavailable environments and security/resource limits. Inspect staged
 filenames explicitly: no licenses, credentials, generated private keys, copied
 samples, local binaries or raw THOR logs belong in the commit. Human acceptance
-using the [manual test guide](MANUAL_TESTING_GUIDE.md) remains the merge gate.
+using the [manual test guide](../scripts/MANUAL_TESTING_GUIDE.md) remains the merge gate.
