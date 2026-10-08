@@ -720,16 +720,15 @@ Recommended merge sequence after acceptance remains:
 
 If a collector fails manual acceptance, keep its PR open and merge only the PRs that passed.
 
-## Final Follow-up: Collector Construction Guide
+## Collector Construction Guide
 
-After the individual collector reviews and accepted capability profiles, prepare a separate documentation-only PR for coding agents building collectors in new languages, runtime versions, operating systems or architectures. This is a planned deliverable, not an already verified cross-platform specification.
+The separate documentation-only [PR #52](https://github.com/NextronSystems/thunderstorm-collector/pull/52)
+provides the collector construction guide for coding agents targeting other
+languages, runtime versions, operating systems or architectures. It covers the
+verified upload protocol, selectors, failure/security/resource semantics, optional
+capability profiles, acceptance matrix and a reusable agent assignment.
 
-The guide must describe the verified protocol rather than copy implementation quirks:
-
-- HTTP endpoints, query encoding, multipart field/header/body bytes, response interpretation, and the difference between async acceptance and completed analysis.
-- File selectors and exact size/age boundaries, directory scope, symlinks and best-effort exclusions.
-- Retries, back-pressure, timeouts, partial failures, exit/status reporting, TLS and temporary-file ownership.
-- A safe core plus explicit optional capability profiles; constrained runtimes must declare and fail visibly on unsupported functionality instead of silently corrupting data.
-- Reproducible synthetic fixtures and expected outcomes against both the stub and real THOR, with platform/runtime evidence and remaining uncertainties.
-
-Do not make optional collection markers or one collector's complete feature set mandatory for every platform. Clearly distinguish real-backend observations, stub assumptions, accepted limitations and untested behavior. Include an agent checklist to establish the target platform/dependencies, choose a capability profile, implement it and prove it with the acceptance tests. No new collector source is required in this final documentation PR.
+It is not another collector implementation and does not certify untested platforms.
+Optional markers and the full feature set of one language remain optional; actual
+target tests and human acceptance are still required. After merging the guide,
+find it at `scripts/COLLECTOR_CONSTRUCTION_GUIDE.md`.
