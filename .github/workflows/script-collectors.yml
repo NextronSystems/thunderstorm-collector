@@ -66,6 +66,7 @@ jobs:
         run: python -B scripts/tests/test_harness.py
 
       - name: Test release asset selection
+        if: hashFiles('scripts/tests/test_release_assets.py') != ''
         run: python -B scripts/tests/test_release_assets.py
 
       - name: Detect Linux collectors
@@ -101,6 +102,28 @@ jobs:
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
         run: bash scripts/tests/run_python_regression_tests.sh
 
+      - name: Python robustness (current runtime)
+        if: hashFiles('scripts/tests/test_python_robustness.py') != ''
+        run: python -B scripts/tests/test_python_robustness.py
+
+      - name: Python robustness (actual Python 2.7)
+        if: hashFiles('scripts/tests/test_python_robustness.py') != ''
+        run: |
+          docker run --rm --user 65534:65534 \
+            -v "$PWD/scripts/python:/work/scripts/python:ro" \
+            -v "$PWD/scripts/tests:/work/scripts/tests:ro" \
+            python:2.7.18-buster@sha256:d8fac68ebdc45b8d66d53f1ed6c1532da81109a8f5532a6ca0c951ed31107d70 \
+            python -B /work/scripts/tests/test_python_robustness.py
+
+      - name: Python robustness (actual minimum Python 3.4)
+        if: hashFiles('scripts/tests/test_python_robustness.py') != ''
+        run: |
+          docker run --rm --user 65534:65534 \
+            -v "$PWD/scripts/python:/work/scripts/python:ro" \
+            -v "$PWD/scripts/tests:/work/scripts/tests:ro" \
+            python:3.4.10-stretch@sha256:7a7e47efdfd6503afcf56a57f981bcc23d54211ad3b3c21cbe4bd597873fa6e1 \
+            python -B /work/scripts/tests/test_python_robustness.py
+
   windows:
     name: Windows script collectors
     runs-on: windows-latest
@@ -127,6 +150,22 @@ jobs:
 
       - name: Test harness safeguards
         run: python -B scripts/tests/test_harness.py
+
+      - name: PowerShell robustness (Windows PowerShell 5.1, not PS2)
+        if: hashFiles('scripts/tests/test_powershell_robustness.py') != ''
+        shell: pwsh
+        env:
+          POWERSHELL_RUNTIME: powershell.exe
+        run: |
+          python -B scripts/tests/test_powershell_robustness.py
+          if ($LASTEXITCODE -ne 0) { throw "Modern PowerShell regression failures" }
+          $env:POWERSHELL_COLLECTOR = Join-Path $PWD 'scripts/powershell/thunderstorm-collector-ps2.ps1'
+          python -B scripts/tests/test_powershell_robustness.py
+          if ($LASTEXITCODE -ne 0) { throw "PS2-compatible script regression failures (5.1 host)" }
+
+      - name: Batch robustness (real cmd, WSH and curl)
+        if: hashFiles('scripts/tests/test_batch_robustness.py') != ''
+        run: python -B scripts/tests/test_batch_robustness.py
 
       - name: Checkout thunderstorm-stub-server
         if: steps.collectors.outputs.count != '0'
