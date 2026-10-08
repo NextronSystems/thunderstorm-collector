@@ -227,8 +227,10 @@ start_stub() {
         > /dev/null 2>&1 &
     STUB_PID=$!
     sleep 2
-    if ! curl -s "$STUB_URL/api/status" > /dev/null; then
-        echo "ERROR: stub failed to start on port $STUB_PORT" >&2
+    if ! kill -0 "$STUB_PID" 2>/dev/null ||
+        ! curl -fsS --connect-timeout 5 --max-time 10 "$STUB_URL/api/status" > /dev/null ||
+        ! kill -0 "$STUB_PID" 2>/dev/null; then
+        echo "ERROR: Stub server failed to start on port $STUB_PORT (possibly already in use)" >&2
         exit 1
     fi
 }
