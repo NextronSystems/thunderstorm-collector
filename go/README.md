@@ -105,17 +105,25 @@ You can find precompiled binaries for numerous platforms in the [releases](https
 
 ### Citrix NetScaler and FreeBSD 8.4
 
-For older Citrix NetScaler appliances based on **FreeBSD 8.4**, use a separate legacy collector built with **Go 1.9.7**, targeting **freebsd/amd64** with `CGO_ENABLED=0`. Confirm that your appliance is 64-bit amd64 before selecting it. The repository records historical use of Go 1.9.7 on FreeBSD 8.4 NetScaler gateways, but does not identify firmware versions or the architecture of those historical deployments. No 386 legacy package is promised without a verified target need.
+For older Citrix NetScaler appliances based on **FreeBSD 8.4**, select the separate **amd64 (64-bit x86)** collector built with **Go 1.9.7** and `CGO_ENABLED=0`. Confirm the appliance's OS and architecture first; regular FreeBSD packages are not interchangeable with this legacy target. Other NetScaler versions need a collector selected using their actual OS, architecture and verified compatibility evidence.
 
-The dedicated package is planned as `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz`, containing the executable, `config.yml`, and compatibility/build information. It is **not yet a published download**. It will be available from the first tagged release containing the legacy build and packaging change; consult that release's assets and checksums. Until then, do not substitute the regular FreeBSD package or assume the historical binary matches today's source.
+**Release availability:** `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` is included starting with the first tagged release containing the legacy packaging workflow. **v1.0.1 and earlier do not contain this dedicated package.** Check the [selected release's assets](https://github.com/NextronSystems/thunderstorm-collector/releases): if the package is absent, that release does not provide the legacy build. This guidance does not imply that a containing release has already been published.
 
-**Testing status:** the current source and pinned vendored dependencies have been cross-compiled for freebsd/amd64 with Go 1.9.7, and the existing Go tests passed with that compiler on Linux/amd64. The release pipeline is under implementation. These Linux-hosted checks do not execute the FreeBSD binary. Runtime validation on FreeBSD 8.4 and on a named NetScaler appliance/firmware remains pending. The [official Go FreeBSD table](https://go.dev/wiki/FreeBSD) lists Go 1.9.7 as the final version supporting FreeBSD 8-STABLE; this supports the toolchain choice, not a claim that a particular collector binary works on your appliance.
+The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the release checksum and consult its build information for the exact source commit and compiler. Downloading the package is the normal path; for releases containing this build, optional advanced build instructions are in `go/legacy/README.md` in that release's source tree.
 
-For other NetScaler versions, determine the actual OS version and CPU architecture and select a collector using verified compatibility information. Not every NetScaler requires Go 1.9.7, and not every regular FreeBSD binary is suitable. Keep firmware-specific validation evidence in this section rather than assuming universal NetScaler support.
+#### Compatibility evidence and limitations
 
-Go 1.9.7 is an **unsupported legacy toolchain** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its runtime and standard library, including networking and TLS code shipped in the binary, lack subsequent security fixes. An isolated build job does not remove these limitations. Retain certificate verification and server security settings; if secure interoperability fails, use a supported collector/platform rather than weakening them.
+| Evidence level | Status for the dedicated legacy build |
+| --- | --- |
+| Compilation for freebsd/amd64 with Go 1.9.7 | Verified, including static FreeBSD ELF, architecture, executable permissions, package contents and checksums |
+| Shared source/runtime on Linux/amd64 with Go 1.9.7 | Go tests and synthetic HTTP checks verified; these do not execute the FreeBSD binary or test a real Thunderstorm service |
+| Runtime on FreeBSD 8.4 | Pending |
+| Runtime on a named NetScaler appliance/firmware | Pending |
+| Customer-reported success for this package | None recorded |
 
-Downloading the dedicated package is the intended path once published. Building from source with the exact legacy toolchain is an optional advanced path and requires verification of the source, vendored dependencies and resulting binary; the regular [build instructions](#build) use Go 1.10 or later and are not proof of Go 1.9.7 compatibility.
+The repository records historical Go 1.9.7 use on FreeBSD 8.4 NetScaler gateways, but not their firmware, architecture or collector revision. The [official Go FreeBSD table](https://go.dev/wiki/FreeBSD) supports the amd64 toolchain choice; it does not prove appliance compatibility. No 386 legacy package is promised without a verified target need. Record future OS, firmware, architecture, source commit and test results in this section so compatibility evidence has one reference location.
+
+**Go 1.9.7 is unsupported** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its shipped runtime and standard library, including HTTP/TLS code, lack later security fixes. An isolated build job does not remove these limitations. Retain certificate verification and server security settings; if secure interoperability fails, use a supported collector/platform rather than weakening them.
 
 ### Unsupported Versions
 

@@ -20,7 +20,7 @@ Choose the collector for your appliance before selecting a generic OS download.
 | Appliance or target | Recommended collector | Requirements and testing status | Download or instructions |
 | --- | --- | --- | --- |
 | VMware ESXi | Python collector (`scripts/thunderstorm-collector.py`) | Python 3.6+ and standard library only. Nextron has used it successfully on ESXi; exact firmware versions and collector revisions are not recorded. | [ESXi quick start and compatibility notes](scripts/README.md#vmware-esxi-use-the-python-collector) |
-| Older Citrix NetScaler based on FreeBSD 8.4 (amd64) | Separate legacy Go collector built with Go 1.9.7 | A regular FreeBSD package is not interchangeable. The dedicated package is planned; appliance validation remains pending. | [NetScaler package selection and testing status](go/README.md#citrix-netscaler-and-freebsd-84) |
+| Older Citrix NetScaler based on FreeBSD 8.4 (amd64) | Separate legacy Go collector built with Go 1.9.7 | A regular FreeBSD package is not interchangeable. Check release availability; appliance validation remains pending. | [NetScaler package selection and testing status](go/README.md#citrix-netscaler-and-freebsd-84) |
 | Other NetScaler versions | Select for the actual OS version and architecture | Verify compatibility for your appliance; neither Go 1.9.7 nor a generic FreeBSD package is suitable for every NetScaler. | [NetScaler compatibility guidance](go/README.md#citrix-netscaler-and-freebsd-84) |
 
 ## Download Pre-Built Releases
@@ -73,7 +73,7 @@ make help   # Show all available build targets
 From the repository root:
 
 ```bash
-make release           # Build both binary packages and scripts package
+make release           # Build binary packages and versioned script files
 make help              # Show all available targets
 ```
 
