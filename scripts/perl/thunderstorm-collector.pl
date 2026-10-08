@@ -5,6 +5,7 @@ use strict;
 use warnings;
 use Getopt::Long qw(GetOptions Configure);
 use LWP::UserAgent 6;
+use LWP::Protocol::http;
 use HTTP::Request;
 use JSON::PP;
 use Encode qw(encode decode FB_DEFAULT);
@@ -13,6 +14,66 @@ use File::Spec;
 use Fcntl qw(:DEFAULT :mode);
 use Sys::Hostname qw(hostname);
 use POSIX qw(strftime);
+
+# Net::HTTP versions used by older LWP installations can return normal EOF in
+# the middle of a chunk or its trailers. A chunked response ends at the terminal
+# chunk/trailer delimiter, never at socket EOF. Keep LWP parsing and TLS, but
+# surface an early EOF as a transport failure for both socket implementations.
+{
+    package Thunderstorm::Framing;
+    sub record {
+        my ($socket, $code, $message, @headers) = @_;
+        for (my $i = 0; $i < @headers; $i += 2) {
+            ${*$socket}{thunderstorm_chunked} = 1
+                if lc($headers[$i]) eq 'transfer-encoding' && $headers[$i + 1] =~ /\bchunked\b/i;
+        }
+    }
+    sub check_read {
+        my ($socket, $count) = @_;
+        die "Incomplete chunked response\n"
+            if defined $count && $count == 0 && ${*$socket}{thunderstorm_chunked};
+        return $count;
+    }
+
+    package Thunderstorm::HTTP;
+    our @ISA = qw(LWP::Protocol::http);
+    sub socket_class { 'Thunderstorm::HTTP::Socket' }
+
+    package Thunderstorm::HTTP::Socket;
+    our @ISA = qw(LWP::Protocol::http::Socket);
+    sub read_response_headers {
+        my $self = shift;
+        ${*$self}{thunderstorm_chunked} = 0;
+        my @headers = $self->SUPER::read_response_headers(@_);
+        Thunderstorm::Framing::record($self, @headers);
+        return @headers;
+    }
+    sub sysread {
+        my $self = shift;
+        my $count = $self->SUPER::sysread(@_);
+        return Thunderstorm::Framing::check_read($self, $count);
+    }
+
+    package Thunderstorm::HTTPS;
+    our @ISA = qw(LWP::Protocol::https);
+    sub socket_class { 'Thunderstorm::HTTPS::Socket' }
+
+    package Thunderstorm::HTTPS::Socket;
+    our @ISA = qw(LWP::Protocol::https::Socket);
+    sub read_response_headers {
+        my $self = shift;
+        ${*$self}{thunderstorm_chunked} = 0;
+        my @headers = $self->SUPER::read_response_headers(@_);
+        Thunderstorm::Framing::record($self, @headers);
+        return @headers;
+    }
+    sub sysread {
+        my $self = shift;
+        my $count = $self->SUPER::sysread(@_);
+        return Thunderstorm::Framing::check_read($self, $count);
+    }
+}
+LWP::Protocol::implementor('http', 'Thunderstorm::HTTP');
 
 my (@dirs, $server, $source, $ca);
 my ($port, $age, $size, $retries) = (8080, 14, 2048, 3);
@@ -70,6 +131,7 @@ my $ua = LWP::UserAgent->new(timeout => 30, max_size => 1024 * 1024, env_proxy =
 if ($tls) {
     eval { require LWP::Protocol::https; require IO::Socket::SSL; 1 }
         or config_error('HTTPS requires LWP::Protocol::https and IO::Socket::SSL');
+    LWP::Protocol::implementor('https', 'Thunderstorm::HTTPS');
     $ua->ssl_opts(verify_hostname => $insecure ? 0 : 1,
                   SSL_verify_mode => $insecure ? 0 : 1);
     $ua->ssl_opts(SSL_ca_file => $ca) if $ca;
@@ -136,7 +198,8 @@ sub marker {
             if ($kind eq 'begin') {
                 my $data = eval { $json->decode($resp->content) };
                 $scan_id = $data->{scan_id} if ref($data) eq 'HASH' &&
-                    defined $data->{scan_id} && !ref($data->{scan_id});
+                    defined $data->{scan_id} && !ref($data->{scan_id}) &&
+                    $json->encode($data->{scan_id}) =~ /^"/;
             }
             return 1;
         }

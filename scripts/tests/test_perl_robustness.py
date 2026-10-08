@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,8 @@ class PerlRobustness(unittest.TestCase):
         self.begin_status = self.end_status = 200
         self.partial = False
         self.partial_marker = False
+        self.chunked_upload = None
+        self.chunked_marker = None
         self.marker_body = {"scan_id": "scan + & /"}
         self.pause = False
         self.started = threading.Event()
@@ -71,6 +74,7 @@ class PerlRobustness(unittest.TestCase):
                     status = test.begin_status if marker["type"] == "begin" else test.end_status
                     body = json.dumps(test.marker_body).encode("utf-8")
                     partial = test.partial_marker
+                    chunked = test.chunked_marker
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
                     mime = ("Content-Type: " + self.headers["Content-Type"] +
@@ -82,14 +86,18 @@ class PerlRobustness(unittest.TestCase):
                                             for part in message.get_payload())
                     body = b'{}'
                     partial = test.partial
+                    chunked = test.chunked_upload
                     if test.pause:
                         test.started.set()
                         test.release.wait(8)
                 self.send_response(status)
-                self.send_header("Content-Length", str(len(body) + (20 if partial else 0)))
+                if chunked is None:
+                    self.send_header("Content-Length", str(len(body) + (20 if partial else 0)))
+                else:
+                    self.send_header("Transfer-Encoding", "chunked")
                 self.send_header("Retry-After", "0")
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(body if chunked is None else chunked)
                 self.close_connection = True
 
         self.server = Server(("127.0.0.1", 0), Handler)
@@ -246,9 +254,60 @@ class PerlRobustness(unittest.TestCase):
 
     def test_non_string_scan_id_is_not_used(self):
         self.file()
-        self.marker_body = {"scan_id": {"invalid": True}}
-        self.assertEqual(self.run_collector(), 0, self.output)
-        self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+        for value in [{"invalid": True}, 123, 0, 1.5, True, None, ["nested"]]:
+            with self.subTest(value=value):
+                self.marker_body = {"scan_id": value}
+                self.paths = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+
+    def test_numeric_string_scan_id_remains_a_string(self):
+        self.file()
+        for value in ["123", "0"]:
+            with self.subTest(value=value):
+                self.marker_body = {"scan_id": value}
+                self.paths = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                path = next(p for p in self.paths if p.startswith("/api/check"))
+                self.assertEqual(parse_qs(urlsplit(path).query)["scan_id"], [value])
+                self.assertEqual(self.markers[-1]["scan_id"], value)
+
+    def check_chunked_responses(self, *args):
+        self.file()
+        responses = [(b'2\r\n{}\r\n0\r\n\r\n', 0),
+                     (b'2;extension=yes\r\n{}\r\n0\r\nX-Trailer: ok\r\n\r\n', 0),
+                     (b'5\r\nabc', 1), (b'2\r\n{}', 1),
+                     (b'2\r\n{}\r\n', 1), (b'2\r\n{}\r\n0\r\n', 1),
+                     (b'2\r\n{}\r\n0\r\nX-Trailer: incomplete', 1)]
+        for body, expected in responses:
+            with self.subTest(body=body, transport=args):
+                self.chunked_upload = body
+                self.assertEqual(self.run_collector(*args), expected, self.output)
+                if expected:
+                    self.assertIn("Submitted: 0", self.output)
+        self.chunked_upload = None
+        self.chunked_marker = b'5\r\nabc'
+        self.uploads = []
+        self.assertEqual(self.run_collector(*args), 2, self.output)
+        self.assertEqual(self.uploads, [])
+        self.chunked_marker = b'2\r\n{}\r\n0\r\n\r\n'
+        self.assertEqual(self.run_collector(*args), 0, self.output)
+
+    def test_chunked_http_requires_complete_framing(self):
+        self.check_chunked_responses()
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl required for TLS fixture")
+    def test_chunked_https_requires_complete_framing_and_trusted_certificate(self):
+        cert, key = self.root + "/cert.pem", self.root + "/key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-out", cert, "-keyout", key, "-days", "1",
+                        "-subj", "/CN=localhost"], check=True, capture_output=True)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.assertEqual(self.run_collector("--ssl"), 2, self.output)
+        self.assertEqual(self.paths, [])
+        self.check_chunked_responses("--ssl", "--server", "localhost", "--ca-cert", cert)
 
     def test_incomplete_2xx_upload_is_failure(self):
         self.file()
