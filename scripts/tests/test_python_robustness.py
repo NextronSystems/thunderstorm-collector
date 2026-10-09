@@ -155,6 +155,7 @@ class PythonRobustness(unittest.TestCase):
         self.file()
         self.assertEqual(self.run_collector("--dry-run", "--port", "1"), 0, self.output)
         self.assertEqual(self.paths, [])
+        self.assertIn("Submitted: 0 Would submit: 1", self.output)
 
     def test_zero_age_includes_old_file(self):
         path = self.file()

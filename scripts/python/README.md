@@ -103,7 +103,8 @@ collect -d "$ROOT/input" --dry-run -s 127.0.0.1 -p 1
 collect -d "$ROOT/input" -s 127.0.0.1 -p 1
 ```
 
-Dry-run: exit 0, seven would-submit lines, zero requests. Live: exit 2 at begin,
+Dry-run: exit 0, seven would-submit lines, `Submitted: 0 Would submit: 7` in the
+summary, zero requests. Live: exit 2 at begin,
 zero uploads and connection errors. Port 1 must actually be closed. Use an
 external watchdog for slow networks; idle timeouts are not run deadlines.
 

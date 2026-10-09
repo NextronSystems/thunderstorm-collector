@@ -125,6 +125,7 @@ class Collector(object):
         self.args = args
         self.started_at = time.time()
         self.scanned = self.submitted = self.failed = self.skipped = self.scan_errors = 0
+        self.would_submit = 0
         self.scan_id = None
         self.started = False
         self.in_flight = None
@@ -239,7 +240,7 @@ class Collector(object):
     def upload(self, path, metadata):
         if self.args.dry_run:
             log("[DRY-RUN] Would submit {}".format(_text(path)))
-            self.submitted += 1
+            self.would_submit += 1
             return
         self.in_flight = path
         try:
@@ -343,9 +344,10 @@ class Collector(object):
         for root in roots:
             self.walk(root)
         end_ok = self.marker("end")
-        log("Thunderstorm Collector Run finished (Checked: {} Submitted: {} Failed: {} "
+        dry_summary = " Would submit: {}".format(self.would_submit) if self.args.dry_run else ""
+        log("Thunderstorm Collector Run finished (Checked: {} Submitted: {}{} Failed: {} "
             "Skipped: {} Scan errors: {} Seconds: {})".format(
-                self.scanned, self.submitted, self.failed, self.skipped,
+                self.scanned, self.submitted, dry_summary, self.failed, self.skipped,
                 self.scan_errors, int(time.time() - self.started_at)))
         return 1 if self.failed or self.scan_errors or not end_ok else 0
 
