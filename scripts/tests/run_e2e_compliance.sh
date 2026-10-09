@@ -206,7 +206,8 @@ start_stub() {
     STUB_PID=$!
     sleep 2
     if ! kill -0 "$STUB_PID" 2>/dev/null ||
-        ! curl -fsS --connect-timeout 5 --max-time 10 "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
+        ! curl -fsS --connect-timeout 5 --max-time 10 "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1 ||
+        ! kill -0 "$STUB_PID" 2>/dev/null; then
         echo "ERROR: Stub server failed to start on port $STUB_PORT (possibly already in use)" >&2
         cat "$WORK_DIR/stub.log" >&2
         exit 1
