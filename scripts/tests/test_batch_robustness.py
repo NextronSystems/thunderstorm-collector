@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Real cmd/WSH/curl regressions on Windows, no licensed service required."""
+import hashlib
+import json
 import os
+from pathlib import Path
+import shlex
 import shutil
 import subprocess
-import threading
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -11,6 +16,54 @@ from urllib.parse import parse_qs, urlsplit
 import test_powershell_robustness as shared
 
 SCRIPT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "batch", "thunderstorm-collector.bat"))
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "POSIX adapter contract test")
+class BatchAdapterTests(unittest.TestCase):
+    def test_adapter_exports_configuration_without_rewriting_collector(self):
+        repo = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory(prefix="batch adapter '") as directory:
+            root = Path(directory)
+            command = root / "fake cmd"
+            command.write_text("#!" + sys.executable + '''
+import hashlib, json, os, sys
+print(json.dumps({"args": sys.argv[1:], "env": dict(os.environ),
+                  "sha256": hashlib.sha256(open(os.environ["ADAPTER_COPY"], "rb").read()).hexdigest()}))
+''')
+            command.chmod(0o755)
+            curl = root / "curl.exe"
+            curl.write_text("#!/bin/sh\nexit 0\n")
+            curl.chmod(0o755)
+            copy = root / "collector & sample.bat"
+            fixture = root / "input & data!"
+            env = dict(os.environ, PROJECT_ROOT=str(repo), TEST_DATA_DIR=str(fixture), MOCK_PORT="19993",
+                       MKTEMP_CMD="fixture_mktemp", CP_CMD="cp", RM_CMD="rm", CMD_CMD=str(command),
+                       ADAPTER_COPY=str(copy), PATH=str(root) + os.pathsep + os.environ["PATH"])
+            adapter = repo / "tests/test-collectors.d/bat"
+            body = 'set -e\nfixture_mktemp() { : > "$ADAPTER_COPY"; printf "%s\\n" "$ADAPTER_COPY"; }\n'
+            body += 'to_native_path() { printf "%s\\n" "$1"; }\n'
+            for name in ("setup_test.sh", "build_command.sh", "cleanup_test.sh"):
+                body += ". " + shlex.quote(str(adapter / name)) + "\n"
+            body += 'collector_setup\ncommand=$(collector_build_command "")\neval "$command"\ncollector_cleanup\n'
+            result = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            captured = json.loads(result.stdout)
+            self.assertEqual(captured["args"], ["/d", "/v:off", "/s", "/c", '"' + str(copy) + '"'])
+            expected = dict(THUNDERSTORM_SERVER="127.0.0.1", THUNDERSTORM_PORT="19993",
+                            COLLECT_DIRS=str(fixture), MAX_AGE="365", COLLECT_MAX_SIZE="3000000",
+                            RELEVANT_EXTENSIONS=".txt;.log;.ps1;.tmp", CURL_PATH=str(curl),
+                            URL_SCHEME="http", DRY_RUN="0", SYNC="0", UPLOAD_ATTEMPTS="1")
+            for key, value in expected.items():
+                self.assertEqual(captured["env"][key], value, key)
+            self.assertEqual(captured["sha256"], hashlib.sha256(Path(SCRIPT).read_bytes()).hexdigest())
+            self.assertFalse(copy.exists())
+
+    def test_adapter_rejects_unsupported_cli_arguments(self):
+        adapter = Path(__file__).resolve().parents[2] / "tests/test-collectors.d/bat/build_command.sh"
+        result = subprocess.run(["bash", "-c", '. "$1"; collector_build_command --dry-run', "test", str(adapter)],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("uses environment settings", result.stderr)
 
 
 @unittest.skipUnless(os.name == "nt", "requires Windows cmd.exe and Windows Script Host")
@@ -52,13 +105,7 @@ class BatchRobustness(shared.PowerShellRobustness):
         command = self.command(*extra, **kwargs)
         process = subprocess.Popen(command, env=self.environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, cwd=self.root)
-        timer = threading.Timer(45, process.kill)
-        timer.start()
-        try:
-            self.output = process.communicate()[0].decode("utf-8", "replace")
-        finally:
-            timer.cancel()
-        self.assertNotEqual(process.returncode, -9, "collector exceeded 45-second deadline")
+        self.output = shared.communicate_collector(process).decode("utf-8", "replace")
         self.assertEqual(os.listdir(self.environment["TEMP"]), [], "temporary payloads were not removed")
         self.assertEqual(self.markers, [], "Batch profile must not send unsupported collection markers")
         return process.returncode

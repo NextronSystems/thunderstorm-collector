@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 try:
     from http.server import BaseHTTPRequestHandler, HTTPServer
     from socketserver import ThreadingMixIn
@@ -28,8 +29,60 @@ except ImportError:
 
 MAJOR = sys.version_info[0]
 RUNTIME = os.environ.get("POWERSHELL_RUNTIME", "powershell.exe" if os.name == "nt" else "pwsh")
-SCRIPT = os.environ.get("POWERSHELL_COLLECTOR") or os.path.abspath(os.path.join(
+SCRIPT = os.path.abspath(os.environ.get("POWERSHELL_COLLECTOR") or os.path.join(
     os.path.dirname(__file__), "..", "powershell", "thunderstorm-collector.ps1"))
+
+
+def communicate_collector(process, timeout=45):
+    try:
+        return process.communicate(timeout=timeout)[0]
+    except subprocess.TimeoutExpired:
+        # On Windows kill() exits with 1, which is also an expected collector
+        # error. Fail on the timeout itself and terminate cmd/WSH/curl children.
+        if os.name == "nt":
+            try:
+                subprocess.run(["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if process.poll() is None:
+            process.kill()
+        try:
+            output = process.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            output = b"(output pipe did not close after termination)"
+            process.stdout.close()
+        raise AssertionError("collector exceeded {}-second deadline: {}".format(
+            timeout, output.decode("utf-8", "replace")))
+
+
+class CollectorDeadlineTests(unittest.TestCase):
+    def test_windows_kill_exit_one_cannot_pass_a_negative_test(self):
+        process = Mock(pid=12345, returncode=1)
+        process.communicate.side_effect = [subprocess.TimeoutExpired("collector", 45), (b"stalled", None)]
+        process.poll.return_value = 1
+        with patch.object(os, "name", "nt"), patch.object(subprocess, "run") as terminate:
+            with self.assertRaisesRegex(AssertionError, "exceeded 45-second deadline"):
+                communicate_collector(process)
+        self.assertEqual(terminate.call_args[0][0], ["taskkill.exe", "/PID", "12345", "/T", "/F"])
+
+    def test_normal_exit_one_is_returned_without_being_a_timeout(self):
+        process = Mock(returncode=1)
+        process.communicate.return_value = (b"expected collector error", None)
+        self.assertEqual(communicate_collector(process), b"expected collector error")
+        process.kill.assert_not_called()
+
+    def test_real_stalled_process_is_terminated_and_fails(self):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            with self.assertRaisesRegex(AssertionError, "exceeded"):
+                communicate_collector(process, timeout=0.1)
+            self.assertIsNotNone(process.poll())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
 
 class Server(ThreadingMixIn, HTTPServer):
@@ -118,6 +171,7 @@ class PowerShellRobustness(unittest.TestCase):
         return path
 
     def command(self, *extra, **kwargs):
+        self.assertTrue(os.path.isfile(SCRIPT), "collector script is missing: " + SCRIPT)
         options = {"ThunderstormServer": "127.0.0.1", "ThunderstormPort": str(self.server.server_port),
                    "MaxAge": "0", "Retries": "1", "Source": "tests"}
         flags = ["AllExtensions", "NoProgress"]
@@ -150,14 +204,7 @@ class PowerShellRobustness(unittest.TestCase):
     def run_collector(self, *extra, **kwargs):
         process = subprocess.Popen(self.command(*extra, **kwargs), stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, cwd=self.root)
-        timer = threading.Timer(45, process.kill)
-        timer.start()
-        try:
-            output = process.communicate()[0].decode("utf-8", "replace")
-        finally:
-            timer.cancel()
-        self.assertNotEqual(process.returncode, -9, "collector exceeded 45-second deadline: " + output)
-        self.output = output
+        self.output = communicate_collector(process).decode("utf-8", "replace")
         return process.returncode
 
     def test_binary_empty_special_and_unicode_source(self):
