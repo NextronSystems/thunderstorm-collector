@@ -1,10 +1,38 @@
 # Perl Collector
 
-Use on Unix-like or legacy hosts where Perl and LWP are available. The standalone script has a Perl 5.8.1 syntax floor and requires LWP::UserAgent 6+, HTTP::Request, JSON::PP and Encode. JSON::PP is core on Perl 5.14+; install it separately on older builds. HTTPS additionally requires LWP::Protocol::https and IO::Socket::SSL with a usable CA store. Tests on modern Perl do not certify every 5.8/SSL build; validate the actual target.
+Use on Unix-like or legacy hosts where Perl and LWP are available. The standalone script has a Perl 5.8.1 syntax floor and requires LWP::UserAgent 6+, LWP::Protocol::http, HTTP::Request, JSON::PP, Encode and Sys::Hostname. It also loads the standard Getopt::Long, Cwd, File::Spec, Fcntl and POSIX modules. HTTPS additionally requires LWP::Protocol::https and IO::Socket::SSL with a usable CA store. Tests on modern Perl do not certify every 5.8/SSL build; validate the actual target.
+
+### Dependency Setup
+
+JSON::PP ships with upstream Perl 5.14+, but distribution packages can split out
+core modules even on current Perl. Do not assume that installing the interpreter
+provides JSON::PP or Sys::Hostname. On Fedora, install the relevant packages:
+
+```sh
+sudo dnf install perl-libwww-perl perl-JSON-PP perl-Sys-Hostname
+```
+
+Fedora lists [LWP](https://packages.fedoraproject.org/pkgs/perl-libwww-perl/perl-libwww-perl/),
+[JSON::PP](https://packages.fedoraproject.org/pkgs/perl-JSON-PP/perl-JSON-PP/)
+and [Sys::Hostname](https://packages.fedoraproject.org/pkgs/perl/perl-Sys-Hostname/)
+as separate packages. Other distributions and minimal installations may need
+additional module packages. From this directory, check all startup imports
+without scanning or uploading files:
+
+```sh
+perl -c ./thunderstorm-collector.pl
+```
+
+For HTTPS, also check the optional modules, then test the target's CA store and
+TLS behavior as described below:
+
+```sh
+perl -MLWP::Protocol::https -MIO::Socket::SSL -e 'print "HTTPS modules available\n"'
+```
 
 ## Capability Profile
 
-- Iterative recursive regular-file collection, binary/empty/Unicode/newline names. Symlink entries and special files are skipped; explicit roots resolve physically.
+- Iterative recursive regular-file collection, binary/empty/Unicode/newline names. Symlink entries and special files are skipped; explicit roots resolve physically. Queued directories and their ancestor identities are rechecked before traversal and around file reads; detected replacements fail rather than upload their contents. These portable path checks are not an atomic filesystem sandbox: a hostile process can still race between checks. Use a read-only snapshot or a quiescent, trusted tree when strict containment is required. Descriptor-relative traversal would require a different platform/dependency profile than the Perl 5.8.1 baseline.
 - Built-in exclusions: /proc, /dev, /sys, /run, /snap, /.snapshots, Linux detected special/network mounts, known cloud folders, /mnt trees, .dat, .npm and .lck paths. These are best effort, not a security boundary.
 - Default age 14 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
 - Default size 2048 KiB; --max-size-kb 1..204800 includes exact limit. Bounded in-memory snapshot precedes network access; multipart construction needs several times the configured file size in RAM. Replaced/changed/unreadable files fail; newly oversized files are skipped. Not a filesystem-wide atomic snapshot.
@@ -14,7 +42,7 @@ Use on Unix-like or legacy hosts where Perl and LWP are available. The standalon
 - Upload timeout 30 seconds and marker timeout 10 are LWP idle-I/O limits, not whole-run deadlines. Response limit 1 MiB; aborted or length-incomplete 2xx responses fail. Chunked HTTP/HTTPS responses must include complete chunks, a terminating zero chunk and complete trailers; socket EOF cannot substitute for those delimiters, including on older LWP/Net::HTTP installations.
 - --ssl verifies hostname and peer explicitly; --ca-cert FILE selects a CA; --insecure is explicit bypass. TLS-only options without --ssl are rejected, never silently converted to plaintext.
 - Dry-run sends no network requests, including markers, and does not prove file readability. Repeated --dir/-d options accumulate. Default root is /; use explicit approved roots.
-- Source is UTF-8 encoded in the query and JSON. Invalid filename bytes are replaced in metadata only; payloads remain unchanged. Port 1..65535; DNS/IPv4 or bracketed IPv6, subject to installed LWP/SSL support.
+- Source (`--source` or legacy `--so`) is UTF-8 encoded in the query and JSON. Invalid filename bytes are replaced in metadata only; payloads remain unchanged. Port 1..65535; DNS/IPv4 or bracketed IPv6, subject to installed LWP/SSL support.
 
 | Exit | Meaning |
 |---|---|
@@ -22,7 +50,7 @@ Use on Unix-like or legacy hosts where Perl and LWP are available. The standalon
 | 1 | Failed files, traversal/partial-root errors, interruption or end-marker failure |
 | 2 | Invalid config/dependencies, no valid roots or failed begin |
 
-Unreadable directories count as Scan errors; unreadable selected files as Failed. Existing empty roots can succeed; missing roots cannot. Missing Perl/modules can fail before the script starts with the interpreter's own exit code (commonly 255); check dependencies first. Legacy Perl/SSL and Windows builds require their own target-system acceptance. Transport limits follow the [LWP documentation](https://metacpan.org/pod/LWP::UserAgent).
+Unreadable directories count as Scan errors; unreadable selected files as Failed. Existing empty roots can succeed; missing roots cannot. A missing interpreter or startup module can fail before the collector's exit-code handling runs. Record the diagnostic and actual nonzero exit status rather than expecting a fixed value such as 255; these startup failures are outside the table above. Legacy Perl/SSL and Windows builds require their own target-system acceptance. Transport limits follow the [LWP documentation](https://metacpan.org/pod/LWP::UserAgent).
 
 ## Manual Acceptance
 
@@ -174,3 +202,16 @@ From repository root with a stub compiled for the test host:
 THUNDERSTORM_TEST_COLLECTORS=perl THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
   THUNDERSTORM_TEST_REQUIRE_ALL=1 scripts/tests/run_e2e_compliance.sh /path/to/stub
 ```
+
+For the separate large-payload acceptance check:
+
+```sh
+STUB_BIN_PATH=/path/to/stub bash scripts/tests/test_perl_large.sh
+```
+
+This starts its own stub on a temporary port and uploads a generated file slightly
+larger than 3 MiB. It requires a successful collector exit and exactly one current-run
+audit entry with the expected source, unique filename, size, and SHA-256. Existing
+services/audit logs are not reused. The owned process and fixtures are removed on
+success and failure. An optional `STUB_LOG` must name a new file and is retained;
+otherwise the audit stays in the temporary workspace and is removed with it.

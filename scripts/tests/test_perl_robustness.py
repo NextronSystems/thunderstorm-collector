@@ -57,6 +57,7 @@ class PerlRobustness(unittest.TestCase):
         self.chunked_marker = None
         self.marker_body = {"scan_id": "scan + & /"}
         self.pause = False
+        self.pause_begin = False
         self.started = threading.Event()
         self.release = threading.Event()
         test = self
@@ -75,6 +76,9 @@ class PerlRobustness(unittest.TestCase):
                     body = json.dumps(test.marker_body).encode("utf-8")
                     partial = test.partial_marker
                     chunked = test.chunked_marker
+                    if test.pause_begin and marker["type"] == "begin":
+                        test.started.set()
+                        test.release.wait(8)
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
                     mime = ("Content-Type: " + self.headers["Content-Type"] +
@@ -164,6 +168,62 @@ class PerlRobustness(unittest.TestCase):
         self.file()
         self.assertEqual(self.run_collector("--dry-run", "--port", "1"), 0, self.output)
         self.assertEqual(self.paths, [])
+
+    def test_legacy_source_alias(self):
+        self.file()
+        self.assertEqual(self.run_collector("--so", "legacy + source"), 0, self.output)
+        self.assertTrue(all(marker["source"] == "legacy + source" for marker in self.markers))
+        upload = next(path for path in self.paths if path.startswith("/api/check"))
+        self.assertEqual(parse_qs(urlsplit(upload).query)["source"], ["legacy + source"])
+
+    def test_replaced_root_is_not_traversed_after_begin(self):
+        self.file()
+        self.pause_begin = True
+        outside = self.root + "/outside"
+        os.mkdir(outside)
+        with open(outside + "/secret", "wb") as stream:
+            stream.write(b"outside-root")
+        process = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            self.assertTrue(self.started.wait(5), "begin did not start")
+            os.rename(self.samples, self.samples + "-original")
+            os.symlink(outside, self.samples)
+            self.release.set()
+            output = process.communicate(timeout=15)[0]
+            self.assertEqual(process.returncode, 1, output)
+            self.assertEqual(self.uploads, [])
+            self.assertIn(b"Directory replaced", output)
+        finally:
+            self.release.set()
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    def test_replaced_ancestor_does_not_redirect_pending_children(self):
+        self.file("pause.bin", b"approved")
+        os.mkdir(self.samples + "/pending")
+        with open(self.samples + "/pending/child", "wb") as stream:
+            stream.write(b"approved-child")
+        outside = self.root + "/outside"
+        os.makedirs(outside + "/pending")
+        with open(outside + "/pending/child", "wb") as stream:
+            stream.write(b"outside-root")
+        self.pause = True
+        process = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            self.assertTrue(self.started.wait(5), "upload did not start")
+            os.rename(self.samples, self.samples + "-original")
+            os.symlink(outside, self.samples)
+            self.release.set()
+            output = process.communicate(timeout=15)[0]
+            self.assertEqual(process.returncode, 1, output)
+            self.assertEqual(self.uploads, [b"approved"])
+            self.assertIn(b"Directory replaced", output)
+        finally:
+            self.release.set()
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
     def test_zero_age_includes_old_file(self):
         path = self.file()
@@ -384,6 +444,25 @@ class PerlRobustness(unittest.TestCase):
             self.assertEqual(process.returncode, 1, output)
             self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
         finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    def test_sigterm_during_successful_begin_sends_interrupted(self):
+        self.file()
+        self.pause_begin = True
+        process = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            self.assertTrue(self.started.wait(5), "begin did not start")
+            process.send_signal(signal.SIGTERM)
+            self.release.set()
+            output = process.communicate(timeout=15)[0]
+            self.assertEqual(process.returncode, 1, output)
+            self.assertEqual(self.uploads, [])
+            self.assertEqual([m["type"] for m in self.markers], ["begin", "interrupted"])
+            self.assertEqual(self.markers[-1]["scan_id"], "scan + & /")
+        finally:
+            self.release.set()
             if process.poll() is None:
                 process.kill()
                 process.communicate()

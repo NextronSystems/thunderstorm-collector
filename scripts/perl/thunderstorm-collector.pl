@@ -82,7 +82,7 @@ my $progress = -t STDERR ? 1 : 0;
 Configure(qw(no_auto_abbrev no_ignore_case));
 GetOptions(
     'dir|d=s' => \@dirs, 'server|s=s' => \$server, 'port|p=i' => \$port,
-    'source=s' => \$source, 'ssl|tls' => \$tls, 'insecure|k' => \$insecure,
+    'source|so=s' => \$source, 'ssl|tls' => \$tls, 'insecure|k' => \$insecure,
     'ca-cert=s' => \$ca, 'sync' => \$sync, 'dry-run' => \$dry,
     'max-age=i' => \$age, 'max-size-kb=i' => \$size, 'retries=i' => \$retries,
     'progress' => sub { $progress = 1 }, 'no-progress' => sub { $progress = 0 },
@@ -212,8 +212,18 @@ sub eligible {
     my ($metadata) = @_;
     return $metadata->[7] <= $size * 1024 && (!$age || $metadata->[9] >= $start - $age * 86400);
 }
+sub check_directories {
+    my ($chain) = @_;
+    for my $entry (@$chain) {
+        my @current = lstat $entry->[0];
+        die "Directory replaced or no longer accessible: $entry->[0]\n"
+            unless @current && S_ISDIR($current[2]) &&
+                $current[0] == $entry->[1] && $current[1] == $entry->[2];
+    }
+}
 sub snapshot {
-    my ($path, $expected) = @_;
+    my ($path, $expected, $chain) = @_;
+    check_directories($chain);
     my $flags = O_RDONLY | O_NONBLOCK;
     $flags |= eval { Fcntl::O_NOFOLLOW() } || 0;
     sysopen(my $file, $path, $flags) or die "open: $!\n";
@@ -221,6 +231,7 @@ sub snapshot {
     my @before = stat $file;
     die "File replaced or no longer regular\n" unless @before && S_ISREG($before[2]) &&
         $before[0] == $expected->[0] && $before[1] == $expected->[1];
+    check_directories($chain);
     if (!eligible(\@before)) { close $file; return undef }
     my $data = '';
     while (length($data) <= $size * 1024) {
@@ -235,12 +246,13 @@ sub snapshot {
     close $file or die "close: $!\n";
     die "File changed while reading\n" unless @after && length($data) == $before[7] &&
         $before[7] == $after[7] && $before[9] == $after[9];
+    check_directories($chain);
     return $data;
 }
 sub upload {
-    my ($path, $metadata) = @_;
+    my ($path, $metadata, $chain) = @_;
     if ($dry) { print "[DRY-RUN] Would submit $path\n"; $submitted++; return }
-    my $data = eval { snapshot($path, $metadata) };
+    my $data = eval { snapshot($path, $metadata, $chain) };
     if ($@) { print STDERR "[ERROR] Cannot read $path: $@"; $failed++; return }
     if (!defined $data) { $skipped++; return }
     my $filename = $path;
@@ -268,10 +280,14 @@ sub upload {
 }
 sub walk {
     my ($root) = @_;
-    my @stack = ($root);
+    my @stack = ([$root]);
     while (@stack && !$interrupted) {
-        my $directory = pop @stack;
+        my $chain = pop @stack;
+        my $directory = $chain->[-1][0];
         next if excluded($directory);
+        if (!eval { check_directories($chain); 1 }) {
+            print STDERR "[ERROR] Cannot traverse $directory: $@"; $scan_errors++; next;
+        }
         opendir(my $handle, $directory) or do {
             print STDERR "[ERROR] Cannot traverse $directory: $!\n"; $scan_errors++; next;
         };
@@ -283,15 +299,21 @@ sub walk {
         for my $name (@names) {
             last if $interrupted;
             next if $name eq '.' || $name eq '..';
+            if (!eval { check_directories($chain); 1 }) {
+                print STDERR "[ERROR] Cannot traverse $directory: $@"; $scan_errors++; last;
+            }
             my $path = File::Spec->catfile($directory, $name);
             my @metadata = lstat $path;
             if (!@metadata) { print STDERR "[ERROR] Cannot stat $path: $!\n"; $failed++; next }
             next if S_ISLNK($metadata[2]);
-            if (S_ISDIR($metadata[2])) { push @stack, $path unless excluded($path); next }
+            if (S_ISDIR($metadata[2])) {
+                push @stack, [@$chain, [$path, $metadata[0], $metadata[1]]] unless excluded($path);
+                next;
+            }
             next unless S_ISREG($metadata[2]);
             $scanned++;
             if ($path =~ m{^/mnt(?:/|$)|\.dat$|\.npm|\.lck$} || !eligible(\@metadata)) { $skipped++; next }
-            upload($path, \@metadata);
+            upload($path, \@metadata, $chain);
             print STDERR "[$scanned examined]\n" if $progress;
         }
     }
@@ -300,14 +322,17 @@ my @roots;
 for my $path (@dirs) {
     my $real = abs_path($path);
     if (!defined $real || !-d $real) { print STDERR "[ERROR] Missing directory $path\n"; $scan_errors++ }
-    else { push @roots, $real }
+    else {
+        my @metadata = lstat $real;
+        if (@metadata && S_ISDIR($metadata[2])) { push @roots, [$real, $metadata[0], $metadata[1]] }
+        else { print STDERR "[ERROR] Directory changed: $path\n"; $scan_errors++ }
+    }
 }
 exit 2 unless @roots;
 my $begin_ok = marker('begin');
-exit 1 if $interrupted;
-exit 2 unless $begin_ok;
-$started = 1;
-walk($_) for @roots;
+$started = $begin_ok ? 1 : 0;
+exit 2 unless $begin_ok || $interrupted;
+if (!$interrupted) { walk($_) for @roots }
 if ($interrupted) {
     $SIG{INT} = $SIG{TERM} = 'IGNORE';
     marker('interrupted') if $started && !$dry;
