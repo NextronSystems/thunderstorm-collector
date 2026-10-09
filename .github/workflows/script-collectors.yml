@@ -112,6 +112,20 @@ jobs:
         if: hashFiles('scripts/tests/test_perl_robustness.py') != ''
         run: python -B scripts/tests/test_perl_robustness.py
 
+      - name: Perl large-file harness negative controls
+        if: hashFiles('scripts/tests/test_perl_large_harness.py') != ''
+        run: python -B scripts/tests/test_perl_large_harness.py
+
+      - name: Perl large-file upload against the stub
+        if: hashFiles('scripts/tests/test_perl_large_harness.py') != ''
+        env:
+          STUB_BIN_PATH: ${{ runner.temp }}/thunderstorm-stub-server
+        run: bash scripts/tests/test_perl_large.sh
+
+      - name: Batch legacy adapter contract
+        if: hashFiles('scripts/tests/test_batch_robustness.py') != ''
+        run: python -B scripts/tests/test_batch_robustness.py BatchAdapterTests
+
       - name: Python regression suite
         if: hashFiles('scripts/tests/run_python_regression_tests.sh') != ''
         env:
