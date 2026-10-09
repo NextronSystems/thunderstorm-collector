@@ -32,10 +32,12 @@ Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SE
 ## Capabilities
 
 - Recursive regular-file scanning; no traversal of symlink entries. Explicit symlink roots resolve to their physical directory.
+- Filename validation is batched with `find -exec ... +` when supported; older BusyBox builds fall back to one file per invocation. Newline rejection is unchanged in both modes.
 - All extensions are eligible. No executable-only selector or extension-filter option.
 - Age: `--max-age 0..36500`, default 14. Zero disables filtering; positive values use `find -mtime -N` (24-hour buckets, not calendar dates).
 - Size: `--max-size-kb 1..1048576`, default 2000. One unit is 1024 bytes; the exact limit is included. Empty files are eligible, subject to backend support.
 - Known cloud-folder paths are skipped. `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots` and detected Linux network/special mounts are excluded. These are best-effort exclusions, not a security boundary.
+- Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
 - A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
 - Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and CR/LF with underscores.
 - Async `/api/checkAsync` submission by default; `--sync` uses `/api/check`. Async success means accepted, not analysis completed. The collector does not poll async results.
@@ -52,6 +54,7 @@ This also applies to physical paths reached through symlinks. A resolved newline
 root is a scan error; a newline workspace or log path is a fatal configuration error.
 
 Missing/inaccessible roots, traversal errors, unreadable/disappeared files and failed uploads are visible failures, not successful skips. Other readable files can still be submitted. `scan_errors` counts root/traversal/unsupported-path errors separately from per-file `failed` counts.
+Only the first 4096 bytes of traversal diagnostics are retained and logged per root; remaining diagnostics are drained without accumulating in memory or on disk.
 
 | Exit | Meaning |
 |---|---|
@@ -208,7 +211,7 @@ Expected: exit 1, only `ok.txt` uploaded, `scan_errors=1`, explicit unsupported-
 
 ### 9. Validate the Deployment Transport
 
-Repeat positive binary/special-name tests on the actual appliance where curl is absent. Record the selected tool with `--debug`. A test PATH must retain required utilities; removing `/usr/bin` can invalidate the environment.
+Repeat positive binary/special-name tests on the actual appliance where curl is absent. For live runs, `--debug` prints `Upload transport: curl`, `Upload transport: wget` (GNU wget), or `Upload transport: nc`; record that line. Dry-run selects no transport and makes no network requests. A test PATH must retain required utilities; removing `/usr/bin` can invalidate the environment.
 
 - GNU wget: eight matching payloads; repeat HTTPS/CA checks if used in deployment.
 - BusyBox nc + timeout: eight matching payloads over HTTP, no markers; repeat the unreachable-service test. Actual nc options vary by build.

@@ -74,7 +74,7 @@ CLOUD_DIR_NAMES="onedrive dropbox .dropbox googledrive nextcloud owncloud mega m
 
 # Cloud directory names that contain spaces — checked separately since the
 # space-separated CLOUD_DIR_NAMES list cannot hold them.
-CLOUD_DIR_NAMES_SPACED="google drive|icloud drive|onedrive -"
+CLOUD_DIR_NAMES_SPACED="google drive|icloud drive"
 
 # get_excluded_mounts: parse /proc/mounts, return mount points for network/special FS
 get_excluded_mounts() {
@@ -86,12 +86,12 @@ get_excluded_mounts() {
     done < /proc/mounts
 }
 
-# is_cloud_path: check if a path contains a known cloud storage folder name
+# is_cloud_path: check directory components, never the regular-file leaf name.
 is_cloud_path() {
-    _icp_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    _icp_lower="$(printf '%s/' "${1%/*}" | tr '[:upper:]' '[:lower:]')"
     for _icp_name in $CLOUD_DIR_NAMES; do
         case "$_icp_lower" in
-            *"/$_icp_name"/*|*"/$_icp_name") return 0 ;;
+            *"/$_icp_name"/*) return 0 ;;
         esac
     done
     # Check cloud directory names that contain spaces (pipe-separated)
@@ -99,12 +99,12 @@ is_cloud_path() {
     IFS='|'
     for _icp_name in $CLOUD_DIR_NAMES_SPACED; do
         case "$_icp_lower" in
-            *"/$_icp_name"*) IFS="$_icp_old_ifs"; return 0 ;;
+            *"/$_icp_name"/*) IFS="$_icp_old_ifs"; return 0 ;;
         esac
     done
     IFS="$_icp_old_ifs"
     case "$_icp_lower" in
-        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+        */library/cloudstorage/*|*/onedrive\ -*/*) return 0 ;;
     esac
     return 1
 }
@@ -1127,6 +1127,7 @@ main() {
             fi
             die "Uploads require curl, GNU wget, or nc plus timeout (plain HTTP only)"
         fi
+        log_msg debug "Upload transport: $UPLOAD_TOOL"
     else
         log_msg info "Dry-run mode active (no upload tool or server connection required)"
     fi
@@ -1192,6 +1193,12 @@ main() {
     # loop runs in the current shell (not a subshell). A pipe would lose all
     # counter increments (FILES_SCANNED etc.) due to POSIX subshell semantics.
     get_excluded_mounts > "$WORK_DIR/mounts.list" || die "Cannot write excluded mount list"
+    # Older BusyBox find builds may not implement batching. Probe once and
+    # retain the one-file fallback rather than raising the runtime requirement.
+    _find_exec_end=';'
+    if find "$WORK_DIR" -prune -exec sh -c ':' sh '{}' + >/dev/null 2>&1; then
+        _find_exec_end=+
+    fi
     _dirs_file="$WORK_DIR/directories.list"
     printf '%s\n' "$SCAN_DIRS" > "$_dirs_file" || die "Cannot write directory list"
 
@@ -1216,6 +1223,7 @@ main() {
 
         _results_file="$WORK_DIR/files.list"
         : > "$WORK_DIR/path.errors" || die "Cannot write path error list"
+        : > "$WORK_DIR/find.status" || die "Cannot write find status"
 
         # Validate each unsplit find operand before emitting line-based records.
         # A newline filename must never turn into an unrelated relative path.
@@ -1232,15 +1240,25 @@ main() {
             set -- "$@" -type f
             [ "$MAX_AGE" -gt 0 ] && set -- "$@" -mtime "-${MAX_AGE}"
             set -- "$@" -exec sh -c '
-                case "$1" in
+                errors=$1
+                shift
+                for path do
+                    case "$path" in
                     *"
-"*) printf "unsupported newline path\n" >> "$2" || exit 1 ;;
-                    *) printf "%s\n" "$1" ;;
-                esac' sh '{}' "$WORK_DIR/path.errors" ';'
-            find "$@"
-        ) > "$_results_file" 2> "$WORK_DIR/find.stderr"
-        if [ "$?" -ne 0 ] || [ -s "$WORK_DIR/find.stderr" ]; then
-            log_msg warn "Incomplete scan of '$_scandir': $(cat "$WORK_DIR/find.stderr")"
+"*) printf "unsupported newline path\n" >> "$errors" || exit 1 ;;
+                    *) printf "%s\n" "$path" || exit 1 ;;
+                    esac
+                done' sh "$WORK_DIR/path.errors" '{}' "$_find_exec_end"
+            find "$@" > "$_results_file"
+            printf '%s\n' "$?" > "$WORK_DIR/find.status"
+        ) 2>&1 | (
+            # Keep just an excerpt on disk and in memory. Drain the remainder
+            # so diagnostics cannot block or SIGPIPE the ongoing traversal.
+            head -c 4096 > "$WORK_DIR/find.stderr" || exit 1
+            cat >/dev/null
+        )
+        if [ "$?" -ne 0 ] || [ "$(cat "$WORK_DIR/find.status")" != 0 ] || [ -s "$WORK_DIR/find.stderr" ]; then
+            log_msg warn "Incomplete scan of '$_scandir' (first 4096 diagnostic bytes): $(cat "$WORK_DIR/find.stderr")"
             SCAN_ERRORS=$((SCAN_ERRORS + 1))
         fi
         _path_errors="$(wc -l < "$WORK_DIR/path.errors" | tr -d ' \t')"

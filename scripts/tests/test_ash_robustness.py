@@ -140,6 +140,33 @@ class AshRobustnessTests(unittest.TestCase):
     def assert_payloads(self, expected):
         self.assertCountEqual(expected, [payload for _, payload in self.uploads], self.output)
 
+    def assert_debug_transport(self, name):
+        (self.samples / "real.txt").write_bytes(b"transport fixture")
+        env = {"PATH": self.real_tool_path(name)}
+        result = self.run_collector(env=env)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertNotIn("Upload transport:", self.output)
+        result = self.run_collector("--debug", env=env)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("[debug] Upload transport: " + name, self.output)
+        self.assert_payloads([b"transport fixture", b"transport fixture"])
+
+    @unittest.skipUnless(shutil.which("curl"), "curl required")
+    def test_debug_reports_curl_transport(self):
+        self.assert_debug_transport("curl")
+
+    @unittest.skipUnless(shutil.which("wget"), "GNU wget required")
+    def test_debug_reports_wget_transport(self):
+        version = subprocess.run([shutil.which("wget"), "--no-config", "--version"],
+                                 capture_output=True, text=True, timeout=5)
+        if not version.stdout.startswith("GNU Wget"):
+            self.skipTest("GNU wget required")
+        self.assert_debug_transport("wget")
+
+    @unittest.skipUnless(shutil.which("nc") and shutil.which("timeout"), "nc and timeout required")
+    def test_debug_reports_nc_transport(self):
+        self.assert_debug_transport("nc")
+
     def test_special_filenames_and_source_preserve_data(self):
         names = ["normal.txt", "semi;colon.txt", "comma,name.txt", 'double"quote.txt',
                  "back\\slash.txt", "-leading.txt", "unicode-\u00e4.txt"]
@@ -301,9 +328,10 @@ class AshRobustnessTests(unittest.TestCase):
 
     def test_dry_run_needs_no_network_tool(self):
         (self.samples / "real.txt").write_bytes(b"local")
-        result = self.run_collector("--dry-run", env={"PATH": self.tool_path()})
+        result = self.run_collector("--dry-run", "--debug", env={"PATH": self.tool_path()})
         self.assertEqual(result.returncode, 0, self.output)
         self.assertIn("DRY-RUN: would submit", self.output)
+        self.assertNotIn("Upload transport:", self.output)
         self.assertEqual(self.requests, [])
 
     def test_missing_root_is_partial_failure(self):
@@ -344,6 +372,67 @@ class AshRobustnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, self.output)
         self.assertIn("Incomplete scan", self.output)
         self.assert_payloads([b"readable"])
+
+    def test_cloud_filter_matches_directories_not_regular_file_names(self):
+        names = ["dropbox", "onedrive", "Google Drive notes.txt", "Google Drive",
+                 "iCloud Drive backup.txt", "CloudStorage", "normal.txt"]
+        for name in names:
+            (self.samples / name).write_bytes(name.encode())
+        for name in ["Dropbox", "OneDrive - Company", "Library/CloudStorage"]:
+            folder = self.samples / "cloud" / name
+            folder.mkdir(parents=True)
+            (folder / "skip.txt").write_bytes(b"excluded")
+        folder = self.samples / "Google Drive notes"
+        folder.mkdir()
+        (folder / "keep.txt").write_bytes(b"ordinary-folder")
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([name.encode() for name in names] + [b"ordinary-folder"])
+
+    def test_traversal_diagnostics_are_bounded_without_losing_partial_results(self):
+        sample = self.samples / "real.txt"
+        sample.write_bytes(b"readable")
+        path = self.real_tool_path("curl", find='''#!/bin/sh
+printf "%s\\n" "$SAMPLE"
+head -c 131072 /dev/zero | tr '\\000' X >&2
+exit 1
+''')
+        result = self.run_collector(env={"PATH": path, "SAMPLE": str(sample)})
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assert_payloads([b"readable"])
+        self.assertIn("Incomplete scan", self.output)
+        self.assertIn("first 4096 diagnostic bytes", self.output)
+        self.assertLess(len(self.output), 8192)
+
+    def test_find_batches_paths_and_retains_legacy_fallback(self):
+        for index in range(40):
+            (self.samples / ("file-%s.txt" % index)).write_bytes(b"readable")
+        (self.samples / "bad\nname").write_bytes(b"unsupported")
+        calls = self.root / "shell-calls"
+        path = self.tool_path(sh='''#!/bin/sh
+printf '%s\\n' "$#" >> "$SHELL_CALLS"
+exec "$REAL_SH" "$@"
+''')
+        environment = {"PATH": path, "SHELL_CALLS": str(calls), "REAL_SH": shutil.which("sh")}
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                if fallback:
+                    self.tool_path(find='''#!/bin/sh
+for arg do [ "$arg" != + ] || exit 1; done
+exec "$REAL_FIND" "$@"
+''')
+                    environment["REAL_FIND"] = shutil.which("find")
+                calls.write_text("")
+                result = self.run_collector("--dry-run", env=environment)
+                self.assertEqual(result.returncode, 1, self.output)
+                self.assertIn("submitted=40", self.output)
+                self.assertIn("Rejected 1 paths", self.output)
+                counts = [int(line) for line in calls.read_text().splitlines()]
+                self.assertTrue(counts)
+                if fallback:
+                    self.assertEqual(max(counts), 5)
+                else:
+                    self.assertGreater(max(counts), 10)
 
     def test_symlinks_are_not_uploaded(self):
         (self.samples / "real.txt").write_bytes(b"readable")
