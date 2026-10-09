@@ -5,6 +5,8 @@ import email.policy
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -335,6 +337,25 @@ class BashRobustnessTests(unittest.TestCase):
         self.assert_payloads([b"readable"])
         self.assertEqual(sum("/api/check" in path for path in self.requests), 2)
 
+    def test_http_date_retry_after_uses_bounded_fallback_for_both_transports(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        sleeps = self.root / "sleeps"
+        path = Path(self.tool_path(sleep='#!/bin/sh\nprintf "%s\\n" "$1" >> "$SLEEPS"\n'))
+        transports = ["curl"] + (["wget"] if shutil.which("wget") else [])
+        for transport in transports:
+            with self.subTest(transport=transport):
+                for name in ("curl", "wget"):
+                    if (path / name).is_symlink():
+                        (path / name).unlink()
+                (path / transport).symlink_to(shutil.which(transport))
+                sleeps.write_text("")
+                self.upload_statuses = [503, 200]
+                self.retry_after = "Wed, 21 Oct 2026 07:28:00 GMT"
+                result = self.run_collector(env={"PATH": str(path), "SLEEPS": str(sleeps)})
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertIn("2", sleeps.read_text().splitlines())
+                self.assertNotIn("120", sleeps.read_text().splitlines())
+
     def test_permanent_503_is_bounded(self):
         (self.samples / "real.txt").write_bytes(b"readable")
         self.upload_statuses = [503] * 10
@@ -456,6 +477,74 @@ exit "${CURL_EXIT:-18}"
         self.assertEqual(result.returncode, 1, self.output)
         self.assertEqual(sum("/api/check" in p for p in self.requests), 0)
         self.assertIn("failed=1", self.output)
+
+
+class BashHelperTests(unittest.TestCase):
+    def function(self, name, path=COLLECTOR):
+        source = path.read_text()
+        match = re.search(r"^" + re.escape(name) + r"\(\) \{.*?^\}", source, re.M | re.S)
+        self.assertIsNotNone(match, name)
+        return match.group(0)
+
+    def test_mount_escapes_are_decoded_and_pruned_as_literal_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            mount = root / "team [a]*?\\040\tshare\n"
+            mount.mkdir()
+            (mount / "excluded").write_text("secret")
+            (root / "keep").write_text("approved")
+            encoded = str(mount).replace("\\", "\\134").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "\\012")
+            table = root / "mounts"
+            table.write_text("server " + encoded + " nfs rw 0 0\n")
+            body = "NETWORK_FS_TYPES=nfs\nSPECIAL_FS_TYPES=proc\n"
+            body += self.function("get_excluded_mounts") + "\n" + self.function("escape_find_path")
+            body += '\nwhile IFS= read -r -d "" path; do\n'
+            body += 'pattern="$(escape_find_path "$path"; printf .)"\n'
+            body += 'printf "%s\\0" "$path"\n'
+            body += 'find "$2" -path "${pattern%.}" -prune -o -type f -print0\n'
+            body += 'done < <(get_excluded_mounts "$1")\n'
+            result = subprocess.run([BASH, "-c", body, "test", str(table), str(root)], capture_output=True, check=True)
+            records = result.stdout.split(b"\0")
+            self.assertEqual(records[0], os.fsencode(mount))
+            self.assertNotIn(os.fsencode(mount / "excluded"), records)
+            self.assertIn(os.fsencode(root / "keep"), records)
+
+    def test_retry_after_requires_integer_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            header = Path(directory) / "headers"
+            for value, expected in [("0", "0"), ("0003", "3"), ("121", "120"),
+                                    ("9" * 100, "120"), ("-1", "2"), ("1foo2", "2"),
+                                    ("", "2"), ("Wed, 21 Oct 2026 07:28:00 GMT", "2")]:
+                with self.subTest(value=value):
+                    header.write_text("HTTP/1.1 503 Busy\r\n  Retry-After: " + value + "\r\n")
+                    result = subprocess.run([BASH, "-c", self.function("retry_after_seconds") + '\nretry_after_seconds "$1"',
+                                             "test", str(header)], capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout.strip(), expected)
+
+    def test_default_roots_are_platform_specific_and_existing(self):
+        for platform, candidates in [("Darwin", ["/Users", "/tmp", "/var", "/usr"]),
+                                     ("Linux", ["/root", "/tmp", "/home", "/var", "/usr"])]:
+            with self.subTest(platform=platform):
+                body = 'uname() { printf "%s\\n" ' + shlex.quote(platform) + '; }\n'
+                body += self.function("default_scan_folders")
+                body += '\ndefault_scan_folders\nprintf "%s\\0" "${SCAN_FOLDERS[@]}"\n'
+                result = subprocess.run([BASH, "-c", body], capture_output=True, check=True)
+                self.assertEqual(result.stdout.split(b"\0")[:-1],
+                                 [os.fsencode(path) for path in candidates if os.path.isdir(path)])
+
+    def test_readiness_rechecks_child_after_response(self):
+        harness = Path(__file__).with_name("run_tests.sh")
+        with tempfile.TemporaryDirectory() as directory:
+            body = 'WORK_DIR=' + shlex.quote(directory) + '\n'
+            body += 'USE_EXTERNAL=0\nUPLOADS_DIR="$WORK_DIR/uploads"\nAUDIT_LOG="$WORK_DIR/audit"\n'
+            body += 'STUB_LOG="$WORK_DIR/stub"\nSTUB_BIN=/usr/bin/false\n'
+            body += 'pick_port() { echo 19993; }\nsleep() { :; }\n'
+            body += 'kill() { [ ! -e "$WORK_DIR/probed" ]; }\n'
+            body += 'curl() { wait "$STUB_PID" || :; touch "$WORK_DIR/probed"; }\n'
+            body += self.function("start_stub", harness) + '\nstart_stub\n'
+            result = subprocess.run([BASH, "-c", body], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("Stub server did not start", result.stderr)
 
 
 if __name__ == "__main__":

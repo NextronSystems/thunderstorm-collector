@@ -20,8 +20,10 @@ Use the ash collector for BusyBox environments instead of weakening Bash's scope
 
 ## Bash-Specific Behavior
 
-- Default roots: `/root`, `/tmp`, `/home`, `/var`, `/usr`. Always supply `--dir`
-  during acceptance testing to avoid uploading unrelated files.
+- Default roots: existing directories among `/root`, `/tmp`, `/home`, `/var`,
+  `/usr`; on macOS, `/Users`, `/tmp`, `/var`, `/usr`. Always supply `--dir`
+  during acceptance testing to avoid uploading unrelated files. Missing explicitly
+  selected roots remain errors; only absent default roots are omitted.
 - The first `--dir` or positional directory replaces the defaults. Further
   directories are additive, including directories after `--`.
 - Recursive regular-file collection; symlinks within the tree are not followed.
@@ -46,7 +48,8 @@ Use the ash collector for BusyBox environments instead of weakening Bash's scope
   they cannot silently disable TLS checks or redirect uploads elsewhere.
   Default: three normal attempts per file, configurable with `--retries 1..10`,
   with capped exponential backoff. HTTP 503 has a separate budget of five busy
-  responses; numeric `Retry-After` values are honored up to 120 seconds.
+  responses; integer-seconds `Retry-After` values are honored up to 120 seconds.
+  Missing, malformed, or HTTP-date values use a two-second fallback.
 - Failed uploads, unreadable/disappeared files, and incomplete directory scans
   do not prevent other readable files from being processed. They make the overall
   result nonzero. An end-marker failure also makes the result nonzero even when

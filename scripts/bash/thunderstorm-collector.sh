@@ -41,8 +41,19 @@ WORK_DIR=""
 declare -a CURL_EXTRA_OPTS=()
 declare -a WGET_EXTRA_OPTS=()
 
-# Keep defaults simple and stable for Bash 3+.
-SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr')
+SCAN_FOLDERS=()
+
+default_scan_folders() {
+    local candidates=('/root' '/tmp' '/home' '/var' '/usr')
+    local path
+    case "$(uname -s)" in
+        Darwin) candidates=('/Users' '/tmp' '/var' '/usr') ;;
+    esac
+    SCAN_FOLDERS=()
+    for path in "${candidates[@]}"; do
+        [ ! -d "$path" ] || SCAN_FOLDERS+=("$path")
+    done
+}
 
 FILES_SCANNED=0
 FILES_SUBMITTED=0
@@ -84,14 +95,24 @@ CLOUD_DIR_NAMES_SPACED="Google Drive|iCloud Drive"
 CLOUD_DIR_PATTERNS="OneDrive -|OneDrive-|Nextcloud-"
 
 # get_excluded_mounts: parse /proc/mounts and return mount points for
-# network and special filesystem types (one per line).
+# network and special filesystem types (NUL-delimited, like find -print0).
 get_excluded_mounts() {
-    [ -r /proc/mounts ] || return 0
+    local mounts="${1:-/proc/mounts}"
+    local _dev _mp _fstype _rest
+    [ -r "$mounts" ] || return 0
     while IFS=' ' read -r _dev _mp _fstype _rest; do
         case " $NETWORK_FS_TYPES $SPECIAL_FS_TYPES " in
-            *" $_fstype "*) printf '%s\n' "$_mp" ;;
+            *" $_fstype "*)
+                # Decode only procfs escapes, with backslash last to avoid
+                # interpreting a literal backslash followed by octal digits.
+                _mp="${_mp//\\040/ }"
+                _mp="${_mp//\\011/$'\t'}"
+                _mp="${_mp//\\012/$'\n'}"
+                _mp="${_mp//\\134/\\}"
+                printf '%s\0' "$_mp"
+                ;;
         esac
-    done < /proc/mounts
+    done < "$mounts"
 }
 
 # is_cloud_path: check if a path contains a known cloud storage folder name.
@@ -516,6 +537,23 @@ detect_upload_tool() {
     return 1
 }
 
+retry_after_seconds() {
+    awk '
+        /^[ \t]*HTTP\// { value = "" }
+        tolower($0) ~ /^[ \t]*retry-after[ \t]*:/ {
+            value = $0
+            sub(/^[^:]*:[ \t]*/, "", value)
+            sub(/[ \t\r]*$/, "", value)
+        }
+        END {
+            if (value !~ /^[0-9]+$/) { print 2; exit }
+            sub(/^0+/, "", value)
+            if (length(value) > 3 || value + 0 > 120) print 120
+            else print value + 0
+        }
+    ' "$1"
+}
+
 upload_with_curl() {
     local endpoint="$1"
     local filepath="$2"
@@ -557,7 +595,7 @@ upload_with_curl() {
     # Handle 503 back-pressure
     if [ "$http_code" = "503" ]; then
         local retry_after
-        retry_after="$(grep -i '^Retry-After:' "$header_file" 2>/dev/null | head -1 | sed 's/[^0-9]//g')"
+        retry_after="$(retry_after_seconds "$header_file")"
         if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
             [ "$retry_after" -gt 120 ] && retry_after=120
             log_msg warn "Server returned 503, waiting ${retry_after}s (Retry-After)"
@@ -646,7 +684,7 @@ upload_with_wget() {
     # Handle 503 back-pressure
     if [ "$http_code" = "503" ]; then
         local retry_after
-        retry_after="$(grep -i 'Retry-After' "$header_file" 2>/dev/null | head -1 | sed 's/[^0-9]//g')"
+        retry_after="$(retry_after_seconds "$header_file")"
         if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
             [ "$retry_after" -gt 120 ] && retry_after=120
             log_msg warn "Server returned 503, waiting ${retry_after}s (Retry-After)"
@@ -1006,6 +1044,7 @@ main() {
     local elapsed=0
     local find_results_file
 
+    default_scan_folders
     parse_args "$@"
     detect_source_name
     validate_config
@@ -1114,13 +1153,13 @@ main() {
     for _ep in "${EXCLUDE_PATHS[@]}"; do
         [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
     done
-    local _mount_list
-    _mount_list="$(get_excluded_mounts)"
-    if [ -n "$_mount_list" ]; then
-        while IFS= read -r _ep; do
-            [ -n "$_ep" ] && [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
-        done <<< "$_mount_list"
-    fi
+    local _mount_pattern
+    while IFS= read -r -d '' _ep; do
+        if [ -n "$_ep" ] && [ -d "$_ep" ]; then
+            _mount_pattern="$(escape_find_path "$_ep"; printf '.')"
+            find_excludes+=(-path "${_mount_pattern%.}" -prune -o)
+        fi
+    done < <(get_excluded_mounts)
 
     # Prune known cloud storage directory names at the find level so they are
     # excluded from both the file count and processing (keeps progress accurate).

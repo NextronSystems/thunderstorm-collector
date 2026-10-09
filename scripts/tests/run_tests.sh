@@ -141,7 +141,8 @@ start_stub() {
     for ((i = 0; i < 30; i++)); do
         kill -0 "$STUB_PID" 2>/dev/null || break
         if curl -fsS --connect-timeout 1 --max-time 2 \
-            "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1; then
+            "http://127.0.0.1:$STUB_PORT/api/status" >/dev/null 2>&1 &&
+            kill -0 "$STUB_PID" 2>/dev/null; then
             return 0
         fi
         sleep 0.2
