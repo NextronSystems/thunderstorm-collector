@@ -9,14 +9,13 @@ This overview focuses on the rewritten collectors in `scripts/`. The existing
 Go and older integration workflows are distinguished below; they are not a
 replacement for the script-specific tests.
 
-**Snapshot: 9 October 2026.** This describes the combined local integration
-checkout across the collector PRs, including the pending Copilot-review fixes
-and their new tests. Those fixes were not yet committed or pushed when this
-overview was written. The documentation PR (#52) does not itself include all
+**Scope:** This describes the combined tree across the shared harness (#43),
+layout (#49), and collector PRs (#44-#48), including their review fixes and
+regression tests. The documentation PR (#52) does not itself include all
 collector implementations or test files; some relative links only resolve in
 the combined tree. A collector PR checkout may also contain fewer checks.
-Inspect that branch's files and workflow log before claiming coverage. This is
-a description of the test setup, not a new acceptance result.
+Inspect that branch's exact revision, files, and workflow log before claiming
+coverage. This is a description of the test setup, not a new acceptance result.
 
 ## Test Layers
 
