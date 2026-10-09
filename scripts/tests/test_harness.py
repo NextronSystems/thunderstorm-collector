@@ -179,6 +179,26 @@ class ShellSafeguardTests(unittest.TestCase):
         self.assertNotIn("UNRELATED_LISTENER_CONTACTED", result.stdout)
         self.assertNotIn("SHOULD_NOT_RUN", result.stdout)
 
+    def test_stub_dying_during_readiness_probe_is_not_ready(self):
+        for filename in ("run_e2e_compliance.sh", "run_operational_tests.sh"):
+            with self.subTest(harness=filename), tempfile.TemporaryDirectory() as directory:
+                result = self.run_shell(
+                    "WORK_DIR=" + repr(directory) + "\nSTUB_LOG=unused\nSTUB_PORT=19993\n"
+                    "STUB_URL=http://127.0.0.1:19993\n"
+                    "find_stub() { echo /usr/bin/false; }\nfind_rules() { echo unused; }\n"
+                    "mktemp() { echo " + repr(str(Path(directory) / "audit.jsonl")) + "; }\n"
+                    "sleep() { :; }\n"
+                    # Model a successful response from an unrelated listener while
+                    # the child launched by this harness fails to bind its port.
+                    "kill() { [ ! -e \"$WORK_DIR/probed\" ]; }\n"
+                    "curl() { wait \"$STUB_PID\" || :; touch \"$WORK_DIR/probed\"; }\n"
+                    + self.function(filename, "start_stub")
+                    + "\nstart_stub /usr/bin/false\necho SHOULD_NOT_RUN\n"
+                )
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Stub server failed to start", result.stderr)
+                self.assertNotIn("SHOULD_NOT_RUN", result.stdout)
+
     def test_cleanup_does_not_need_lsof_or_touch_other_runs(self):
         with tempfile.TemporaryDirectory(prefix="harness-cleanup-") as directory:
             root = Path(directory)
