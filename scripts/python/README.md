@@ -4,6 +4,25 @@ Prefer `thunderstorm-collector.py` (Python 3.4+). Use the standalone
 `thunderstorm-collector-py2.py` only on legacy hosts with Python 2.7.
 Both need only the standard library. Python 2 is end-of-life.
 
+## Configuration and Startup Output
+
+Both standalone files have the same commented `USER CONFIGURATION` block near
+the top. Set `THUNDERSTORM_SERVER` (hostname/IP, without scheme/port/path) and review
+`SCAN_DIRS`, for example `["/var/www", "/home/alice"]`. The default is the entire
+filesystem root, subject to exclusions below. Missing server configuration exits
+2 with an instruction; supplying `--server HOST` also satisfies the requirement.
+CLI values override header values. Any `--dir` replaces the whole header root
+list; repeated `--dir` options accumulate. `--no-tls`, `--verify-tls`, `--async`,
+`--no-dry-run` and `--no-debug` disable corresponding enabled header flags.
+
+Defaults are **30 days since modification** and **2048 KiB (2 MiB)**. Older/larger
+files are intentionally excluded. The console log on stderr shows resolved roots
+and effective limits before collection, also with `--dry-run`. For a persistent
+log while keeping output visible, append `2>&1 | tee /path/outside-input/collector.log`
+to your chosen command. That pipeline's status may be tee's status;
+capture the collector's exit code separately when testing. No log file is created
+by the collector itself. Always review a dry-run before collecting real data.
+
 ## Capability Profile
 
 - Recursive regular files; symlink entries/special files are skipped. Explicit
@@ -11,7 +30,7 @@ Both need only the standard library. Python 2 is end-of-life.
   trees, `.dat`, `.npm`, and VM artifacts ending in `.vmdk`, `.vswp`, `.nvram`,
   `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts are best-effort
   exclusions, not a security boundary. Explicit excluded roots remain excluded.
-- Age defaults to 14 days; `--max-age 0..36500`, zero disables filtering.
+- Age defaults to 30 days; `--max-age 0..36500`, zero disables filtering.
   Positive values compare mtime to run start minus N times 86400 seconds.
 - Size defaults to 2048 KiB; `--max-size-kb 1..204800`, exact limit included.
   Binary/empty/Unicode/newline files work. Unsafe multipart filename characters

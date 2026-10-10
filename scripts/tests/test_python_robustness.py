@@ -380,5 +380,71 @@ class PythonRobustness(unittest.TestCase):
             module.os.fdopen = original
 
 
+
+    def run_configuration_command(self, command):
+        process = subprocess.Popen(command, cwd=self.root, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT)
+        timer = threading.Timer(30, process.kill)
+        timer.start()
+        try:
+            output = process.communicate()[0].decode("utf-8", "replace")
+        finally:
+            timer.cancel()
+        self.assertNotEqual(process.returncode, -9, "configuration test exceeded deadline")
+        return process.returncode, output
+
+    def test_missing_header_server_is_actionable(self):
+        code, output = self.run_configuration_command([sys.executable, "-B"] + [SCRIPT, "--dry-run", "--dir", self.samples])
+        self.assertEqual(code, 2, output)
+        self.assertIn("Thunderstorm server is not configured", output)
+        self.assertIn("USER CONFIGURATION", output)
+        self.assertEqual(self.paths, [])
+
+    def test_header_configuration_defaults_and_cli_precedence(self):
+        for name, size, days in [("fresh.txt", 1, 0), ("twenty-days.txt", 1, 20),
+                                 ("forty-days.txt", 1, 40), ("exact.txt", 2097152, 0),
+                                 ("oversized.txt", 2097153, 0)]:
+            path = self.file(name, b"x" * size)
+            stamp = time.time() - days * 86400
+            os.utime(path, (stamp, stamp))
+        with open(SCRIPT) as stream:
+            source = stream.read()
+        changes = [('THUNDERSTORM_SERVER = ""', 'THUNDERSTORM_SERVER = "127.0.0.1"'),
+                   ('SCAN_DIRS = [os.path.abspath(os.sep)]', 'SCAN_DIRS = ' + repr([self.samples])),
+                   ('DRY_RUN = False', 'DRY_RUN = True'), ('USE_TLS = False', 'USE_TLS = True')]
+        for old, new in changes:
+            self.assertIn(old, source)
+            source = source.replace(old, new, 1)
+        configured = os.path.join(self.root, "configured.py")
+        with open(configured, "w") as stream:
+            stream.write(source)
+        command = [sys.executable, "-B"] + [configured, "--no-progress"]
+        code, output = self.run_configuration_command(command)
+        self.assertEqual(code, 0, output)
+        self.assertIn("max-age=30", output)
+        self.assertIn("max-size=2048 KiB", output)
+        self.assertIn("Scan root: " + os.path.realpath(self.samples), output)
+        for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
+            self.assertIn(name, output)
+        for name in ("forty-days.txt", "oversized.txt"):
+            self.assertNotIn(name, output)
+        self.assertEqual(self.paths, [])
+
+        override = os.path.join(self.root, "CLI root with spaces")
+        os.mkdir(override)
+        with open(os.path.join(override, "only-cli.txt"), "wb") as stream:
+            stream.write(b"cli-only")
+        code, output = self.run_configuration_command(command + [
+            "--dir", override, "--server", "127.0.0.1", "--port", str(self.server.server_port),
+            "--no-tls", "--no-dry-run", "--max-age", "0", "--max-size-kb", "1", "--source", "cli-source"])
+        self.assertEqual(code, 0, output)
+        self.assertIn("Scan root: " + os.path.realpath(override), output)
+        self.assertNotIn("Scan root: " + os.path.realpath(self.samples), output)
+        self.assertIn("max-age=0", output)
+        self.assertIn("max-size=1 KiB", output)
+        self.assertEqual(self.uploads, [b"cli-only"])
+        self.assertTrue(any("source=cli-source" in path for path in self.paths))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

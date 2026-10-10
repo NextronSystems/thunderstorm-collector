@@ -16,6 +16,37 @@ import sys
 import time
 import uuid
 
+# USER CONFIGURATION -----------------------------------------------------------
+# Edit these defaults or pass command-line options (which take precedence).
+# Example: python thunderstorm-collector.py --server 192.0.2.10 --dir /tmp/samples --dry-run
+# Use the matching Python runtime/file. Dry-run never makes HTTP requests.
+THUNDERSTORM_SERVER = ""  # Required hostname/IP, e.g. "192.0.2.10"; no http://, port or path.
+THUNDERSTORM_PORT = 8080  # TCP port, 1..65535; independent of USE_TLS.
+USE_TLS = False          # False = HTTP; True = HTTPS (--tls / --no-tls).
+INSECURE = False         # Keep False: verify TLS certificates; True is for explicit testing only.
+CA_CERT = ""             # Empty = system trust; otherwise PEM CA file for HTTPS.
+SOURCE = ""              # Empty = hostname; otherwise an inventory/incident label.
+
+# Recursive roots. Broad default: filesystem root ("/" on Unix).
+# Example: SCAN_DIRS = ["/var/www", "/home/alice"]
+# --dir replaces this entire list; repeated --dir options add roots.
+SCAN_DIRS = [os.path.abspath(os.sep)]
+MAX_AGE = 30             # Days since last modification, 0..36500; 0 disables the age filter.
+MAX_SIZE_KB = 2048       # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact limit included.
+# No extension allowlist. Links, special/network FS, cloud paths and internal
+# exclusion patterns (e.g. .dat/.npm/VM files) still apply.
+
+SYNC = False            # False = async submission; True = wait for analysis (--sync / --async).
+RETRIES = 3             # TOTAL upload attempts including the first, 1..10.
+DRY_RUN = False         # True = preview only; False = uploads (--dry-run / --no-dry-run).
+DEBUG = False           # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
+# Progress is automatic on terminals; --progress / --no-progress overrides it.
+# The console log (stderr) includes roots and limits. Capture it outside the scan
+# roots if a persistent log is needed; this collector does not create a log file.
+
+# INTERNAL IMPLEMENTATION - no user settings below this line -------------------
+
+
 try:
     import http.client as http_client
     from urllib.parse import quote
@@ -334,7 +365,13 @@ class Collector(object):
             else:
                 roots.append(path)
         if not roots:
+            log("[ERROR] No usable scan directories. Set SCAN_DIRS in USER CONFIGURATION or pass --dir PATH.")
             return 2
+        log("[INFO] Scan roots (recursive; exclusions apply):")
+        for root in roots:
+            log("[INFO]   Scan root: {}".format(_text(root)))
+        log("[INFO] Limits: max-age={} days (0=disabled); max-size={} KiB; dry-run={}".format(
+            self.args.max_age, self.args.max_size_kb, self.args.dry_run))
         hard_skips.extend(os.path.normpath(p) for p in get_excluded_mounts())
         signal.signal(signal.SIGINT, self.interrupted)
         signal.signal(signal.SIGTERM, self.interrupted)
@@ -358,29 +395,37 @@ def main():
             ".".join(str(part) for part in MIN_VERSION)))
         return 2
     parser = argparse.ArgumentParser(description="Standard-library THOR Thunderstorm collector")
-    parser.add_argument("-s", "--server", required=True, help="Server hostname or IP, not a URL")
-    parser.add_argument("-p", "--port", type=int, default=8080)
+    parser.add_argument("-s", "--server", default=THUNDERSTORM_SERVER,
+                        help="Required hostname/IP, not a URL; overrides THUNDERSTORM_SERVER")
+    parser.add_argument("-p", "--port", type=int, default=THUNDERSTORM_PORT)
     parser.add_argument("-d", "--dirs", "--dir", nargs="+", action="append")
-    parser.add_argument("-t", "--tls", action="store_true")
-    parser.add_argument("-k", "--insecure", action="store_true")
-    parser.add_argument("--ca-cert")
-    parser.add_argument("-S", "--source", default=socket.gethostname())
-    parser.add_argument("--max-age", type=int, default=14, help="Days; 0 disables age filtering")
-    parser.add_argument("--max-size-kb", type=int, default=2048, help="KiB; maximum 204800")
-    parser.add_argument("--retries", type=int, default=3, help="Total attempts, including the first")
-    parser.add_argument("--sync", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("-t", "--tls", action="store_true", default=USE_TLS)
+    parser.add_argument("--no-tls", dest="tls", action="store_false")
+    parser.add_argument("-k", "--insecure", action="store_true", default=INSECURE)
+    parser.add_argument("--verify-tls", dest="insecure", action="store_false")
+    parser.add_argument("--ca-cert", default=CA_CERT or None)
+    parser.add_argument("-S", "--source", default=SOURCE or socket.gethostname())
+    parser.add_argument("--max-age", type=int, default=MAX_AGE, help="Days; 0 disables age filtering")
+    parser.add_argument("--max-size-kb", type=int, default=MAX_SIZE_KB, help="KiB; maximum 204800")
+    parser.add_argument("--retries", type=int, default=RETRIES, help="Total attempts, including the first")
+    parser.add_argument("--sync", action="store_true", default=SYNC)
+    parser.add_argument("--async", dest="sync", action="store_false")
+    parser.add_argument("--dry-run", action="store_true", default=DRY_RUN)
+    parser.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    parser.add_argument("--debug", action="store_true", default=DEBUG)
+    parser.add_argument("--no-debug", dest="debug", action="store_false")
     parser.add_argument("--progress", dest="progress", action="store_true")
     parser.add_argument("--no-progress", dest="progress", action="store_false")
     parser.set_defaults(progress=sys.stderr.isatty())
     args = parser.parse_args()
-    args.dirs = [path for group in args.dirs for path in group] if args.dirs else [os.path.abspath(os.sep)]
+    args.dirs = [path for group in args.dirs for path in group] if args.dirs else list(SCAN_DIRS)
     args.source = _text(args.source)
     if (not 1 <= args.port <= 65535 or not 0 <= args.max_age <= 36500 or
             not 1 <= args.max_size_kb <= 204800 or not 1 <= args.retries <= 10):
         parser.error("port 1..65535, max-age 0..36500, max-size-kb 1..204800, retries 1..10 required")
-    if not args.server or re.search(r"[\s/\x00]", args.server):
+    if not args.server:
+        parser.error("Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST.")
+    if re.search(r"[\s/\x00]", args.server):
         parser.error("--server must be a hostname or IP, not a URL")
     if (args.insecure or args.ca_cert) and not args.tls:
         parser.error("--insecure/--ca-cert require --tls")
