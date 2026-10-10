@@ -15,39 +15,54 @@ if (( BASH_VERSINFO[0] < 3 || (BASH_VERSINFO[0] == 3 && BASH_VERSINFO[1] < 2) ))
     exit 2
 fi
 
-# Defaults --------------------------------------------------------------------
+# USER CONFIGURATION -----------------------------------------------------------
+# Edit these defaults or pass command-line options (which take precedence).
+# Start with --dry-run: it lists eligible files without making HTTP requests.
+# Example: bash thunderstorm-collector.sh --server 192.0.2.10 --dir /tmp/samples --dry-run
 
-LOGFILE="./thunderstorm.log"
-LOG_TO_FILE=1
-LOG_TO_SYSLOG=0
-LOG_TO_CMDLINE=1
-SYSLOG_FACILITY="user"
+# Connection: hostname/IP only, WITHOUT http://, a port, or an API path.
+THUNDERSTORM_SERVER=""       # Required: e.g. "192.0.2.10" or "scanner.example.org".
+THUNDERSTORM_PORT=8080        # TCP port, 1..65535; independent of USE_SSL.
+USE_SSL=0                    # 0 = HTTP; 1 = HTTPS (--ssl / --no-ssl).
+INSECURE=0                   # Keep 0: verify TLS certificates. 1 is for explicit testing only.
+CA_CERT=""                  # Empty = system trust; otherwise PEM CA file for HTTPS.
+SOURCE_NAME=""              # Empty = detected hostname; otherwise an inventory/incident label.
 
-THUNDERSTORM_SERVER="ygdrasil.nextron"
-THUNDERSTORM_PORT=8080
-USE_SSL=0
-INSECURE=0
-CA_CERT=""
-ASYNC_MODE=1
+# Search recursively. Example: SCAN_FOLDERS=("/var/www" "/home/alice")
+# Empty = existing platform defaults below. The first --dir replaces this list;
+# further --dir options add roots. Links, special/network FS and cloud paths stay excluded.
+SCAN_FOLDERS=()
+DEFAULT_SCAN_FOLDERS=('/root' '/tmp' '/home' '/var' '/usr')
+DEFAULT_MACOS_SCAN_FOLDERS=('/Users' '/tmp' '/var' '/usr')
+MAX_AGE=30                   # Days since last modification; 0 = no age filter (find -mtime).
+MAX_FILE_SIZE_KB=2048         # KiB (1024 bytes); 2048 = 2 MiB. Exact limit included; >0 required.
 
-MAX_AGE=14
-MAX_FILE_SIZE_KB=2000
-DEBUG=0
-DRY_RUN=0
-RETRIES=3
+ASYNC_MODE=1                 # 1 = submit without waiting for analysis; 0 = synchronous (--sync).
+RETRIES=3                    # Total normal upload attempts, 1..10; HTTP 503 has a separate budget.
+DRY_RUN=0                    # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
+DEBUG=0                      # 1 = additional diagnostics (--debug / --no-debug).
+PROGRESS_MODE=""            # Empty = automatic on a terminal; "on" or "off" forces it.
+
+# The selected roots and limits go to all enabled log destinations.
+LOGFILE="./thunderstorm.log" # Relative to the working directory; excluded from collection.
+LOG_TO_FILE=1                # 1 = append to LOGFILE; 0 = disabled.
+LOG_TO_SYSLOG=0              # 1 = also send to the local syslog service (requires logger).
+LOG_TO_CMDLINE=1             # 1 = console output; 0 = quiet (--quiet).
+SYSLOG_FACILITY="user"       # Syslog facility used only when LOG_TO_SYSLOG=1.
+
+# INTERNAL IMPLEMENTATION - no user settings below this line -------------------
 
 UPLOAD_TOOL=""
 WORK_DIR=""
 declare -a CURL_EXTRA_OPTS=()
 declare -a WGET_EXTRA_OPTS=()
 
-SCAN_FOLDERS=()
-
 default_scan_folders() {
-    local candidates=('/root' '/tmp' '/home' '/var' '/usr')
+    [ "${#SCAN_FOLDERS[@]}" -eq 0 ] || return 0
+    local candidates=("${DEFAULT_SCAN_FOLDERS[@]}")
     local path
     case "$(uname -s)" in
-        Darwin) candidates=('/Users' '/tmp' '/var' '/usr') ;;
+        Darwin) candidates=("${DEFAULT_MACOS_SCAN_FOLDERS[@]}") ;;
     esac
     SCAN_FOLDERS=()
     for path in "${candidates[@]}"; do
@@ -63,12 +78,10 @@ SCAN_ERRORS=0
 TOTAL_FILES=0
 SCAN_ID=""
 
-PROGRESS_MODE=""  # auto (empty), "on", or "off"
 SHOW_PROGRESS=0
 
 SCRIPT_NAME="${0##*/}"
 START_TS="$(date +%s 2>/dev/null || echo 0)"
-SOURCE_NAME=""
 
 # Filesystem exclusions -------------------------------------------------------
 # Pseudo-filesystems, virtual mounts, network shares, and cloud storage that
@@ -275,8 +288,8 @@ Options:
   -s, --server <host>        Thunderstorm server hostname or IP
   -p, --port <port>          Thunderstorm port (default: 8080)
   -d, --dir <path>           Directory to scan (repeatable)
-  --max-age <days>           Max file age in days (default: 14)
-  --max-size-kb <kb>         Max file size in KB (default: 2000)
+  --max-age <days>           Days since modification; 0 disables (shipped default: 30)
+  --max-size-kb <kb>         Max file size in KiB, inclusive (shipped default: 2048)
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
@@ -292,6 +305,10 @@ Options:
   --syslog                   Enable syslog logging
   --quiet                    Disable command-line logging
   -h, --help                 Show this help text
+
+Header settings can be overridden with options. Disable enabled header flags with:
+  --no-ssl  --verify-tls  --async  --no-dry-run  --no-debug
+Server is required: set THUNDERSTORM_SERVER in USER CONFIGURATION or use --server.
 
 Examples:
   bash thunderstorm-collector.sh --server thunderstorm.local
@@ -937,6 +954,8 @@ parse_args() {
             --ssl)
                 USE_SSL=1
                 ;;
+            --no-ssl) USE_SSL=0 ;;
+            --verify-tls) INSECURE=0 ;;
             -k|--insecure)
                 INSECURE=1
                 ;;
@@ -949,6 +968,7 @@ parse_args() {
             --sync)
                 ASYNC_MODE=0
                 ;;
+            --async) ASYNC_MODE=1 ;;
             --retries)
                 [ -n "${2:-}" ] || die "Missing value for $arg"
                 RETRIES="$2"
@@ -957,9 +977,11 @@ parse_args() {
             --dry-run)
                 DRY_RUN=1
                 ;;
+            --no-dry-run) DRY_RUN=0 ;;
             --debug)
                 DEBUG=1
                 ;;
+            --no-debug) DEBUG=0 ;;
             --log-file)
                 [ -n "${2:-}" ] || die "Missing value for $arg"
                 LOGFILE="$2"
@@ -1020,7 +1042,7 @@ validate_config() {
     [ "$RETRIES" -ge 1 ] || die "retries must be >= 1"
     [ "$RETRIES" -le 10 ] || die "retries must be <= 10"
 
-    [ -n "$THUNDERSTORM_SERVER" ] || die "Server must not be empty"
+    [ -n "$THUNDERSTORM_SERVER" ] || die "Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST."
     if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
         die "At least one directory is required"
     fi
@@ -1091,9 +1113,12 @@ main() {
     log_msg info "Port: $THUNDERSTORM_PORT"
     log_msg info "API endpoint: $api_endpoint"
     log_msg info "Max age (days): $MAX_AGE"
-    log_msg info "Max size (KB): $MAX_FILE_SIZE_KB"
+    log_msg info "Max size (KiB): $MAX_FILE_SIZE_KB"
     log_msg info "Source: $SOURCE_NAME"
-    log_msg info "Folders: ${SCAN_FOLDERS[*]}"
+    log_msg info "Scan roots (recursive; exclusions apply):"
+    for scandir in "${SCAN_FOLDERS[@]}"; do
+        log_msg info "  Scan root: $scandir"
+    done
     [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
 
     # Send collection begin marker; capture scan_id if server returns one

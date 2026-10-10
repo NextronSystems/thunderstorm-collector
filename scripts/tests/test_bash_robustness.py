@@ -12,6 +12,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from email.parser import BytesParser
@@ -406,7 +407,7 @@ class BashRobustnessTests(unittest.TestCase):
         path = self.tool_path(mktemp='#!/bin/sh\nexit 1\n')
         wrapper = 'mv "$TMPDIR/thunderstorm.foreign" "$TMPDIR/thunderstorm.$$"; exec "$@"'
         command = [BASH, "-c", wrapper, "fixture", BASH, str(COLLECTOR), "--dry-run",
-                   "--no-log-file", "--dir", str(self.samples)]
+                   "--no-log-file", "--server", "127.0.0.1", "--dir", str(self.samples)]
         result = subprocess.run(command, env={**os.environ, "TMPDIR": str(self.root),
                                              "PATH": path + os.pathsep + os.environ["PATH"]},
                                 capture_output=True, text=True, timeout=10)
@@ -479,6 +480,67 @@ exit "${CURL_EXIT:-18}"
         self.assertIn("failed=1", self.output)
 
 
+
+    def test_missing_header_server_is_actionable(self):
+        result = subprocess.run([BASH] + [str(COLLECTOR), "--dry-run", "--no-log-file",
+                                             "--dir", str(self.samples)],
+                                cwd=self.root, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("Thunderstorm server is not configured", result.stdout + result.stderr)
+        self.assertIn("USER CONFIGURATION", result.stdout + result.stderr)
+        self.assertEqual(self.requests, [])
+
+    def test_header_configuration_defaults_and_cli_precedence(self):
+        for name, size, days in [("fresh.txt", 1, 0), ("twenty-days.txt", 1, 20),
+                                 ("forty-days.txt", 1, 40), ("exact.txt", 2097152, 0),
+                                 ("oversized.txt", 2097153, 0)]:
+            path = self.samples / name
+            path.write_bytes(b"x" * size)
+            stamp = time.time() - days * 86400
+            os.utime(path, (stamp, stamp))
+        configured = self.root / "configured.sh"
+        source = COLLECTOR.read_text()
+        changes = [(r'^THUNDERSTORM_SERVER=""', 'THUNDERSTORM_SERVER="127.0.0.1"'),
+                   (r'^DRY_RUN=0', "DRY_RUN=1"),
+                   (r'^USE_SSL=0', "USE_SSL=1"),
+                   (r'^SCAN_FOLDERS=\(\)', "SCAN_FOLDERS=(" + shlex.quote(str(self.samples)) + ")")]
+        for pattern, value in changes:
+            source, count = re.subn(pattern, lambda match: value, source, count=1, flags=re.M)
+            self.assertEqual(count, 1, pattern)
+        configured.write_text(source)
+        logfile = self.root / "scope.log"
+        command = [BASH] + [str(configured), "--no-progress", "--log-file", str(logfile)]
+        result = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Max age (days): 30", output)
+        self.assertIn("Max size (KiB): 2048", output)
+        for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
+            self.assertIn(name, output)
+        for name in ("forty-days.txt", "oversized.txt"):
+            self.assertNotIn(name, output)
+        scope = "Scan root: " + str(self.samples)
+        self.assertIn(scope, output)
+        self.assertIn(scope, logfile.read_text())
+        self.assertEqual(self.requests, [])
+
+        override = self.root / "CLI root with spaces"
+        override.mkdir()
+        (override / "only-cli.txt").write_bytes(b"cli-only")
+        result = subprocess.run(command + ["--dir", str(override), "--server", "127.0.0.1",
+                                "--port", str(self.server.server_port), "--no-ssl", "--no-dry-run",
+                                "--max-age", "0", "--max-size-kb", "1", "--source", "cli-source"],
+                                cwd=self.root, capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Scan root: " + str(override), output)
+        self.assertNotIn("Scan root: " + str(self.samples), output)
+        self.assertIn("Max age (days): 0", output)
+        self.assertIn("Max size (KiB): 1", output)
+        self.assertEqual(len(self.uploads), 1)
+        self.assertTrue(any("source=cli-source" in path for path in self.requests))
+
+
 class BashHelperTests(unittest.TestCase):
     def function(self, name, path=COLLECTOR):
         source = path.read_text()
@@ -526,6 +588,8 @@ class BashHelperTests(unittest.TestCase):
                                      ("Linux", ["/root", "/tmp", "/home", "/var", "/usr"])]:
             with self.subTest(platform=platform):
                 body = 'uname() { printf "%s\\n" ' + shlex.quote(platform) + '; }\n'
+                body += "\n".join(line for line in COLLECTOR.read_text().splitlines()
+                                  if line.startswith(("DEFAULT_SCAN_FOLDERS=", "DEFAULT_MACOS_SCAN_FOLDERS="))) + "\n"
                 body += self.function("default_scan_folders")
                 body += '\ndefault_scan_folders\nprintf "%s\\0" "${SCAN_FOLDERS[@]}"\n'
                 result = subprocess.run([BASH, "-c", body], capture_output=True, check=True)
@@ -545,6 +609,8 @@ class BashHelperTests(unittest.TestCase):
             result = subprocess.run([BASH, "-c", body], capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("Stub server did not start", result.stderr)
+
+
 
 
 if __name__ == "__main__":

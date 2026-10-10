@@ -18,6 +18,24 @@ The collector does not require Python, jq, or GNU coreutils on macOS. Automated
 tests have additional dependencies; those are not collector requirements.
 Use the ash collector for BusyBox environments instead of weakening Bash's scope.
 
+## Configuration and Startup Output
+
+Edit the `USER CONFIGURATION` block near the top of the script, or pass options.
+Set `THUNDERSTORM_SERVER` to a hostname/IP without a scheme, port or API path;
+an empty server stops with exit 2 and an instruction explaining how to set it.
+Use `SCAN_FOLDERS=("/var/www" "/home/alice")` for explicit roots. Header roots
+are respected; an empty array selects the platform defaults listed below.
+Command-line options override header values, and the first `--dir` replaces the
+whole root list. `--no-ssl`, `--verify-tls`, `--async`, `--no-dry-run` and
+`--no-debug` can turn off corresponding header choices.
+
+The shipped limits are **30 days since modification** and **2048 KiB (2 MiB)**.
+Older/larger files are intentionally not collected; use `--max-age 0` for all ages.
+Before scanning, the console and enabled file/syslog destinations show one line
+per root and the effective limits, including in dry-run. Start with `--dry-run`
+and inspect that scope before permitting uploads. `--quiet` explicitly suppresses
+console output. Keep externally captured logs outside the input directories.
+
 ## Bash-Specific Behavior
 
 - Default roots: existing directories among `/root`, `/tmp`, `/home`, `/var`,
@@ -28,9 +46,9 @@ Use the ash collector for BusyBox environments instead of weakening Bash's scope
   directories are additive, including directories after `--`.
 - Recursive regular-file collection; symlinks within the tree are not followed.
   Explicit directory roots are resolved to physical absolute paths.
-- Default age limit: 14 days, based on **modification time**, not creation time.
+- Default age limit: 30 days, based on **modification time**, not creation time.
   `--max-age 0` disables filtering; other values use `find -mtime -N`.
-- Default size limit: 2000 KiB. `--max-size-kb N` includes files up to `N * 1024`
+- Default size limit: 2048 KiB. `--max-size-kb N` includes files up to `N * 1024`
   bytes, including empty files. Oversize files count as skipped.
 - HTTP/HTTPS, asynchronous `/api/checkAsync` by default, `--sync` for `/api/check`.
   An accepted asynchronous upload does not mean analysis has finished.
@@ -109,7 +127,7 @@ From this directory:
 bash ./thunderstorm-collector.sh --help
 bash ./thunderstorm-collector.sh \
   --server thunderstorm.example.org --port 8080 \
-  --dir /path/to/collection --source incident-123 --max-age 14
+  --dir /path/to/collection --source incident-123 --max-age 30
 ```
 
 ## Manual Acceptance Against a Real Service
