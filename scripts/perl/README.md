@@ -30,11 +30,31 @@ TLS behavior as described below:
 perl -MLWP::Protocol::https -MIO::Socket::SSL -e 'print "HTTPS modules available\n"'
 ```
 
+## Configuration and Startup Output
+
+The `USER CONFIGURATION` block near the top contains one commented setting per
+line. Set `$THUNDERSTORM_SERVER` (hostname/IP without scheme/port/path), optionally
+`$SOURCE`, and `@SCAN_DIRS`, for example `('/var/www', '/home/alice')`. The broad
+default root is `/`. Missing server configuration exits 2 with instructions.
+Command-line values override header values; the first `--dir` replaces the whole
+header root list, and further `--dir` options add roots. `--no-tls`, `--verify-tls`,
+`--async`, `--no-dry-run` and `--no-debug` disable corresponding header choices.
+
+Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
+files are intentionally not collected. The console log shows resolved roots and
+effective limits before collection, including with `--dry-run`. To retain console
+output, append `2>&1 | tee /path/outside-input/collector.log` to your command, but
+capture the collector exit code separately: the pipeline may report tee's status.
+The collector does not create a log file itself. Keep captured logs outside the
+input directories and review a dry-run before enabling uploads.
+The debug flag is retained for CLI compatibility; it does not add diagnostics in
+this profile. Errors and the startup scope are always reported.
+
 ## Capability Profile
 
 - Iterative recursive regular-file collection, binary/empty/Unicode/newline names. Symlink entries and special files are skipped; explicit roots resolve physically. Queued directories and their ancestor identities are rechecked before traversal and around file reads; detected replacements fail rather than upload their contents. These portable path checks are not an atomic filesystem sandbox: a hostile process can still race between checks. Use a read-only snapshot or a quiescent, trusted tree when strict containment is required. Descriptor-relative traversal would require a different platform/dependency profile than the Perl 5.8.1 baseline.
 - Built-in exclusions: /proc, /dev, /sys, /run, /snap, /.snapshots, Linux detected special/network mounts, known cloud folders, /mnt trees, .dat, .npm and .lck paths. These are best effort, not a security boundary.
-- Default age 14 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
+- Default age 30 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
 - Default size 2048 KiB; --max-size-kb 1..204800 includes exact limit. Bounded in-memory snapshot precedes network access; multipart construction needs several times the configured file size in RAM. Replaced/changed/unreadable files fail; newly oversized files are skipped. Not a filesystem-wide atomic snapshot.
 - Async /api/checkAsync, --sync uses /api/check. Complete 2xx means accepted, not finished analysis; no polling/resume/deduplication. Lost responses/retries can duplicate uploads.
 - Optional markers: 404/501 nonfatal without scan ID; real JSON parsing rather than regex extraction. Only a top-level JSON string is used as the scan ID; numbers, booleans, arrays and objects are ignored. Begin retries once after two seconds, then exits 2; failed end exits 1. SIGINT/SIGTERM sets an interruption flag; network I/O completes or times out before best-effort interrupted marker and exit 1. No further uploads after interruption is observed.

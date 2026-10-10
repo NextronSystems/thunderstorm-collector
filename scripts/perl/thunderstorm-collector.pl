@@ -15,6 +15,35 @@ use Fcntl qw(:DEFAULT :mode);
 use Sys::Hostname qw(hostname);
 use POSIX qw(strftime);
 
+# USER CONFIGURATION -----------------------------------------------------------
+# Edit one setting per line below, or use command-line options (higher priority).
+# Example: perl thunderstorm-collector.pl --server 192.0.2.10 --dir /tmp/samples --dry-run
+# Dry-run previews eligible files without making HTTP requests.
+my $THUNDERSTORM_SERVER = ''; # Required hostname/IP, e.g. '192.0.2.10'; no http://, port or path.
+my $THUNDERSTORM_PORT = 8080; # TCP port, 1..65535; independent of USE_TLS.
+my $USE_TLS = 0;             # 0 = HTTP; 1 = HTTPS (--tls / --no-tls).
+my $INSECURE = 0;            # Keep 0: verify TLS certificates; 1 is for explicit testing only.
+my $CA_CERT = '';            # Empty = system trust; otherwise PEM CA file for HTTPS.
+my $SOURCE = '';             # Empty = hostname; otherwise an inventory/incident label.
+
+# Recursive roots: one quoted directory per entry, separated by commas.
+# Broad Unix default: '/'. Example: my @SCAN_DIRS = ('/var/www', '/home/alice');
+# The first --dir replaces this entire list; repeat --dir to add more roots.
+my @SCAN_DIRS = ('/');
+my $MAX_AGE = 30;            # Days since last modification, 0..36500; 0 disables the age filter.
+my $MAX_SIZE_KB = 2048;      # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact limit included.
+# No extension allowlist. Links, special/network FS, cloud paths and internal
+# exclusions (including /mnt, .dat, .npm and .lck paths) still apply.
+
+my $SYNC = 0;                # 0 = async submission; 1 = wait for analysis (--sync / --async).
+my $RETRIES = 3;             # TOTAL upload attempts including the first, 1..10.
+my $DRY_RUN = 0;             # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
+my $DEBUG = 0;               # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
+# Progress is automatic on terminals; --progress / --no-progress overrides it.
+# The console log (stderr) includes roots and limits. Capture it outside the scan
+# roots if a persistent log is needed; this collector does not create a log file.
+
+# INTERNAL IMPLEMENTATION - no user settings below this line -------------------
 # Net::HTTP versions used by older LWP installations can return normal EOF in
 # the middle of a chunk or its trailers. A chunked response ends at the terminal
 # chunk/trailer delimiter, never at socket EOF. Keep LWP parsing and TLS, but
@@ -75,27 +104,44 @@ use POSIX qw(strftime);
 }
 LWP::Protocol::implementor('http', 'Thunderstorm::HTTP');
 
-my (@dirs, $server, $source, $ca);
-my ($port, $age, $size, $retries) = (8080, 14, 2048, 3);
-my ($tls, $insecure, $sync, $dry, $debug, $help) = (0) x 6;
+# Keep command-line directories separate so they replace, not append to, defaults.
+my @dirs;
+my $server = $THUNDERSTORM_SERVER;
+my $port = $THUNDERSTORM_PORT;
+my $source = length $SOURCE ? $SOURCE : hostname();
+my $ca = $CA_CERT;
+my $age = $MAX_AGE;
+my $size = $MAX_SIZE_KB;
+my $retries = $RETRIES;
+my $tls = $USE_TLS;
+my $insecure = $INSECURE;
+my $sync = $SYNC;
+my $dry = $DRY_RUN;
+my $debug = $DEBUG;
+my $help = 0;
 my $progress = -t STDERR ? 1 : 0;
 Configure(qw(no_auto_abbrev no_ignore_case));
 GetOptions(
     'dir|d=s' => \@dirs, 'server|s=s' => \$server, 'port|p=i' => \$port,
     'source|so=s' => \$source, 'ssl|tls' => \$tls, 'insecure|k' => \$insecure,
+    'no-tls|no-ssl' => sub { $tls = 0 }, 'verify-tls' => sub { $insecure = 0 },
     'ca-cert=s' => \$ca, 'sync' => \$sync, 'dry-run' => \$dry,
+    'async' => sub { $sync = 0 }, 'no-dry-run' => sub { $dry = 0 },
     'max-age=i' => \$age, 'max-size-kb=i' => \$size, 'retries=i' => \$retries,
     'progress' => sub { $progress = 1 }, 'no-progress' => sub { $progress = 0 },
-    'debug' => \$debug, 'help|h' => \$help
+    'debug' => \$debug, 'no-debug' => sub { $debug = 0 }, 'help|h' => \$help
 ) or exit 2;
 if ($help) {
     print "Usage: perl thunderstorm-collector.pl --server HOST --port 8080 --dir PATH\n",
           "Repeat --dir; --max-age 0 disables age filtering; --max-size-kb uses KiB.\n",
-          "--source TEXT --ssl [--ca-cert FILE|--insecure] --sync --dry-run --retries 1..10\n";
+          "--source TEXT --ssl [--ca-cert FILE|--insecure] --sync --dry-run --retries 1..10\n",
+          "Override enabled header flags: --no-tls --verify-tls --async --no-dry-run --no-debug\n";
     exit 0;
 }
 sub config_error { print STDERR "[ERROR] $_[0]\n"; exit 2 }
 config_error('Unknown positional arguments') if @ARGV;
+config_error('Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST.')
+    unless defined $server && length $server;
 config_error('Server must be a DNS/IPv4 name or bracketed IPv6 address')
     unless defined $server && $server =~ /^(?:[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$/;
 config_error('port 1..65535, age 0..36500, size 1..204800 KiB, retries 1..10 required')
@@ -103,8 +149,8 @@ config_error('port 1..65535, age 0..36500, size 1..204800 KiB, retries 1..10 req
            $size >= 1 && $size <= 204800 && $retries >= 1 && $retries <= 10;
 config_error('--ca-cert/--insecure require --ssl') if !$tls && ($ca || $insecure);
 config_error('CA certificate file not found') if $ca && !-f $ca;
-$source = decode('UTF-8', defined $source ? $source : hostname(), FB_DEFAULT);
-@dirs = ('/') unless @dirs;
+$source = decode('UTF-8', $source, FB_DEFAULT);
+@dirs = @SCAN_DIRS unless @dirs;
 my $base = ($tls ? 'https' : 'http') . "://$server:$port";
 my $json = JSON::PP->new->utf8->allow_nonref;
 my ($scanned, $submitted, $failed, $skipped, $scan_errors) = (0) x 5;
@@ -328,7 +374,10 @@ for my $path (@dirs) {
         else { print STDERR "[ERROR] Directory changed: $path\n"; $scan_errors++ }
     }
 }
-exit 2 unless @roots;
+config_error('No usable scan directories. Set SCAN_DIRS in USER CONFIGURATION or pass --dir PATH.') unless @roots;
+print STDERR "[INFO] Scan roots (recursive; exclusions apply):\n";
+print STDERR "[INFO]   Scan root: $_->[0]\n" for @roots;
+print STDERR "[INFO] Limits: max-age=$age days (0=disabled); max-size=$size KiB; dry-run=$dry\n";
 my $begin_ok = marker('begin');
 $started = $begin_ok ? 1 : 0;
 exit 2 unless $begin_ok || $interrupted;
