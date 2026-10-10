@@ -4,6 +4,24 @@ Use the modern collector when Windows PowerShell 3+ is available. The separate
 PS2 file is for hosts that cannot upgrade. Each file is self-contained, with the
 same reviewed core and a drift regression test. Neither needs curl or a Go binary.
 
+## Configuration and Startup Output
+
+Both files have a commented `USER CONFIGURATION` parameter block at the top.
+Set `ThunderstormServer` to a hostname/IP without scheme/port/path and review
+`Folder`, for example `@("C:\Samples", "D:\Evidence")`. The shipped root is `C:\`.
+An empty server exits 2 with instructions. Named parameters override header
+defaults; `-Folder` replaces the list. To turn off a switch enabled in the header,
+use `-DryRun:$false`, `-UseSSL:$false` or the corresponding switch name.
+`Extensions = @()` uses the visible `DefaultExtensions` list below the parameters;
+`-AllExtensions` disables suffix filtering. Exclusions still apply.
+
+Defaults are **30 days since modification** and **2 MiB (2048 KiB)**. Older/larger
+files are not collected. Startup output lists resolved roots, limits, and the
+extension selection, including in `-DryRun`. For a persistent console log on
+legacy PowerShell, use `Start-Transcript -Path C:\Logs\collector.log` before running
+the collector and `Stop-Transcript` afterwards. Store the transcript OUTSIDE the
+selected roots. The collector does not create its own log file.
+
 ## Capability Profile
 
 | Item | Behavior / limitation |
@@ -11,7 +29,7 @@ same reviewed core and a drift regression test. Neither needs curl or a Go binar
 | Runtime | Modern: PowerShell language 3+. Legacy: language 2.0, Add-Type and full .NET required. |
 | Tested hosts | PowerShell 7 on macOS and Windows PowerShell 5.1 in CI; these are NOT proof of actual PS2, PS3 or old CLR compatibility. |
 | Selection | Recursive literal paths; no junctions/symlinks; built-in extension allowlist or explicit Extensions / AllExtensions. Known cloud folder names excluded. |
-| Age | Last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
+| Age | Default 30 days; last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
 | Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
 | Upload | Binary-safe multipart file; empty files included. Async default, Sync optional; does not poll analysis results. |
 | Collection markers | Optional /api/collection. Only 404/501 disable markers; other begin failures are fatal. Failed end markers cause nonzero exit. |

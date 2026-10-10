@@ -501,5 +501,67 @@ class PowerShellRobustness(unittest.TestCase):
             process.communicate(timeout=10)
 
 
+
+    def test_missing_header_server_is_actionable(self):
+        self.assertEqual(self.run_collector("--server", "", "--dry-run"), 2, self.output)
+        self.assertIn("Thunderstorm server is not configured", self.output)
+        self.assertIn("USER CONFIGURATION", self.output)
+        self.assertEqual(self.paths, [])
+
+    def test_header_configuration_defaults_and_cli_precedence(self):
+        for name, size, days in [("fresh.txt", 1, 0), ("twenty-days.txt", 1, 20),
+                                 ("forty-days.txt", 1, 40), ("exact.txt", 2097152, 0),
+                                 ("oversized.txt", 2097153, 0)]:
+            path = self.file(name, b"x" * size)
+            stamp = time.time() - days * 86400
+            os.utime(path, (stamp, stamp))
+        literal = lambda value: "'" + value.replace("'", "''") + "'"
+        with open(SCRIPT) as stream:
+            source = stream.read()
+        changes = [('$ThunderstormServer = ""', '$ThunderstormServer = "127.0.0.1"'),
+                   ('$Folder = @("C:\\")', '$Folder = @(' + literal(self.samples) + ')'),
+                   ('$DryRun = $false', '$DryRun = $true'),
+                   ('$UseSSL = $false', '$UseSSL = $true')]
+        for old, new in changes:
+            self.assertIn(old, source)
+            source = source.replace(old, new, 1)
+        configured = os.path.join(self.root, "configured.ps1")
+        with open(configured, "w") as stream:
+            stream.write(source)
+
+        def invoke(arguments):
+            expression = "& " + literal(configured) + " -NoProgress " + arguments + "; exit $LASTEXITCODE"
+            process = subprocess.Popen([RUNTIME, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                        "-Command", expression], cwd=self.root,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            output = communicate_collector(process).decode("utf-8", "replace")
+            self.assertEqual(process.returncode, 0, output)
+            return output
+
+        output = invoke("")
+        self.assertIn("max-age=30", output)
+        self.assertIn("max-size=2 MiB", output)
+        self.assertIn("Scan root: " + os.path.abspath(self.samples), output)
+        for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
+            self.assertIn(name, output)
+        for name in ("forty-days.txt", "oversized.txt"):
+            self.assertNotIn(name, output)
+        self.assertEqual(self.paths, [])
+
+        override = os.path.join(self.root, "CLI root with spaces")
+        os.mkdir(override)
+        with open(os.path.join(override, "only-cli.txt"), "wb") as stream:
+            stream.write(b"cli-only")
+        output = invoke("-ThunderstormServer 127.0.0.1 -ThunderstormPort " + str(self.server.server_port) +
+                        " -Folder @(" + literal(override) + ")" +
+                        " -UseSSL:$false -DryRun:$false -MaxAge 0 -MaxSize 1 -Source cli-source")
+        self.assertIn("Scan root: " + os.path.abspath(override), output)
+        self.assertNotIn("Scan root: " + os.path.abspath(self.samples), output)
+        self.assertIn("max-age=0", output)
+        self.assertIn("max-size=1 MiB", output)
+        self.assertEqual(self.uploads, [b"cli-only"])
+        self.assertTrue(any("source=cli-source" in path for path in self.paths))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

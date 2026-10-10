@@ -5,6 +5,25 @@ The release still ships ONE standalone .bat asset, but it is intentionally a
 cmd/JScript hybrid. Windows Script Host handles file data instead of expanding
 untrusted filenames through CALL or delayed expansion.
 
+## Configuration and Startup Output
+
+Edit the commented JScript `USER CONFIGURATION` block immediately below the
+launcher, or set environment variables of the same names. Nonempty environment
+values override header defaults; use `0` to turn a header flag off. Leave the
+launcher unchanged. In quoted script values double backslashes, for example
+`var COLLECT_DIRS = "C:\\Samples;D:\\Evidence";`. In cmd environment assignments
+use ordinary paths: `set "COLLECT_DIRS=C:\Samples;D:\Evidence"`.
+
+`THUNDERSTORM_SERVER` (hostname/IP without scheme/port/path) and `COLLECT_DIRS` are
+required. Missing values exit 2 with configuration instructions; no broad scan is
+implicit. Defaults are **30 days since modification** and **2097152 bytes
+(2048 KiB / 2 MiB)**. Older/larger files are not collected. Startup output shows
+resolved roots, limits, and selected extensions, including with `DRY_RUN=1`.
+Review that preview before enabling uploads. To retain a log, redirect output
+to a file outside the input roots, e.g. `thunderstorm-collector.bat > C:\Logs\collector.log 2>&1`,
+then inspect it with `type C:\Logs\collector.log`. Redirection replaces live console
+output; the collector does not create a separate log itself.
+
 ## Requirements and Limits
 
 | Item | Profile |
@@ -13,9 +32,9 @@ untrusted filenames through CALL or delayed expansion.
 | Upload tool | Trusted curl.exe 8.4+; explicit CURL_PATH preferred, then script directory, system directory, PATH. Never searched in the current working directory implicitly. |
 | Why curl 8.4+ | Earlier versions cannot bound unknown-length response downloads with max-filesize; see the official curl manual. Verify the binary supports the actual legacy Windows OS. |
 | Tested | Real cmd/WSH/curl on Windows CI. Native old Windows/old WSH still needs human acceptance. Not runnable on macOS. |
-| Configuration | Environment variables only; explicit server and scan directories required, no default system-wide scan. |
+| Configuration | Commented header defaults, overridden by nonempty environment variables; explicit server and scan directories required, no default system-wide scan. |
 | Traversal | Recursive, literal filenames, skips reparse-point/junction entries and known cloud directory names. Not a filesystem sandbox. |
-| Filtering | MAX_AGE uses last modification time, days; 0 disables. COLLECT_MAX_SIZE is BYTES, inclusive, 1..209715200; default 3000000. Extension list default .exe;.dll;.ps1;.bat;.txt; * includes all extensions. |
+| Filtering | MAX_AGE uses last modification time, days; default 30, 0 disables. COLLECT_MAX_SIZE is BYTES, inclusive, 1..209715200; default 2097152 (2 MiB). Extension list default .exe;.dll;.ps1;.bat;.txt; * includes all extensions. |
 | Upload | Binary/empty-file safe snapshots, one multipart file; async default, SYNC=1 optional. Source UTF-8 percent-encoded. |
 | Deliberately absent | Collection markers/scan_id, interrupted markers, result polling, deduplication, resume, custom insecure TLS mode, syslog, parallelism. |
 | TLS | curl certificate/hostname verification stays enabled; CURL_CA_BUNDLE is passed explicitly as --cacert, including Schannel builds. No machine trust changes. |
@@ -67,7 +86,7 @@ echo literal> "%TESTROOT%\input\semi;comma,bang!.txt"
 set "COLLECT_DIRS=%TESTROOT%\input"
 set "RELEVANT_EXTENSIONS=*"
 set "MAX_AGE=0"
-set "COLLECT_MAX_SIZE=3000000"
+set "COLLECT_MAX_SIZE=2097152"
 set "UPLOAD_ATTEMPTS=1"
 set "SOURCE=manual-batch-unique-tester-date"
 set "DRY_RUN=0"

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -109,6 +110,68 @@ class BatchRobustness(shared.PowerShellRobustness):
         self.assertEqual(os.listdir(self.environment["TEMP"]), [], "temporary payloads were not removed")
         self.assertEqual(self.markers, [], "Batch profile must not send unsupported collection markers")
         return process.returncode
+
+
+    def test_header_configuration_defaults_and_cli_precedence(self):
+        for name, size, days in [("fresh.txt", 1, 0), ("twenty-days.txt", 1, 20),
+                                 ("forty-days.txt", 1, 40), ("exact.txt", 2097152, 0),
+                                 ("oversized.txt", 2097153, 0)]:
+            path = self.file(name, b"x" * size)
+            stamp = time.time() - days * 86400
+            os.utime(path, (stamp, stamp))
+        source = Path(SCRIPT).read_text()
+        changes = [('var THUNDERSTORM_SERVER = "";', 'var THUNDERSTORM_SERVER = "127.0.0.1";'),
+                   ('var COLLECT_DIRS = "";', 'var COLLECT_DIRS = ' + json.dumps(self.samples) + ';'),
+                   ('var DRY_RUN = 0;', 'var DRY_RUN = 1;'),
+                   ('var URL_SCHEME = "http";', 'var URL_SCHEME = "https";')]
+        for old, new in changes:
+            self.assertIn(old, source)
+            source = source.replace(old, new, 1)
+        configured = Path(self.root) / "configured.bat"
+        configured.write_text(source)
+        environment = dict(os.environ)
+        for name in ("THUNDERSTORM_SERVER", "THUNDERSTORM_PORT", "COLLECT_DIRS", "SOURCE",
+                     "MAX_AGE", "COLLECT_MAX_SIZE", "RELEVANT_EXTENSIONS", "DRY_RUN", "SYNC",
+                     "URL_SCHEME", "CURL_CA_BUNDLE", "UPLOAD_ATTEMPTS", "CURL_PATH"):
+            environment.pop(name, None)
+        temporary = Path(self.root) / "header-temporary"
+        temporary.mkdir()
+        environment["TEMP"] = environment["TMP"] = str(temporary)
+
+        def invoke():
+            process = subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/v:off",
+                                        "/c", str(configured)], env=environment, cwd=self.root,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            output = shared.communicate_collector(process).decode("utf-8", "replace")
+            self.assertEqual(process.returncode, 0, output)
+            return output
+
+        output = invoke()
+        self.assertIn("max-age=30", output)
+        self.assertIn("max-size=2097152 bytes", output)
+        self.assertIn("Scan root: " + os.path.realpath(self.samples), output)
+        for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
+            self.assertIn(name, output)
+        for name in ("forty-days.txt", "oversized.txt"):
+            self.assertNotIn(name, output)
+        self.assertEqual(self.paths, [])
+
+        override = Path(self.root) / "environment root with spaces"
+        override.mkdir()
+        (override / "only-env.txt").write_bytes(b"env-only")
+        environment.update(THUNDERSTORM_SERVER="127.0.0.1", THUNDERSTORM_PORT=str(self.server.server_port),
+                           COLLECT_DIRS=str(override), URL_SCHEME="http", DRY_RUN="0",
+                           MAX_AGE="0", COLLECT_MAX_SIZE="1024", SOURCE="env-source",
+                           CURL_PATH=shutil.which("curl.exe") or "C:\\missing-curl.exe")
+        output = invoke()
+        self.assertIn("Scan root: " + os.path.realpath(str(override)), output)
+        self.assertNotIn("Scan root: " + os.path.realpath(self.samples), output)
+        self.assertIn("max-age=0", output)
+        self.assertIn("max-size=1024 bytes", output)
+        self.assertEqual(self.uploads, [b"env-only"])
+        self.assertTrue(any("source=env-source" in path for path in self.paths))
+        self.assertEqual(list(temporary.iterdir()), [])
+
 
     def test_binary_empty_special_and_unicode_source(self):
         names = ["normal", "semi;colon", "comma,name", "bracket[name]", "percent%PATH%", "bang!", "amp&caret^", "unicode-\u00e4"]

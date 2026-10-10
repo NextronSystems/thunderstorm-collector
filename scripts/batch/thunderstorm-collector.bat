@@ -6,6 +6,35 @@ exit /b %errorlevel%
 */
 // THOR Thunderstorm Collector - Florian Roth / Nextron Systems
 // Single release asset. WSH handles data; cmd never evaluates discovered paths.
+// USER CONFIGURATION ----------------------------------------------------------
+// Leave the launcher above unchanged. The settings below use JScript syntax.
+// Edit one value per line; nonempty environment variables of the SAME NAME win.
+// Environment example in cmd.exe: set "THUNDERSTORM_SERVER=192.0.2.10"
+// Then set "COLLECT_DIRS=C:\Samples" and set "DRY_RUN=1" before running this file.
+// In QUOTED SCRIPT VALUES, double every backslash: "C:\\Samples".
+var THUNDERSTORM_SERVER = ""; // Required hostname/IP; no http://, port or API path.
+var THUNDERSTORM_PORT = 8080; // TCP port, 1..65535; independent of URL_SCHEME.
+var URL_SCHEME = "http";      // "http" or "https"; HTTPS always verifies certificates.
+var CURL_CA_BUNDLE = "";      // Empty = curl/system trust; otherwise PEM CA file for HTTPS.
+var SOURCE = "";             // Empty = computer name; otherwise an inventory/incident label.
+
+// Required recursive roots, separated by semicolons; NO system-wide default.
+// Example: var COLLECT_DIRS = "C:\\Samples;D:\\Evidence";
+// Links/junctions and cloud directories remain excluded. Semicolons cannot be in roots.
+var COLLECT_DIRS = "";
+var MAX_AGE = 30;            // Days since last modification, 0..36500; 0 disables age filtering.
+var COLLECT_MAX_SIZE = 2097152; // BYTES, 1..209715200; 2097152 = 2048 KiB = 2 MiB, inclusive.
+var RELEVANT_EXTENSIONS = ".exe;.dll;.ps1;.bat;.txt"; // Literal suffixes; "*" = all extensions.
+
+var SYNC = 0;               // 0 = async submission; 1 = wait for analysis.
+var UPLOAD_ATTEMPTS = 3;     // TOTAL upload attempts including the first, 1..10.
+var DRY_RUN = 0;            // 1 = preview, no HTTP requests; 0 = real uploads.
+var CURL_PATH = "";         // Empty = discover curl.exe; otherwise trusted path to curl 8.4+.
+// Console logs include roots and limits. Redirect output to a file OUTSIDE the
+// scan roots if needed; this collector does not create its own log file.
+// No collection markers, insecure TLS switch, or progress/debug switches in this profile.
+
+// INTERNAL IMPLEMENTATION - no user settings below this line ------------------
 var fso, shell, environment, workspace = "", exitCode = 0;
 var stats = {scanned: 0, submitted: 0, failed: 0, skipped: 0, scan_errors: 0};
 function log(text) { WScript.Echo(text); }
@@ -20,8 +49,8 @@ function number(name, fallback, minimum, maximum) {
     if (value < minimum || value > maximum) throw new Error(name + " outside permitted range.");
     return value;
 }
-function flag(name) {
-    var value = setting(name, "0").toLowerCase();
+function flag(name, fallback) {
+    var value = setting(name, String(fallback)).toLowerCase();
     if (!/^(0|1|false|true)$/.test(value)) throw new Error(name + " must be 0 or 1.");
     return value === "1" || value === "true";
 }
@@ -41,7 +70,7 @@ function execute(command) {
     return {code: process.ExitCode, output: process.StdOut.ReadAll(), error: process.StdErr.ReadAll()};
 }
 function resolveCurl() {
-    var configured = setting("CURL_PATH", "");
+    var configured = setting("CURL_PATH", CURL_PATH);
     var candidates = configured ? [configured] :
         [fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "curl.exe"),
          fso.BuildPath(shell.ExpandEnvironmentStrings("%SystemRoot%"), "System32\\curl.exe")];
@@ -181,31 +210,35 @@ try {
     fso = new ActiveXObject("Scripting.FileSystemObject");
     shell = new ActiveXObject("WScript.Shell");
     environment = shell.Environment("PROCESS");
-    var server = setting("THUNDERSTORM_SERVER", ""), port = number("THUNDERSTORM_PORT", 8080, 1, 65535);
+    var server = setting("THUNDERSTORM_SERVER", THUNDERSTORM_SERVER);
+    if (!server) throw new Error("Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or as an environment variable.");
+    var port = number("THUNDERSTORM_PORT", THUNDERSTORM_PORT, 1, 65535);
     if (!/^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$/.test(server)) throw new Error("Invalid THUNDERSTORM_SERVER.");
-    var scheme = setting("URL_SCHEME", "http").toLowerCase();
+    var scheme = setting("URL_SCHEME", URL_SCHEME).toLowerCase();
     if (scheme !== "http" && scheme !== "https") throw new Error("URL_SCHEME must be http or https.");
-    var maxSize = number("COLLECT_MAX_SIZE", 3000000, 1, 209715200);
-    var maxAge = number("MAX_AGE", 30, 0, 36500), attempts = number("UPLOAD_ATTEMPTS", 3, 1, 10);
-    var dryRun = flag("DRY_RUN"), sync = flag("SYNC");
-    var caBundle = scheme === "https" ? setting("CURL_CA_BUNDLE", "") : "";
+    var maxSize = number("COLLECT_MAX_SIZE", COLLECT_MAX_SIZE, 1, 209715200);
+    var maxAge = number("MAX_AGE", MAX_AGE, 0, 36500);
+    var attempts = number("UPLOAD_ATTEMPTS", UPLOAD_ATTEMPTS, 1, 10);
+    var dryRun = flag("DRY_RUN", DRY_RUN);
+    var sync = flag("SYNC", SYNC);
+    var caBundle = scheme === "https" ? setting("CURL_CA_BUNDLE", CURL_CA_BUNDLE) : "";
     if (caBundle && !dryRun) {
         caBundle = fso.GetAbsolutePathName(caBundle);
         quote(caBundle);
         if (!fso.FileExists(caBundle)) throw new Error("CURL_CA_BUNDLE file not found.");
     }
     var cutoff = new Date().getTime() - maxAge * 86400000;
-    var source = setting("SOURCE", shell.ExpandEnvironmentStrings("%COMPUTERNAME%"));
+    var source = setting("SOURCE", SOURCE || shell.ExpandEnvironmentStrings("%COMPUTERNAME%"));
     var url = scheme + "://" + server + ":" + port + (sync ? "/api/check" : "/api/checkAsync") +
         "?source=" + encodeURIComponent(source);
-    var selected = setting("RELEVANT_EXTENSIONS", ".exe;.dll;.ps1;.bat;.txt").split(";");
+    var selected = setting("RELEVANT_EXTENSIONS", RELEVANT_EXTENSIONS).split(";");
     var allExtensions = selected.length === 1 && selected[0] === "*", extensions = {};
     for (var i = 0; i < selected.length && !allExtensions; i++) {
         if (!/^\.[A-Za-z0-9_-]+$/.test(selected[i])) throw new Error("Invalid RELEVANT_EXTENSIONS suffix.");
         extensions[selected[i].toLowerCase()] = true;
     }
-    var directories = setting("COLLECT_DIRS", "");
-    if (!directories) throw new Error("Set explicit COLLECT_DIRS; there is no broad default scan.");
+    var directories = setting("COLLECT_DIRS", COLLECT_DIRS);
+    if (!directories) throw new Error("Scan directories are not configured. Set COLLECT_DIRS in USER CONFIGURATION or as an environment variable; there is no broad default scan.");
     var roots = [], values = directories.split(";");
     for (var i = 0; i < values.length; i++) {
         try {
@@ -215,6 +248,10 @@ try {
         } catch (error) { stats.scan_errors++; log("[ERROR] Missing/unsafe directory: " + values[i]); }
     }
     if (!roots.length) throw new Error("No usable input directories.");
+    log("[INFO] Scan roots (recursive; exclusions apply):");
+    for (var i = 0; i < roots.length; i++) log("[INFO]   Scan root: " + roots[i]);
+    log("[INFO] Limits: max-age=" + maxAge + " days (0=disabled); max-size=" + maxSize + " bytes; dry-run=" + dryRun);
+    log("[INFO] Extensions: " + (allExtensions ? "all" : selected.join(";")));
     if (!dryRun) { var curl = resolveCurl(); createWorkspace(); }
     for (var i = 0; i < roots.length; i++) walk(roots[i]);
     if (stats.failed || stats.scan_errors) exitCode = 1;

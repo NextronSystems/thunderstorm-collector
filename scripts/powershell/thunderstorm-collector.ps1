@@ -1,25 +1,56 @@
 #requires -Version 3.0
 # THOR Thunderstorm Collector - Florian Roth / Nextron Systems
+# USER CONFIGURATION -----------------------------------------------------------
+# Edit the parameter defaults below or pass named parameters (higher priority).
+# Example: .\thunderstorm-collector.ps1 -ThunderstormServer 192.0.2.10 -Folder C:\Samples -DryRun
+# For PowerShell 2, use thunderstorm-collector-ps2.ps1 with the same parameters.
+# DryRun makes no HTTP requests. Boolean defaults use $true / $false.
+# To override an enabled switch, pass e.g. -DryRun:$false or -UseSSL:$false.
 [CmdletBinding()]
 param(
-    [Alias("TS")][string]$ThunderstormServer,
+    # Required hostname/IP, e.g. "192.0.2.10"; no http://, port or API path.
+    [Alias("TS")][string]$ThunderstormServer = "",
+    # TCP port, 1..65535; independent of UseSSL.
     [Alias("TP")][int]$ThunderstormPort = 8080,
+    # Recursive roots; broad default C:\. Example: @("C:\Samples", "D:\Evidence").
+    # -Folder replaces the entire list. Links/junctions and cloud paths stay excluded.
     [Alias("F")][string[]]$Folder = @("C:\"),
+    # Attribution label sent to the service; defaults to this computer's name.
     [Alias("S")][string]$Source = [Environment]::MachineName,
-    [Alias("MA")][int]$MaxAge = 14,
+    # Days since last modification, 0..36500; 0 disables the age filter.
+    [Alias("MA")][int]$MaxAge = 30,
+    # MiB (1048576 bytes), 1..200; 2 = 2048 KiB. Exact limit included.
     [Alias("MS")][int]$MaxSize = 2,
+    # Empty = DefaultExtensions below. Example: @(".exe", ".ps1").
+    # A nonempty list REPLACES the defaults; AllExtensions disables suffix filtering.
     [string[]]$Extensions = @(),
-    [switch]$AllExtensions,
-    [Alias("SSL")][switch]$UseSSL,
+    [switch]$AllExtensions = $false,
+    # False = HTTP; True = HTTPS with certificate and hostname verification.
+    [Alias("SSL")][switch]$UseSSL = $false,
+    # Empty = system trust; otherwise CA certificate file for HTTPS.
+    # Custom CA / Insecure need .NET 4.5+; unsupported runtimes fail explicitly.
     [string]$CACert = "",
-    [Alias("k")][switch]$Insecure,
-    [switch]$DryRun,
-    [switch]$Sync,
+    [Alias("k")][switch]$Insecure = $false, # Keep false; explicit TLS testing only.
+    [switch]$DryRun = $false,             # True = preview only; False = real uploads.
+    [switch]$Sync = $false,               # False = async submission; True = wait for analysis.
+    # TOTAL upload attempts including the first, 1..10.
     [int]$Retries = 3,
-    [Alias("D")][switch]$Debugging,
+    [Alias("D")][switch]$Debugging = $false, # Additional marker diagnostics.
+    # Progress is off by default; -Progress enables counts. NoProgress wins.
     [switch]$Progress,
     [switch]$NoProgress
 )
+# Default suffix allowlist (case-insensitive). Files without these suffixes are skipped.
+$DefaultExtensions = @(".asp",".vbs",".ps",".ps1",".rar",".tmp",".bas",".bat",".chm",".cmd",".com",".cpl",".crt",
+        ".dll",".exe",".hta",".js",".lnk",".msc",".ocx",".pcd",".pif",".pot",".reg",".scr",".sct",".sys",".url",
+        ".vb",".vbe",".wsc",".wsf",".wsh",".ct",".t",".input",".war",".jsp",".php",".aspx",".doc",".docx",
+        ".pdf",".xls",".xlsx",".ppt",".pptx",".log",".dump",".pwd",".w",".txt",".conf",".cfg",".config",
+        ".psd1",".psm1",".ps1xml",".clixml",".psc1",".pssc",".pl",".www",".rdp",".jar",".docm",".ace",
+        ".job",".temp",".plg",".asm")
+# Console logs include roots and limits. Use Start-Transcript before running the
+# collector to retain a log on legacy PowerShell too; store it OUTSIDE scan roots.
+
+# INTERNAL IMPLEMENTATION - no user settings below this line -------------------
 $collectorId = "powershell3/0.3"
 $ErrorActionPreference = "Stop"
 $exitCode = 0
@@ -325,6 +356,9 @@ function Walk([string]$root) {
 }
 
 try {
+    if (-not $ThunderstormServer) {
+        throw "Thunderstorm server is not configured. Set ThunderstormServer in USER CONFIGURATION or pass -ThunderstormServer HOST."
+    }
     if ($ThunderstormServer -notmatch '^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$' -or
         $ThunderstormPort -lt 1 -or $ThunderstormPort -gt 65535 -or $MaxAge -lt 0 -or $MaxAge -gt 36500 -or
         $MaxSize -lt 1 -or $MaxSize -gt 200 -or $Retries -lt 1 -or $Retries -gt 10) {
@@ -349,18 +383,14 @@ try {
     $limit = [long]$MaxSize * 1048576
     $cutoff = [DateTime]::MinValue
     if ($MaxAge -gt 0) { $cutoff = $startTime.AddDays(-$MaxAge) }
-    $extensionSet = @(".asp",".vbs",".ps",".ps1",".rar",".tmp",".bas",".bat",".chm",".cmd",".com",".cpl",".crt",
-        ".dll",".exe",".hta",".js",".lnk",".msc",".ocx",".pcd",".pif",".pot",".reg",".scr",".sct",".sys",".url",
-        ".vb",".vbe",".wsc",".wsf",".wsh",".ct",".t",".input",".war",".jsp",".php",".aspx",".doc",".docx",
-        ".pdf",".xls",".xlsx",".ppt",".pptx",".log",".dump",".pwd",".w",".txt",".conf",".cfg",".config",
-        ".psd1",".psm1",".ps1xml",".clixml",".psc1",".pssc",".pl",".www",".rdp",".jar",".docm",".ace",
-        ".job",".temp",".plg",".asm")
+    $extensionSet = @()
+    $selectedExtensions = $DefaultExtensions
     if ($Extensions.Count -gt 0) {
-        $extensionSet = @()
-        foreach ($extension in $Extensions) {
-            if ($extension -notmatch '^\.[A-Za-z0-9_-]+$') { throw "Extensions require literal dot-prefixed suffixes." }
-            $extensionSet += $extension.ToLowerInvariant()
-        }
+        $selectedExtensions = $Extensions
+    }
+    foreach ($extension in $selectedExtensions) {
+        if ($extension -notmatch '^\.[A-Za-z0-9_-]+$') { throw "Extensions require literal dot-prefixed suffixes." }
+        $extensionSet += $extension.ToLowerInvariant()
     }
     $roots = @()
     foreach ($path in $Folder) {
@@ -373,6 +403,11 @@ try {
         } catch { $stats.scan_errors++; Write-Host "[ERROR] Missing/unsafe directory: $path" }
     }
     if ($roots.Count -eq 0) { throw "No usable input directories." }
+    Write-Host "[INFO] Scan roots (recursive; exclusions apply):"
+    foreach ($root in $roots) { Write-Host "[INFO]   Scan root: $root" }
+    Write-Host "[INFO] Limits: max-age=$MaxAge days (0=disabled); max-size=$MaxSize MiB; dry-run=$DryRun"
+    if ($AllExtensions) { Write-Host "[INFO] Extensions: all" }
+    else { Write-Host ("[INFO] Extensions: " + ($extensionSet -join ", ")) }
     $script:jsonParser = $null
     $script:markersEnabled = $true
     if (-not (Get-Command ConvertFrom-Json -ErrorAction SilentlyContinue)) {
