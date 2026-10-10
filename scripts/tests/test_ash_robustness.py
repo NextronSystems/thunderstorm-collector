@@ -5,6 +5,7 @@ import email.policy
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -12,6 +13,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -522,7 +524,7 @@ exec "$REAL_FIND" "$@"
         path = self.tool_path(mktemp='#!/bin/sh\nexit 1\n')
         wrapper = 'mv "$TMPDIR/thunderstorm.foreign" "$TMPDIR/thunderstorm.$$"; exec "$@"'
         command = SHELL + ["-c", wrapper, "fixture"] + SHELL + [str(COLLECTOR), "--dry-run",
-                    "--no-log-file", "--dir", str(self.samples)]
+                    "--no-log-file", "--server", "127.0.0.1", "--dir", str(self.samples)]
         result = subprocess.run(command, env={**os.environ, "TMPDIR": str(self.root),
                                              "PATH": path + os.pathsep + os.environ["PATH"]},
                                 capture_output=True, text=True, timeout=10)
@@ -657,6 +659,67 @@ exec "$REAL_FIND" "$@"
         self.assertEqual(process.returncode, 1, output)
         self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
         self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+
+
+
+    def test_missing_header_server_is_actionable(self):
+        result = subprocess.run(SHELL + [str(COLLECTOR), "--dry-run", "--no-log-file",
+                                             "--dir", str(self.samples)],
+                                cwd=self.root, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("Thunderstorm server is not configured", result.stdout + result.stderr)
+        self.assertIn("USER CONFIGURATION", result.stdout + result.stderr)
+        self.assertEqual(self.requests, [])
+
+    def test_header_configuration_defaults_and_cli_precedence(self):
+        for name, size, days in [("fresh.txt", 1, 0), ("twenty-days.txt", 1, 20),
+                                 ("forty-days.txt", 1, 40), ("exact.txt", 2097152, 0),
+                                 ("oversized.txt", 2097153, 0)]:
+            path = self.samples / name
+            path.write_bytes(b"x" * size)
+            stamp = time.time() - days * 86400
+            os.utime(path, (stamp, stamp))
+        configured = self.root / "configured.sh"
+        source = COLLECTOR.read_text()
+        changes = [(r'^THUNDERSTORM_SERVER=""', 'THUNDERSTORM_SERVER="127.0.0.1"'),
+                   (r'^DRY_RUN=0', "DRY_RUN=1"),
+                   (r'^USE_SSL=0', "USE_SSL=1"),
+                   (r'^SCAN_DIRS="[^"]*"', "SCAN_DIRS=" + shlex.quote(str(self.samples)))]
+        for pattern, value in changes:
+            source, count = re.subn(pattern, lambda match: value, source, count=1, flags=re.M)
+            self.assertEqual(count, 1, pattern)
+        configured.write_text(source)
+        logfile = self.root / "scope.log"
+        command = SHELL + [str(configured), "--no-progress", "--log-file", str(logfile)]
+        result = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Max age (days): 30", output)
+        self.assertIn("Max size (KiB): 2048", output)
+        for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
+            self.assertIn(name, output)
+        for name in ("forty-days.txt", "oversized.txt"):
+            self.assertNotIn(name, output)
+        scope = "Scan root: " + str(self.samples)
+        self.assertIn(scope, output)
+        self.assertIn(scope, logfile.read_text())
+        self.assertEqual(self.requests, [])
+
+        override = self.root / "CLI root with spaces"
+        override.mkdir()
+        (override / "only-cli.txt").write_bytes(b"cli-only")
+        result = subprocess.run(command + ["--dir", str(override), "--server", "127.0.0.1",
+                                "--port", str(self.server.server_port), "--no-ssl", "--no-dry-run",
+                                "--max-age", "0", "--max-size-kb", "1", "--source", "cli-source"],
+                                cwd=self.root, capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Scan root: " + str(override), output)
+        self.assertNotIn("Scan root: " + str(self.samples), output)
+        self.assertIn("Max age (days): 0", output)
+        self.assertIn("Max size (KiB): 1", output)
+        self.assertEqual(len(self.uploads), 1)
+        self.assertTrue(any("source=cli-source" in path for path in self.requests))
 
 
 if __name__ == "__main__":

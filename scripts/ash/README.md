@@ -29,13 +29,30 @@ support `--no-config`.
 
 Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SECONDS COMMAND`. Its minimal HTTP/1.0 client requires a complete header section, exactly one `Content-Length`, no `Transfer-Encoding`, and the exact declared body length. Chunked, close-delimited, informational, malformed and incomplete responses fail. Prefer curl/GNU wget if your backend needs those features. HTTP is unencrypted; use an appropriately isolated network.
 
+## Configuration and Startup Output
+
+Edit the commented `USER CONFIGURATION` block or pass command-line options.
+`THUNDERSTORM_SERVER` is required (hostname/IPv4 only, without scheme/port/path).
+An empty value exits 2 with instructions. `SCAN_DIRS` contains one recursive root
+per line inside the quotes; spaces within a line belong to that path. Review the
+broad shipped Linux roots before running. The first `--dir` replaces the header
+list; further `--dir` options add roots. Other CLI values override their header
+defaults. `--no-ssl`, `--verify-tls`, `--async`, `--no-dry-run` and `--no-debug`
+disable corresponding header choices.
+
+Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
+files are not collected. The console and enabled file/syslog destinations print
+one line per root and the effective limits before scanning, including in dry-run.
+Start with `--dry-run` to check the scope. `--quiet` deliberately suppresses console
+output. Keep externally captured logs outside the input directories.
+
 ## Capabilities
 
 - Recursive regular-file scanning; no traversal of symlink entries. Explicit symlink roots resolve to their physical directory.
 - Filename validation is batched with `find -exec ... +` when supported; older BusyBox builds fall back to one file per invocation. Newline rejection is unchanged in both modes.
 - All extensions are eligible. No executable-only selector or extension-filter option.
-- Age: `--max-age 0..36500`, default 14. Zero disables filtering; positive values use `find -mtime -N` (24-hour buckets, not calendar dates).
-- Size: `--max-size-kb 1..1048576`, default 2000. One unit is 1024 bytes; the exact limit is included. Empty files are eligible, subject to backend support.
+- Age: `--max-age 0..36500`, default 30. Zero disables filtering; positive values use `find -mtime -N` (24-hour buckets, not calendar dates).
+- Size: `--max-size-kb 1..1048576`, default 2048. One unit is 1024 bytes; the exact limit is included. Empty files are eligible, subject to backend support.
 - Known cloud-folder paths are skipped. `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots` and detected Linux network/special mounts are excluded. These are best-effort exclusions, not a security boundary.
 - Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
 - A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
@@ -81,7 +98,7 @@ From this directory:
 busybox ash ./thunderstorm-collector-ash.sh \
   --server thunderstorm.example.internal --port 8080 \
   --dir /path/to/approved/input --source appliance-test \
-  --max-age 14 --max-size-kb 2000
+  --max-age 30 --max-size-kb 2048
 ```
 
 Use `sh` or `dash` instead only when that is the runtime being validated. Run `--help` for all options. Never use the broad default system roots for acceptance tests.

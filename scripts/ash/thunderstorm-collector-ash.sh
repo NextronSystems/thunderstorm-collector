@@ -15,37 +15,48 @@
 
 VERSION="0.5.0"
 
-# Defaults --------------------------------------------------------------------
+# USER CONFIGURATION -----------------------------------------------------------
+# Edit these defaults or use command-line options (which take precedence).
+# Example: sh thunderstorm-collector-ash.sh --server 192.0.2.10 --dir /tmp/samples --dry-run
+# --dry-run previews eligible files without making any HTTP requests.
 
-LOGFILE="./thunderstorm.log"
-LOG_TO_FILE=1
-LOG_TO_SYSLOG=0
-LOG_TO_CMDLINE=1
-SYSLOG_FACILITY="user"
+THUNDERSTORM_SERVER=""       # Required hostname/IPv4, e.g. "192.0.2.10"; no http://, port or path.
+THUNDERSTORM_PORT=8080        # TCP port, 1..65535; independent of USE_SSL.
+USE_SSL=0                    # 0 = HTTP; 1 = HTTPS (curl/GNU wget required).
+INSECURE=0                   # Keep 0: verify TLS certificates. 1 is for explicit testing only.
+CA_CERT=""                  # Empty = system trust; otherwise PEM CA file for HTTPS.
+SOURCE_NAME=""              # Empty = detected hostname; otherwise an inventory/incident label.
 
-THUNDERSTORM_SERVER="ygdrasil.nextron"
-THUNDERSTORM_PORT=8080
-USE_SSL=0
-INSECURE=0
-CA_CERT=""
-ASYNC_MODE=1
-
-MAX_AGE=14
-MAX_FILE_SIZE_KB=2000
-DEBUG=0
-DRY_RUN=0
-RETRIES=3
-
-UPLOAD_TOOL=""
-WORK_DIR=""
-LOG_PATH=""
-
-# Newline-separated list of directories to scan (no bash arrays in ash)
+# Recursive scan roots: ONE DIRECTORY PER LINE inside the quotes, including spaces.
+# Replace these broad Linux defaults with approved paths (e.g. /var/www).
+# The first --dir replaces this list; further --dir options add roots.
+# Missing roots are reported as errors. Literal newlines inside a path are unsupported.
 SCAN_DIRS="/root
 /tmp
 /home
 /var
 /usr"
+MAX_AGE=30                   # Days since last modification; 0 = no age filter (find -mtime).
+MAX_FILE_SIZE_KB=2048         # KiB (1024 bytes), 1..1048576; 2048 = 2 MiB, inclusive.
+# Links, special/network filesystems and cloud directories remain excluded.
+
+ASYNC_MODE=1                 # 1 = submit without waiting for analysis; 0 = synchronous (--sync).
+RETRIES=3                    # TOTAL upload attempts including the first, 1..10.
+DRY_RUN=0                    # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
+DEBUG=0                      # 1 = additional diagnostics (--debug / --no-debug).
+
+# Selected roots and limits appear on the console and in the log by default.
+LOGFILE="./thunderstorm.log" # Relative to the working directory; excluded from collection.
+LOG_TO_FILE=1                # 1 = append to LOGFILE; 0 = disabled.
+LOG_TO_SYSLOG=0              # 1 = also use local syslog (requires logger).
+LOG_TO_CMDLINE=1             # 1 = console output; 0 = quiet (--quiet).
+SYSLOG_FACILITY="user"       # Used only when LOG_TO_SYSLOG=1.
+# Progress is automatic on terminals; use --progress / --no-progress to override.
+
+# INTERNAL IMPLEMENTATION - no user settings below this line -------------------
+UPLOAD_TOOL=""
+WORK_DIR=""
+LOG_PATH=""
 SCAN_DIRS_SET=0   # 1 once the user has overridden via --dir
 
 FILES_SCANNED=0
@@ -58,7 +69,6 @@ PROGRESS_SET=0
 
 SCRIPT_NAME="${0##*/}"
 START_TS="$(date +%s 2>/dev/null || echo 0)"
-SOURCE_NAME=""
 PROGRESS_ACTIVE=0
 
 # Filesystem exclusions (POSIX-compatible) ------------------------------------
@@ -225,8 +235,8 @@ Options:
   -s, --server <host>        Thunderstorm server hostname or IP
   -p, --port <port>          Thunderstorm port (default: 8080)
   -d, --dir <path>           Directory to scan (repeatable)
-  --max-age <days>           Max file age, 0..36500; 0 disables it (default: 14)
-  --max-size-kb <kb>         Max file size, 1..1048576 KiB (default: 2000)
+  --max-age <days>           Days since modification; 0 disables (shipped default: 30)
+  --max-size-kb <kb>         Max file size in KiB, inclusive (shipped default: 2048)
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
@@ -249,6 +259,10 @@ Notes:
   Uploads require curl, GNU wget, or nc plus timeout (plain HTTP only).
   BusyBox wget alone is not supported; binary integrity is mandatory.
   For systems with bash available, prefer thunderstorm-collector.sh.
+
+Header settings can be overridden with options. Disable enabled header flags with:
+  --no-ssl  --verify-tls  --async  --no-dry-run  --no-debug
+Server is required: set THUNDERSTORM_SERVER in USER CONFIGURATION or use --server.
 
 Examples:
   sh thunderstorm-collector-ash.sh --server thunderstorm.local
@@ -967,6 +981,8 @@ parse_args() {
             --ssl)
                 USE_SSL=1
                 ;;
+            --no-ssl) USE_SSL=0 ;;
+            --verify-tls) INSECURE=0 ;;
             -k|--insecure)
                 INSECURE=1
                 ;;
@@ -978,6 +994,7 @@ parse_args() {
             --sync)
                 ASYNC_MODE=0
                 ;;
+            --async) ASYNC_MODE=1 ;;
             --retries)
                 [ -n "$2" ] || die "Missing value for $_pa_arg"
                 RETRIES="$2"
@@ -986,9 +1003,11 @@ parse_args() {
             --dry-run)
                 DRY_RUN=1
                 ;;
+            --no-dry-run) DRY_RUN=0 ;;
             --debug)
                 DEBUG=1
                 ;;
+            --no-debug) DEBUG=0 ;;
             --log-file)
                 [ -n "$2" ] || die "Missing value for $_pa_arg"
                 LOGFILE="$2"
@@ -1052,6 +1071,7 @@ normalize_uint() {
 }
 
 validate_config() {
+    [ -n "$THUNDERSTORM_SERVER" ] || die "Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST."
     THUNDERSTORM_PORT="$(normalize_uint "$THUNDERSTORM_PORT" 1 65535 Port)" || exit 2
     MAX_AGE="$(normalize_uint "$MAX_AGE" 0 36500 max-age)" || exit 2
     MAX_FILE_SIZE_KB="$(normalize_uint "$MAX_FILE_SIZE_KB" 1 1048576 max-size-kb)" || exit 2
@@ -1137,9 +1157,14 @@ main() {
     log_msg info "Port: $THUNDERSTORM_PORT"
     log_msg info "API endpoint: $_api_endpoint"
     log_msg info "Max age (days): $MAX_AGE"
-    log_msg info "Max size (KB): $MAX_FILE_SIZE_KB"
+    log_msg info "Max size (KiB): $MAX_FILE_SIZE_KB"
     log_msg info "Source: $SOURCE_NAME"
-    log_msg info "Folders: $(printf '%s' "$SCAN_DIRS" | tr '\n' ' ')"
+    log_msg info "Scan roots (recursive; exclusions apply):"
+    while IFS= read -r _root; do
+        log_msg info "  Scan root: $_root"
+    done <<EOF
+$SCAN_DIRS
+EOF
     [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
 
     # TTY auto-detection for progress reporting
