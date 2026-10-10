@@ -181,7 +181,8 @@ validate_requirements() {
     fi
 }
 
-# shellcheck disable=SC2317
+# Invoked indirectly by the EXIT trap in main.
+# shellcheck disable=SC2317,SC2329
 cleanup_all() {
     echo ""
     echo "Cleaning up..."

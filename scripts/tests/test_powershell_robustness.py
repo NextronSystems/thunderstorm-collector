@@ -95,7 +95,50 @@ class Server(ThreadingMixIn, HTTPServer):
             self.errors.append(repr(error))
 
 
-class PowerShellRobustness(unittest.TestCase):
+class ScanRootAssertions(unittest.TestCase):
+    def assert_scan_roots(self, output, expected):
+        logged = re.findall(r"^\[INFO\][ \t]+Scan root: ([^\r\n]+)\r?$", output, re.MULTILINE)
+        self.assertEqual(len(logged), len(expected), output)
+        for actual, wanted in zip(logged, expected):
+            # Windows may expand RUNNER~1 to runneradmin; macOS has /var aliases.
+            self.assertTrue(os.path.samefile(actual, wanted),
+                            "Unexpected scan root: {!r}; expected {!r}".format(actual, wanted))
+
+
+class ScanRootAssertionTests(ScanRootAssertions):
+    def test_equivalent_path_spellings_are_accepted(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = "[INFO]   Scan root: " + os.path.join(root, ".") + "\r\n"
+            self.assert_scan_roots(output, [root])
+
+    def test_wrong_missing_and_additional_roots_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
+            expected_log = "[INFO]   Scan root: " + root + "\n"
+            other_log = "[INFO]   Scan root: " + other + "\n"
+            for output in ("", other_log, expected_log + other_log, expected_log * 2):
+                with self.subTest(output=output):
+                    with self.assertRaises(AssertionError):
+                        self.assert_scan_roots(output, [root])
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 short-path aliases")
+    def test_windows_short_and_long_paths_are_accepted(self):
+        import ctypes
+        from ctypes import wintypes
+        get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        get_short_path.restype = wintypes.DWORD
+        with tempfile.TemporaryDirectory(prefix="scan root with spaces ") as root:
+            long_path = os.path.realpath(root)
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = get_short_path(long_path, buffer, len(buffer))
+            self.assertTrue(0 < length < len(buffer), "GetShortPathNameW failed")
+            if buffer.value == long_path:
+                self.skipTest("8.3 aliases are disabled on the test filesystem")
+            self.assert_scan_roots("[INFO]   Scan root: " + long_path + "\n", [buffer.value])
+            self.assert_scan_roots("[INFO]   Scan root: " + buffer.value + "\n", [long_path])
+
+
+class PowerShellRobustness(ScanRootAssertions):
     TLS_FAILURE_CODE = 2
 
     def setUp(self):
@@ -541,7 +584,7 @@ class PowerShellRobustness(unittest.TestCase):
         output = invoke("")
         self.assertIn("max-age=30", output)
         self.assertIn("max-size=2 MiB", output)
-        self.assertIn("Scan root: " + os.path.abspath(self.samples), output)
+        self.assert_scan_roots(output, [self.samples])
         for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
             self.assertIn(name, output)
         for name in ("forty-days.txt", "oversized.txt"):
@@ -555,8 +598,7 @@ class PowerShellRobustness(unittest.TestCase):
         output = invoke("-ThunderstormServer 127.0.0.1 -ThunderstormPort " + str(self.server.server_port) +
                         " -Folder @(" + literal(override) + ")" +
                         " -UseSSL:$false -DryRun:$false -MaxAge 0 -MaxSize 1 -Source cli-source")
-        self.assertIn("Scan root: " + os.path.abspath(override), output)
-        self.assertNotIn("Scan root: " + os.path.abspath(self.samples), output)
+        self.assert_scan_roots(output, [override])
         self.assertIn("max-age=0", output)
         self.assertIn("max-size=1 MiB", output)
         self.assertEqual(self.uploads, [b"cli-only"])

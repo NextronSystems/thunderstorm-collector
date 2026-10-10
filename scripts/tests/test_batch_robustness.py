@@ -149,7 +149,7 @@ class BatchRobustness(shared.PowerShellRobustness):
         output = invoke()
         self.assertIn("max-age=30", output)
         self.assertIn("max-size=2097152 bytes", output)
-        self.assertIn("Scan root: " + os.path.realpath(self.samples), output)
+        self.assert_scan_roots(output, [self.samples])
         for name in ("fresh.txt", "twenty-days.txt", "exact.txt"):
             self.assertIn(name, output)
         for name in ("forty-days.txt", "oversized.txt"):
@@ -164,8 +164,7 @@ class BatchRobustness(shared.PowerShellRobustness):
                            MAX_AGE="0", COLLECT_MAX_SIZE="1024", SOURCE="env-source",
                            CURL_PATH=shutil.which("curl.exe") or "C:\\missing-curl.exe")
         output = invoke()
-        self.assertIn("Scan root: " + os.path.realpath(str(override)), output)
-        self.assertNotIn("Scan root: " + os.path.realpath(self.samples), output)
+        self.assert_scan_roots(output, [override])
         self.assertIn("max-age=0", output)
         self.assertIn("max-size=1024 bytes", output)
         self.assertEqual(self.uploads, [b"env-only"])

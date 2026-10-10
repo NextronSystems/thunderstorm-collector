@@ -4,7 +4,7 @@
 
 collector_build_command() {
     local args="$1"
-    if [[ -n "$args" ]]; then
+    if [[ -n "${args}" ]]; then
         echo "ERROR: Batch collector uses environment settings, not CLI arguments" >&2
         return 1
     fi

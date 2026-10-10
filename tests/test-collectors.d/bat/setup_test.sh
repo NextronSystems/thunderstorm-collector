@@ -12,7 +12,7 @@ collector_setup() {
     local curl_executable
     curl_executable=$(command -v curl.exe) || return 1
     COLLECT_DIRS=$(to_native_path "${TEST_DATA_DIR}") || return 1
-    CURL_PATH=$(to_native_path "$curl_executable") || return 1
+    CURL_PATH=$(to_native_path "${curl_executable}") || return 1
     export COLLECT_DIRS CURL_PATH
     export MAX_AGE=365 COLLECT_MAX_SIZE=3000000 UPLOAD_ATTEMPTS=1
     export RELEVANT_EXTENSIONS='.txt;.log;.ps1;.tmp'
