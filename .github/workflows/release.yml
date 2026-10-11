@@ -7,7 +7,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # Run the full Go workflow (test + build) as a gate before releasing.
@@ -15,9 +15,14 @@ jobs:
   build:
     uses: ./.github/workflows/go.yml
 
+  legacy:
+    uses: ./.github/workflows/legacy-netscaler.yml
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, legacy]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -49,8 +54,22 @@ jobs:
           VERSION: ${{ github.ref }}
         run: |
           make release
+      - name: Download required legacy package
+        uses: actions/download-artifact@v8
+        with:
+          name: netscaler-freebsd8
+          path: release
+      - name: Verify required legacy package and prepare release metadata
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          python3 .github/scripts/prepare-release.py release "$VERSION" go/config.yml
+          mv release/release-notes.md "$RUNNER_TEMP/netscaler-release-notes.md"
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body_path: ${{ runner.temp }}/netscaler-release-notes.md
           files: release/*
