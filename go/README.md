@@ -1,9 +1,15 @@
 # THOR Thunderstorm Collector
 
-Thunderstorm Collector is an open-source tool written in Go that can be used to upload files to THOR Thunderstorm.
-A Makefile has been added to allow for simplified creation of executables. The generated executables are statically linked so that no further dependencies on the target systems exist.
+This guide covers the compiled Go collector: configuration, filtering, platform compatibility, and builds. Start with the [main README](../README.md) for collector selection, downloads, and a preview-first quick start. Published binaries do not require an installed Go runtime, but their OS/kernel and CPU requirements still apply.
+
+For product-specific collection scope, use the [Emerging Threats profiles](../emerging-threats/README.md). Script collectors have their own [configuration and runtime guides](../scripts/README.md).
 
 ## Usage
+
+Run your executable with `--help` to see its options and effective defaults. The reference below shows built-in defaults; loading a YAML configuration can change them, including the file-size limit.
+
+<details>
+<summary>Command-line reference</summary>
 
 ```help
 Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
@@ -46,60 +52,47 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
       --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
 ```
 
+</details>
+
 ## Configuration Files
 
-The collectors use configuration files in YAML format, which can be set using the `-t`/`--template` parameter.
+The **Go collector** reads YAML. By default it looks for `config.yml` in the current working directory. Use `-t`/`--template` to select a configuration explicitly: a missing explicit file is an error, while an absent implicit `config.yml` falls back to built-in defaults. Those defaults include the filesystem root and no extension or magic-header filter.
 
-You can use all command line parameters, but you have to use their long form. A typical custom configuration file `my-config.yml` could look like this:
+Command-line values override YAML values. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
+
+For example, save this preview-first configuration as `my-config.yml`, replacing the input path and server:
 
 ```yaml
-thunderstorm-server: my-thunderstorm.local
+path:
+  - /absolute/path/to/files
+thunderstorm-server: thunderstorm.example.internal
 max-filesize: 10
-max-age: 30
+max-age: "30"
 extension:
-    - .vbs
-    - .ps
-    - .ps1
-    - .rar
-    - .tmp
-    - .bat
-    - .chm
-    - .dll
-    - .exe
-    - .hta
-    - .js
-    - .lnk
-    - .sct
-    - .war
-    - .jsp
-    - .jspx
-    - .php
-    - .asp
-    - .aspx
-    - .log
-    - .dmp
-    - .txt
-    - .jar
-    - .job
+  - .ps1
+  - .sh
+  - .php
+  - .log
+magic: []
+dry-run: true
 ```
 
-In the example above, the collector is instructed to send all samples to a server with the FQDN `my-thunderstorm.local`, send only files smaller than 10 Megabyte, changed or created within the last 30 days, and only files with the given extensions are collected.
+This selects regular files up to and including **10 MiB** with a listed extension and a qualifying timestamp within 30 days. Timestamp selection is platform-dependent; see [file filtering](#file-filtering-logic). Preview the configuration, then explicitly enable uploads after reviewing it:
 
-**Note:** When both extensions and magic headers are specified in the configuration file, extensions are checked first. If an extension matches, the file is included. If no extension matches, magic headers are checked as a fallback.
-
-You can then use the configuration file as a parameter:
-
-```bash
-./amd64-linux-thunderstorm-collector -t config.yml
+```sh
+./amd64-linux-thunderstorm-collector -t ./my-config.yml --dry-run --debug
+./amd64-linux-thunderstorm-collector -t ./my-config.yml --dry-run=false
 ```
 
 ### Default Configuration
 
-The default configuration file named `config.yml` is used by default. We provide a reasonable default configuration file that doesn't select ALL files from a source system but only the ones with certain extensions and magic headers. We recommend using this file in use cases in which you consider collecting files from numerous endsystems.
+Binary packages include [config.yml](config.yml), which selects extensions and magic headers with a **64 MiB** limit and no age cutoff. The built-in size limit without that file is **100 MiB**. Review the configuration for the intended assessment; a profile may deliberately select a broader set of files. The [NetScaler profile](../emerging-threats/citrix-netscaler/README.md) provides one such configuration.
+
+To collect all regular file types, set both `extension: []` and `magic: []`; other limits and exclusions still apply. For no age cutoff, use `max-age: ""`. A value of `"0"` sets a current-time threshold and does not disable the age filter.
 
 ## Precompiled Binaries
 
-You can find precompiled binaries for numerous platforms in the [releases](https://github.com/NextronSystems/thunderstorm-collector/releases) section.
+See [downloads and current release availability](../README.md#download-a-collector) for package selection and contents. This guide describes the current source; use the tagged documentation for a downloaded release.
 
 **Note:** In general, Go 1.10 is used to build the binaries to ensure the broadest possible compatibility with older operating system versions. Additionally, this is complemented by builds with the latest stable Go version for targets that are not supported by Go 1.10.
 
@@ -109,7 +102,7 @@ For older Citrix NetScaler appliances based on **FreeBSD 8.4**, select the separ
 
 **Release availability:** `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` is included starting with the first tagged release containing the legacy packaging workflow. **v1.0.1 and earlier do not contain this dedicated package.** Check the [selected release's assets](https://github.com/NextronSystems/thunderstorm-collector/releases): if the package is absent, that release does not provide the legacy build. This guidance does not imply that a containing release has already been published.
 
-The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the release checksum and consult its build information for the exact source commit and compiler. Downloading the package is the normal path; for releases containing this build, optional advanced build instructions are in `go/legacy/README.md` in that release's source tree.
+The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the checksum and consult its build information for the exact source commit and compiler. The [legacy build guide](legacy/README.md) covers CI artifacts and building from source when a release asset is unavailable. For assessment paths and filters, use the [NetScaler collection profile](../emerging-threats/citrix-netscaler/README.md).
 
 #### Compatibility evidence as of 2026-10-08
 
@@ -171,13 +164,13 @@ The Go Collector does not run on:
 - Windows 2000
 - Windows NT
 
-You could try to use the [collector scripts](https://github.com/NextronSystems/thunderstorm-collector/tree/master/scripts) on unsupported systems.
+For an alternative, consult the [script selection and runtime requirements](../scripts/README.md#choosing-a-collector). Each script requires its own supported interpreter and utilities.
 
 In case that the pre-build collector crashes on your end system, please see the [platform requirements](https://go.dev/wiki/#platform-specific-information) for the different go versions to get the last supported go version for your OS version.
 
 This [page](https://golang.org/doc/install/source#environment) contains all possible `arch` and `os` values for the latest Go version.
 
-If you need to check which Go version was used to build a specific binary, unfortunately there is not an easy way that covers all Go versions. With a recent Go version (in fact, Go 1.13 and later), `go version <binary>` reports the Go version used to build the binary *if* the binary was built with Go 1.13 or later. If on the other hand the binary was built with an older Go version, the command reports the error "not a Go executable". (And unfortunately, there is no way (`strings` or `readelf`) to check the Go version for binaries built with older Go versions, as they don't include this information in the binary.)
+Use `go version <binary>` when the executable contains build information recognized by your Go toolchain. For older binaries, consult the matching release/build record. The dedicated NetScaler package records its compiler and source commit in `BUILD-INFO.txt`.
 
 The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
 
@@ -187,15 +180,9 @@ Note: We haven't tested all compiled binaries on the respective platforms. Pleas
 
 ## Performance Considerations
 
-In a THOR Thunderstorm setup, the system load moves from the end systems to the Thunderstorm server.
+Analysis runs on the Thunderstorm server. Collection scope, file sizes, signatures, and server capacity determine processing time. The packaged filters are a general starting point; use the assessment profile when its broader scope is required.
 
-In cases in which you don't use the default configuration file provided with the collectors (`config.yml`) and collect all files from an end system, the Thunderstorm server requires a much higher amount of time to process the samples.
-
-E.g. A Thunderstorm server with 40 CPU Cores (40 threads) needs 1 hour and 15 minutes to process all 400,000 files sent from a Windows 10 end system. Sending all files from 200 Windows 10 end systems to a Thunderstorm server with that specs would take 10 days to process all the samples.
-
-As a rule of thumb, when using the hardware recommended in the setup guide, you can calculate with a processing speed of **130 samples per core per minute**.
-
-We highly recommend using the default configuration file named `config.yml` provided with the collectors.
+Start with a small collection and inspect server load and results before increasing scope or concurrency. Adjust `--threads` and `--uploads-per-minute` to control upload pressure. Asynchronous acceptance means the server accepted a file; check analysis completion separately.
 
 ### File Filtering Logic
 
@@ -209,80 +196,66 @@ The collector uses a two-stage filtering approach for optimal performance:
    - If neither extensions nor magic headers match (and at least one is configured), the file is excluded
    - If no extensions or magic headers are specified, all files pass content filtering
 
+File-size limits are in MiB (1024 × 1024 bytes), with the exact boundary included. The age check accepts a file if any timestamp provided by the platform is newer than the cutoff: modification and metadata-change times on many Unix targets, plus birth time on supported BSD/macOS targets; Windows uses modification and creation times. This differs from the script collectors' modification-time-only rules.
+
 ### Error Handling and Retry Logic
 
-The collector includes automatic retry logic for failed uploads:
-
-- **Retry attempts**: Up to 3 retry attempts are made for failed uploads
-- **Exponential backoff**: Retry delays use exponential backoff starting at 4 seconds (4s, 8s, 16s)
-- **Server rate limiting**: If the server returns HTTP 503 (Service Unavailable), the collector respects the `Retry-After` header or defaults to 30 seconds
-- **Error reporting**: All upload errors are logged and counted in the final statistics
+Transport errors and HTTP 503 share a budget of **three retries after the initial attempt**. Transport failures use exponential delays of 4, 8, and 16 seconds; HTTP 503 uses an integer `Retry-After` value, or 30 seconds when it is missing or invalid. Other HTTP errors and response-body read failures are logged and counted without a retry. A lost response can still cause a duplicate submission.
 
 ## Build
 
 ### Build requirements
 
-- Go version 1.10 or higher
-  - Note: We maintain Go 1.10 compatibility to support older systems (Windows XP, old Linux). The codebase uses `ioutil` functions and GOPATH-based vendoring to remain compatible with Go 1.10+.
-  - Dependencies are vendored in the `vendor/` directory. In GOPATH mode (Go 1.10–1.12), the project must be built from within `$GOPATH/src/`. The Makefile handles this automatically via a `.gopath/` symlink structure.
-- make
+Use Go and `make`. Regular builds retain Go 1.10 compatibility where that compiler supports the target; newer targets require a newer compiler. The separate [NetScaler procedure](legacy/README.md) prepares its Go 1.9.7 build.
 
-[Here](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-debian-10) is an instruction on how to install Go on Debian. Install make with `sudo apt install make`.
+Dependencies are declared in `go.mod` and `go.sum`. For a Go 1.10 build, first run `go mod vendor` from this directory with a modern Go toolchain, then select Go 1.10 for the build. The generated `vendor/` directory is not committed. The [CI setup action](../.github/actions/setup-go/action.yml) follows that preparation sequence; the Makefile provides the GOPATH symlink needed by the legacy compiler.
 
 ### Build Steps
 
-Simply call the Makefile to build all targets that Golang supports on your build environment:
+From this `go/` directory:
 
-```bash
-make
+```sh
+make              # Build for the current OS/architecture
+make all          # Build the Makefile's supported cross-compilation targets
+make linux/amd64   # Build one target
+make release      # Create regular distribution archives in dist/
+make help         # List build targets
 ```
 
-If you want to build executables for other platform / architecture combinations than those built in the default configuration, use:
-
-```bash
-make bin/<arch>-<os>-thunderstorm-collector
-```
-
-A full list of architectures and platforms that can be used can be shown using:
-
-```bash
-go tool dist list
-```
+`go tool dist list` shows the compiler's OS/architecture combinations; the Makefile excludes targets it does not package. Repository-wide script packaging and the tagged release workflow are described in the [main build guide](../README.md#build-or-extend-a-collector).
 
 ## Usage Examples
 
-Note: The following examples use the amd64-linux-thunderstorm-collector, replace
-the name of the executable with the one you are using.
+Start with the [main quick start](../README.md#quick-start). These additional Linux amd64 examples load `config.yml` explicitly and restrict collection to one directory. Substitute your executable, directory, and server. Preview the chosen options with `--dry-run --debug` before enabling uploads; the configuration's extension/magic filters still apply.
 
-Upload all files that are smaller than 500 MB to thunderstorm.test using HTTP, with 10 Threads in parallel:
+Allow files up to 500 MiB and use ten upload workers:
 
-```
-./amd64-linux-thunderstorm-collector -s thunderstorm.test -r 10 -m 500
-```
-
-Upload all files that are smaller than 500 MB and changed in the last 10 days to thunderstorm.test using HTTPS:
-```
-./amd64-linux-thunderstorm-collector -s thunderstorm.test --ssl -a 10 -m 500
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false -r 10 -m 500
 ```
 
-Upload all files from a specific directory:
-```
-./amd64-linux-thunderstorm-collector -s thunderstorm.test -p /path/to/directory
+Apply a ten-day age cutoff and use HTTPS:
+
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false --ssl --port 443 -a 10
 ```
 
-Upload using a proxy:
-```
-./amd64-linux-thunderstorm-collector -s thunderstorm.test --http-proxy http://username@password:proxy.test/
+Upload through an HTTP proxy:
+
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false \
+  --http-proxy http://proxy.example.internal:3128
 ```
 
-Upload synchronously and write the results to a log file:
-```
-./amd64-linux-thunderstorm-collector -s thunderstorm.test -l collector.log --upload-synchronous
-```
+Wait for synchronous responses and write them to a log outside the collection directory:
 
-Test collection without sending files (dry-run mode, no server required):
-```
-./amd64-linux-thunderstorm-collector --dry-run --debug -p /path/to/scan
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false \
+  --upload-synchronous --logfile ./collector.log
 ```
 
 ## Collection Statistics
@@ -330,24 +303,14 @@ This makes it easy to understand why files are included or excluded from collect
 
 ## Dry-Run Mode
 
-The `--dry-run` flag allows you to test collection behavior without actually sending files to Thunderstorm:
+`--dry-run` discovers, opens, and filters files without a server connection or HTTP requests. Add `--debug` to list eligible filenames and skip reasons; statistics report files that would be sent. This checks selection, not connectivity or server-side analysis.
 
-**Benefits:**
-- Test collection without network connectivity
-- Preview what files would be collected before running a real scan
-- Validate configuration without sending data
-- No server connection required
-
-**Usage:**
-```bash
-./amd64-linux-thunderstorm-collector --dry-run -p /path/to/scan
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml \
+  -p /absolute/path/to/files --dry-run --debug
 ```
 
-In dry-run mode:
-- Server connection check is skipped
-- Files are discovered, filtered, and processed normally
-- No actual HTTP requests are made
-- Statistics show "would be sent (dry-run)" instead of "uploaded"
+After reviewing the preview, use the same configuration and roots for upload. `--dry-run=false` explicitly overrides a configuration with preview mode enabled.
 
 ## Troubleshooting
 
@@ -363,7 +326,7 @@ In dry-run mode:
 
 ### Performance Tips
 
-- Use the default configuration file `config.yml` to avoid collecting unnecessary files
+- Choose the packaged configuration or an assessment profile appropriate to the collection scope
 - Set appropriate `--max-filesize` to avoid uploading very large files
 - Use `--exclude` patterns to skip known directories (e.g., `--exclude "**/node_modules/**"`)
 - Adjust `--threads` based on your network bandwidth and server capacity
@@ -377,7 +340,4 @@ The collector is designed to be memory-efficient:
 
 ## Tested On
 
-Successfully tested on:
-
-- Debian 10
-- Windows 10
+Historical successful runs were recorded on Debian 10 and Windows 10 without exact revisions or runtime details. For scoped evidence, see the [NetScaler/FreeBSD record](#compatibility-evidence-as-of-2026-10-08) and the [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md).

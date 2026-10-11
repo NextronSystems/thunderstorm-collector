@@ -1,5 +1,7 @@
 # Citrix NetScaler assessment profile
 
+[All assessment guides](../README.md) · [Collector recommendations](../../docs/COLLECTOR_RECOMMENDATIONS.md) · [Collector downloads](../../README.md#download-a-collector)
+
 Reviewed **2026-10-11**. This profile selects a broad set of NetScaler files for submission to Thunderstorm. Detection uses the server's installed signatures. The profile contains a **Go configuration** and **header settings for the existing Bash collector**.
 
 ## Collection scope
@@ -20,23 +22,23 @@ This broad scope includes ordinary logs and potentially sensitive configuration,
 
 ## Option 1: Go collector
 
-Use [config.yml](config.yml) with a binary verified for the appliance's OS and architecture. For **FreeBSD 8.4 amd64**, select the dedicated Go 1.9.7 build described in the [NetScaler compatibility and testing guide](../../go/README.md#citrix-netscaler-and-freebsd-84); a regular FreeBSD package is not interchangeable. As of 11 October 2026, the latest published release is v1.0.1 and does not include that package. See the [legacy build guide](../../go/legacy/README.md) for building it from source.
+Select a compatible binary using the [NetScaler package and compatibility guide](../../go/README.md#citrix-netscaler-and-freebsd-84). The examples below use the dedicated **FreeBSD 8.4 amd64 / Go 1.9.7** executable. For source builds, follow the [legacy build guide](../../go/legacy/README.md).
 
-Download this profile's [config.yml](config.yml) into the working directory used below. It is a separate assessment configuration, not the default `config.yml` bundled with binary packages. Preview with it:
+Save this profile's [config.yml](config.yml) as `netscaler-assessment.yml` beside the selected executable. This keeps the assessment configuration separate from the package's default `config.yml`. Preview with the assessment file:
 
 ```sh
-./amd64-freebsd8-netscaler-thunderstorm-collector -t ./config.yml --dry-run
+./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-assessment.yml --dry-run
 ```
 
 After reviewing the preview, supply your endpoint and appliance name:
 
 ```sh
-./amd64-freebsd8-netscaler-thunderstorm-collector -t ./config.yml \
+./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-assessment.yml \
   --dry-run=false --thunderstorm-server thunderstorm.example.org \
   --port 8080 --source netscaler-example
 ```
 
-The configuration defaults to preview mode, one worker, and at most 120 upload starts per minute. `max-age: ""` disables age filtering; `"0"` does not. Empty `extension` and `magic` lists select all regular file types. For HTTPS, add `--ssl`, choose the endpoint's port, and use `--ca /path/to/ca.pem` if needed.
+The configuration defaults to preview mode, one worker, and at most 120 upload starts per minute. `max-age: ""` disables age filtering; `"0"` does not. Empty `extension` and `magic` lists select all regular file types. See the [Go CLI reference](../../go/README.md#usage) for HTTPS and other connection options.
 
 Go does not follow symbolic links, including root-directory links. The profile therefore includes `/flash/nsconfig` explicitly as a common physical location. Inspect the actual layout and add other physical targets when necessary. `--path` replaces the configured root list; repeat it for every desired root when overriding, including for an externally mounted appliance filesystem.
 
@@ -44,7 +46,7 @@ Go does not follow symbolic links, including root-directory links. The profile t
 
 Use the existing [Bash collector](../../scripts/bash/thunderstorm-collector.sh) and its [usage and configuration guide](../../scripts/bash/README.md). Keep the collector maintained in its normal location; adjust a deployment copy for the appliance instead of maintaining another complete collector in this folder.
 
-The script runs independently of the Go binary and does not read `config.yml`. It requires **Bash 3.2+** and, for uploads, **curl or GNU wget**, plus its documented Unix tools. NetScaler's FreeBSD shell does not establish that Bash is installed. Confirm those requirements on the target; this preset is not a claim of appliance compatibility.
+The script runs independently and reads its own header settings, not the Go YAML file. Confirm the [Bash runtime and upload requirements](../../scripts/bash/README.md#requirements) on the target; NetScaler's FreeBSD shell does not establish that Bash is installed. This preset is not a claim of appliance compatibility.
 
 Replace the corresponding existing variable assignments in the script's header with these values. Some assignments are in its filesystem-exclusion section. Do not prepend a block while leaving later defaults to overwrite it. Set your actual endpoint and source name:
 
@@ -87,7 +89,7 @@ After reviewing the preview, explicitly override the preview default for this in
 bash ./thunderstorm-collector.sh --no-dry-run --no-progress
 ```
 
-The header can remain at **`DRY_RUN=1`**. There is no Bash `--dry-run=false` option. For HTTPS, set `USE_SSL=1`, choose the correct port, and set `CA_CERT` if a custom CA is needed; leave `INSECURE=0`. An explicit `--dir` replaces the header's root list, with additional `--dir` arguments adding roots. No Go binary is involved in either Bash invocation.
+The header can remain at **`DRY_RUN=1`**. There is no Bash `--dry-run=false` option. Use the [Bash guide](../../scripts/bash/README.md) for HTTPS settings and retain certificate verification. An explicit `--dir` replaces the header's root list, with additional `--dir` arguments adding roots.
 
 ## Coverage and validation
 
@@ -105,7 +107,7 @@ Revalidation on **2026-10-11** used [collector source `35a8509`](https://github.
 
 These checks covered old timestamps, hidden and extensionless files, unusual suffixes, binary bytes, a cloud-named directory, and configuration-root symlink handling. Exactly 64 MiB was included; 64 MiB plus one byte, internal symlinks, and a FIFO were excluded. CLI root overrides selected only the replacement directory in both collectors. This was not an actual NetScaler, real THOR, HTTPS, or Go 1.9.7 runtime test.
 
-The new Go profile and Bash preset still require an actual NetScaler preview and a controlled upload with the intended server. Private IOC definitions, scores, and infrastructure indicators are not distributed here.
+The Go profile and Bash preset still require an actual NetScaler preview and a controlled upload with the intended server. Private IOC definitions, scores, and infrastructure indicators are not distributed here.
 
 ## Sources for scope
 

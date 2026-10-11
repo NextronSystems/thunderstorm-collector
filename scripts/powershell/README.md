@@ -1,17 +1,51 @@
 # PowerShell Collectors
 
-Use the modern collector when Windows PowerShell 3+ is available. The separate
-PS2 file is for hosts that cannot upgrade. Each file is self-contained, with the
-same reviewed core and a drift regression test. Neither needs curl or a Go binary.
+Use [thunderstorm-collector.ps1](thunderstorm-collector.ps1) with PowerShell 3
+or later. The standalone [thunderstorm-collector-ps2.ps1](thunderstorm-collector-ps2.ps1)
+is for hosts limited to PowerShell 2. Both use .NET and run without curl.
+
+These instructions describe the current source files. Check the
+[release availability note](../../README.md#download-a-collector) before using a
+published asset; older releases have different options. See
+[script selection](../README.md#choosing-a-collector) for alternatives.
+
+## Quick Start
+
+Copy `scripts/powershell/thunderstorm-collector.ps1` from the source checkout to
+a working directory on the target. In a new PowerShell session, change to that
+directory. Replace the server and `C:\Samples` with your endpoint and an existing
+absolute directory containing a few synthetic files. Preview the selection:
+
+```powershell
+.\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.example.internal `
+  -ThunderstormPort 8080 -Folder 'C:\Samples' -Source 'host-example' `
+  -MaxAge 14 -MaxSize 2 -DryRun
+```
+
+Review the selected paths, then enable uploads explicitly:
+
+```powershell
+.\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.example.internal `
+  -ThunderstormPort 8080 -Folder 'C:\Samples' -Source 'host-example' `
+  -MaxAge 14 -MaxSize 2 -DryRun:$false
+```
+
+For PowerShell 2, copy and invoke `thunderstorm-collector-ps2.ps1` with the same
+parameters. For HTTPS, add `-UseSSL` and the endpoint's port; `-CACert` supports a
+private CA on .NET 4.5 or later, as detailed below. Dry-run makes no requests and
+does not check payload readability or TLS connectivity. Uploads are asynchronous
+by default; check received files and analysis results on the server. Follow the
+organization's execution policy for downloaded scripts and invoke the collector
+as a script, without dot-sourcing it.
 
 ## Configuration and Startup Output
 
 Both files have a commented `USER CONFIGURATION` parameter block at the top.
 Set `ThunderstormServer` to a hostname/IP without scheme/port/path and review
 `Folder`, for example `@("C:\Samples", "D:\Evidence")`. The shipped root is `C:\`.
-An empty server exits 2 with instructions. Named parameters override header
-defaults; `-Folder` replaces the list. To turn off a switch enabled in the header,
-use `-DryRun:$false`, `-UseSSL:$false` or the corresponding switch name.
+Always pass explicit roots. An empty server exits 2 with instructions. Named
+parameters override header defaults; `-Folder` replaces the list. To turn off a
+switch enabled in the header, use `-DryRun:$false`, `-UseSSL:$false` or the corresponding switch name.
 `Extensions = @()` uses the visible `DefaultExtensions` list below the parameters;
 `-AllExtensions` disables suffix filtering. Exclusions still apply.
 
@@ -27,7 +61,6 @@ selected roots. The collector does not create its own log file.
 | Item | Behavior / limitation |
 |---|---|
 | Runtime | Modern: PowerShell language 3+. Legacy: language 2.0, Add-Type and full .NET required. |
-| Tested hosts | PowerShell 7 on macOS and Windows PowerShell 5.1 in CI; these are NOT proof of actual PS2, PS3 or old CLR compatibility. |
 | Selection | Recursive literal paths; no junctions/symlinks; built-in extension allowlist or explicit Extensions / AllExtensions. Known cloud folder names excluded. |
 | Age | Default 30 days; last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
 | Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
@@ -58,14 +91,21 @@ an interrupted marker. No deduplication, resumable scans, syslog, parallel uploa
 or retry idempotency. Success means upload accepted, NOT that analysis completed or
 a detection was produced.
 
+## Validation Status
+
+The [8 October 2026 acceptance report](../../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
+records both files running against real THOR under PowerShell 7.5.0 on macOS, and
+synthetic Windows CI checks under Windows PowerShell 5.1. Those results apply to
+the recorded revisions and assets; they do not establish actual PowerShell 2,
+PowerShell 3 or old CLR compatibility. Test the intended Windows/CLR combination.
+
 ## Manual Acceptance Setup
 
-Check out PR #48 after reviewing #43 and #49. Do not merge just to test. Transfer
-the chosen standalone file to the actual target, change into its directory, and
-run the following in PowerShell as a normal user. Do NOT dot-source the collector.
-
-Choose one, record the real runtime, and repeat the complete sequence separately
-for the other profile on its intended host:
+Follow the [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
+and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record) guidance. Transfer the chosen standalone file to the
+actual target, change into its directory, and run the following in PowerShell
+as a normal user. Choose one file and repeat the complete sequence separately
+for each profile on its intended host:
 
 ```powershell
 $Collector = (Join-Path $PWD 'thunderstorm-collector.ps1')
@@ -88,9 +128,7 @@ New-Item -ItemType Directory -Path (Join-Path $Root 'input\nested') | Out-Null
 $InputDir = Join-Path $Root 'input'
 ```
 
-Keep the fixture root and logs OUTSIDE the input. If execution policy blocks the
-downloaded file, follow the organization's approved policy; do not weaken machine
-policy. An authorized process-level ExecutionPolicy Bypass is an alternative.
+Keep the collector and logs outside the input directory.
 
 For HTTPS, add -UseSSL to EVERY service command below, and -CACert with an approved
 public CA on a supported CLR if needed. Never copy the service license to the
@@ -251,6 +289,4 @@ Record terminal/host behavior: killing the process is NOT the same as graceful C
 Delete only this run's unique Root after releasing locks/removing junctions.
 Keep commit hash, OS, PowerShell AND CLR version, exact commands, exit codes,
 server-side byte/source evidence and each PASS/FAIL/NOT SUPPORTED/NOT TESTED result.
-No credentials, license contents, certificate private keys or raw sensitive THOR
-logs belong in the repository or PR. Approve the legacy file only after the actual
-intended old runtime has been tested.
+Use the legacy file only after the intended old runtime has been tested.

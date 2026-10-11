@@ -61,7 +61,7 @@ After checking the selection, supply your server and a source name identifying t
 
 `--path` replaces the configuration's directory list; repeat it for multiple roots. For an assessment profile, follow its guide and pass its configuration with `-t`. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
 
-For scripts, follow the selected [language guide](scripts/README.md) to set header values or command-line options and preview the collection. Scripts use their own settings rather than the Go YAML file. Uploads are asynchronous by default in the examples above; check received files and analysis results on the server after collection.
+For scripts, follow the selected [language guide](scripts/README.md) to configure and preview the collection using its header settings, command-line options, or environment variables. Scripts use their own settings rather than the Go YAML file. Uploads are asynchronous by default in the examples above; check received files and analysis results on the server after collection.
 
 ## Product Integration Guides
 

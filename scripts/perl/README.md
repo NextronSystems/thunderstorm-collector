@@ -2,6 +2,10 @@
 
 Use on Unix-like or legacy hosts where Perl and LWP are available. The standalone script has a Perl 5.8.1 syntax floor and requires LWP::UserAgent 6+, LWP::Protocol::http, HTTP::Request, JSON::PP, Encode and Sys::Hostname. It also loads the standard Getopt::Long, Cwd, File::Spec, Fcntl and POSIX modules. HTTPS additionally requires LWP::Protocol::https and IO::Socket::SSL with a usable CA store. Tests on modern Perl do not certify every 5.8/SSL build; validate the actual target.
 
+For alternatives, use the [script chooser](../README.md#choosing-a-collector).
+See [download guidance](../../README.md#download-a-collector) for release availability;
+the options below describe the current source collector.
+
 ### Dependency Setup
 
 JSON::PP ships with upstream Perl 5.14+, but distribution packages can split out
@@ -72,12 +76,34 @@ this profile. Errors and the startup scope are always reported.
 
 Unreadable directories count as Scan errors; unreadable selected files as Failed. Existing empty roots can succeed; missing roots cannot. A missing interpreter or startup module can fail before the collector's exit-code handling runs. Record the diagnostic and actual nonzero exit status rather than expecting a fixed value such as 255; these startup failures are outside the table above. Legacy Perl/SSL and Windows builds require their own target-system acceptance. Transport limits follow the [LWP documentation](https://metacpan.org/pod/LWP::UserAgent).
 
+## Basic Usage
+
+From the directory containing the standalone script, replace the server and
+approved input path, then preview the selected files:
+
+```sh
+perl ./thunderstorm-collector.pl \
+  --server thunderstorm.example.internal --port 8080 \
+  --dir /path/to/approved/input --source host-example --dry-run
+```
+
+After reviewing the preview, enable uploads explicitly:
+
+```sh
+perl ./thunderstorm-collector.pl \
+  --server thunderstorm.example.internal --port 8080 \
+  --dir /path/to/approved/input --source host-example --no-dry-run
+```
+
+Use `--help` for all options; for HTTPS, add `--ssl` and the appropriate port,
+with `--ca-cert /path/to/ca.pem` if a custom CA is required.
+
 ## Manual Acceptance
 
-Record PR #47, exact commit, OS/architecture, Perl/LWP/SSL/service versions,
-outputs and exit codes. Repeat applicable cases on the actual target runtime. Mark each
-PASS/FAIL/NOT SUPPORTED/NOT TESTED. Never scan default system roots or production
-data for acceptance. Keep licenses outside fixtures and Git.
+Test the exact collector revision to be deployed. Follow the shared [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
+and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record). Record the
+commit, OS/architecture, Perl/LWP/SSL/service versions, outputs and exit codes.
+Repeat the cases below on the actual target runtime.
 
 ### 1. Isolated Setup
 
@@ -101,7 +127,7 @@ printf 'semicolon\n' > "$ROOT/input/semi;colon.txt"
 printf 'quote\n' > "$ROOT/input/double\"quote.txt"
 collect() {
   "$PERL" "$COLLECTOR" -s "$SERVER" -p "$PORT" --source "$SOURCE" \
-    --max-age 0 --retries 1 --no-progress "$@"
+    --max-age 0 --retries 1 --no-dry-run --no-progress "$@"
   code=$?; printf 'exit_code=%s\n' "$code"; return "$code"
 }
 ```
@@ -216,7 +242,8 @@ old OS/SSL build's compatibility. Keep remaining target-system checks explicit.
 
 ## Shared Stub E2E
 
-From repository root with a stub compiled for the test host:
+For shared setup and test-host requirements, see the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md#shared-stub-integration).
+Run these collector-specific commands from the repository root:
 
 ```sh
 THUNDERSTORM_TEST_COLLECTORS=perl THUNDERSTORM_TEST_REQUIRE_MATCH=1 \

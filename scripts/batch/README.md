@@ -1,9 +1,47 @@
 # Windows Batch Collector
 
-Last resort for Windows hosts without usable PowerShell or the Go collector.
-The release still ships ONE standalone .bat asset, but it is intentionally a
-cmd/JScript hybrid. Windows Script Host handles file data instead of expanding
-untrusted filenames through CALL or delayed expansion.
+Use [thunderstorm-collector.bat](thunderstorm-collector.bat) on Windows hosts
+where the Go and PowerShell collectors are impractical. This standalone file is
+a cmd/JScript hybrid: Windows Script Host handles file data. It requires enabled
+WSH/JScript, FileSystemObject, ADODB.Stream and a trusted curl.exe 8.4 or later.
+
+These instructions describe the current source file. Check the
+[release availability note](../../README.md#download-a-collector) before using a
+published asset; older releases have different options. See
+[script selection](../README.md#choosing-a-collector) for alternatives.
+
+## Quick Start
+
+Copy `scripts/batch/thunderstorm-collector.bat` from the source checkout to a
+working directory on the target. Open `cmd.exe /d /v:off` and change to that
+directory. Replace the server, curl path and `C:\Samples` with your endpoint,
+trusted executable and an existing absolute directory containing a few synthetic
+files. Preview the selection:
+
+```cmd
+set "THUNDERSTORM_SERVER=thunderstorm.example.internal"
+set "THUNDERSTORM_PORT=8080"
+set "URL_SCHEME=http"
+set "CURL_PATH=C:\trusted-tools\curl.exe"
+set "COLLECT_DIRS=C:\Samples"
+set "SOURCE=host-example"
+set "MAX_AGE=14"
+set "COLLECT_MAX_SIZE=2097152"
+set "DRY_RUN=1"
+.\thunderstorm-collector.bat
+```
+
+Review the selected paths, then enable uploads in the same command session:
+
+```cmd
+set "DRY_RUN=0"
+.\thunderstorm-collector.bat
+```
+
+For HTTPS, set `URL_SCHEME=https`, choose the endpoint's port and, if needed,
+set `CURL_CA_BUNDLE` to a PEM CA file. Dry-run makes no requests and does not check
+curl availability, payload readability or TLS connectivity. Uploads are
+asynchronous by default; check received files and analysis results on the server.
 
 ## Configuration and Startup Output
 
@@ -31,8 +69,6 @@ output; the collector does not create a separate log itself.
 | Runtime | cmd.exe + enabled Windows Script Host/JScript + FileSystemObject + ADODB.Stream. No PowerShell dependency in the collector. |
 | Upload tool | Trusted curl.exe 8.4+; explicit CURL_PATH preferred, then script directory, system directory, PATH. Never searched in the current working directory implicitly. |
 | Why curl 8.4+ | Earlier versions cannot bound unknown-length response downloads with max-filesize; see the official curl manual. Verify the binary supports the actual legacy Windows OS. |
-| Tested | Real cmd/WSH/curl on Windows CI. Native old Windows/old WSH still needs human acceptance. Not runnable on macOS. |
-| Configuration | Commented header defaults, overridden by nonempty environment variables; explicit server and scan directories required, no default system-wide scan. |
 | Traversal | Recursive, literal filenames, skips reparse-point/junction entries and known cloud directory names. Not a filesystem sandbox. |
 | Filtering | MAX_AGE uses last modification time, days; default 30, 0 disables. COLLECT_MAX_SIZE is BYTES, inclusive, 1..209715200; default 2097152 (2 MiB). Extension list default .exe;.dll;.ps1;.bat;.txt; * includes all extensions. |
 | Upload | Binary/empty-file safe snapshots, one multipart file; async default, SYNC=1 optional. Source UTF-8 percent-encoded. |
@@ -64,10 +100,19 @@ quote, semicolon and control characters; payload bytes are untouched.
 Success means the transfer was accepted, not analysis complete or a positive finding.
 An empty eligible set does not probe service availability.
 
+## Validation Status
+
+The [8 October 2026 acceptance report](../../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
+records synthetic Windows CI checks with real cmd/WSH/curl for the revision
+listed there. Batch was not executed against real THOR in that report. Native
+old Windows/WSH and the packaged file still need target-system acceptance.
+
 ## Setup for Human Acceptance
 
-Check out PR #48; enter scripts\batch on the actual Windows target. Use a dedicated
-normal-user cmd.exe with delayed expansion disabled:
+Follow the [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
+and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record) guidance. Transfer the standalone file to the actual
+Windows target and change into its directory. Use a dedicated normal-user
+cmd.exe with delayed expansion disabled:
 
 ```cmd
 cmd.exe /d /v:off
@@ -164,9 +209,9 @@ set "COLLECT_DIRS=%TESTROOT%\input"
 
 Expected: mixed roots exit 1, readable input still submitted, Scan errors 1.
 All missing exit 2 before upload. Hold a fixture file exclusively open using an
-approved test helper/editor that actually denies reads, or the PowerShell lock
-example in ../powershell/README.md on a TEST HOST. The collector itself does not
-need PowerShell. Other readable siblings must upload; locked file counts Failed,
+approved test helper/editor that actually denies reads, or the
+[PowerShell lock example](../powershell/README.md#5-missing-roots-and-a-locked-file)
+on a test host. The collector itself does not need PowerShell. Other readable siblings must upload; locked file counts Failed,
 exit 1. Close the handle; do not mistake an editor without a read-denying lock
 for a successful lock test.
 

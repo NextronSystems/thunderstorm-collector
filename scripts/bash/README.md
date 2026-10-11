@@ -4,6 +4,10 @@ Use `thunderstorm-collector.sh` for Unix incident response when Bash is availabl
 but deploying the Go collector is not practical. It uploads regular files to a
 THOR Thunderstorm service. It does not scan files locally.
 
+For alternatives, use the [script chooser](../README.md#choosing-a-collector).
+See [download guidance](../../README.md#download-a-collector) for release availability;
+the options below describe the current source collector.
+
 ## Requirements
 
 | Requirement | Detail |
@@ -16,7 +20,7 @@ THOR Thunderstorm service. It does not scan files locally.
 
 The collector does not require Python, jq, or GNU coreutils on macOS. Automated
 tests have additional dependencies; those are not collector requirements.
-Use the ash collector for BusyBox environments instead of weakening Bash's scope.
+For BusyBox environments, see the [ash collector](../ash/README.md).
 
 ## Configuration and Startup Output
 
@@ -121,20 +125,30 @@ Missing roots are errors, not successful empty collections.
 
 ## Basic Usage
 
-From this directory:
+From the directory containing the standalone script, replace the server and
+collection path, then preview the selected files:
 
 ```bash
 bash ./thunderstorm-collector.sh --help
 bash ./thunderstorm-collector.sh \
   --server thunderstorm.example.org --port 8080 \
-  --dir /path/to/collection --source incident-123 --max-age 30
+  --dir /path/to/collection --source incident-123 --max-age 30 --dry-run
+```
+
+After reviewing the preview, enable uploads explicitly:
+
+```bash
+bash ./thunderstorm-collector.sh \
+  --server thunderstorm.example.org --port 8080 \
+  --dir /path/to/collection --source incident-123 --max-age 30 --no-dry-run
 ```
 
 ## Manual Acceptance Against a Real Service
 
-Check out [PR #44](https://github.com/NextronSystems/thunderstorm-collector/pull/44),
-then enter `scripts/bash`. Its branch includes the shared harness/layout
-prerequisites. Do not merge the PR merely to test it.
+Test the exact collector revision to be deployed, from the directory containing
+its standalone file. Follow the shared [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
+and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record); the cases below
+supply the Bash-specific commands and expected results.
 
 ### 1. Prepare an Isolated Fixture
 
@@ -165,7 +179,7 @@ RUN_ID="manual-bash-$(date +%Y%m%d-%H%M%S)"
 collector() {
   bash ./thunderstorm-collector.sh \
     --server "$SERVER" --port "$PORT" "${TRANSPORT[@]}" \
-    --source "$RUN_ID-$CASE" --max-age 0 --no-log-file --no-progress "$@"
+    --source "$RUN_ID-$CASE" --max-age 0 --no-dry-run --no-log-file --no-progress "$@"
   rc=$?
   printf 'exit=%s\n' "$rc"
   return "$rc"
@@ -173,8 +187,7 @@ collector() {
 ```
 
 Record the commit, OS, Bash version (`bash --version`), upload tool/version,
-service version, source, output, and exit code per case. Skipped cases are not
-passed. The [manual guide](../MANUAL_TESTING_GUIDE.md) defines acceptance statuses.
+service version, source, output, and exit code per case.
 
 ### 2. Normal Upload and Integrity
 
@@ -306,7 +319,8 @@ uploads, or an unreviewed TLS workaround.
 
 ## Automated Tests
 
-From the repository root, using a native stub binary for your OS:
+For shared setup and test-host requirements, see the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md#running-tests-locally).
+Run these collector-specific commands from the repository root:
 
 ```bash
 bash scripts/tests/run_tests.sh /path/to/thunderstorm-stub-server
