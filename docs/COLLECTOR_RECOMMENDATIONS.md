@@ -29,7 +29,7 @@ An existing Linux shell does not establish permission to run a collector on AHV 
 
 ## Collector Files and Runtime Requirements
 
-The paths below describe the reorganized source tree. Published releases contain their tagged versions, so consult the matching release instructions and asset list. **As of 8 October 2026, v1.0.1 is the latest published release; v1.0.2 has not been published.** v1.0.1 does not include the revised scripts, the new legacy script variants or the dedicated FreeBSD 8.4 NetScaler package.
+The paths below describe the reorganized source tree. Published releases contain their tagged versions, so consult the matching release instructions and asset list. **As of 11 October 2026, v1.0.1 is the latest published release; v1.0.2 has not been published.** v1.0.1 does not include the revised scripts, the new legacy script variants or the dedicated FreeBSD 8.4 NetScaler package.
 
 - **Go:** select the OS/architecture package from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases), following the [Go guide](../go/README.md). A static binary still requires a compatible OS/kernel and CPU. The compiler used can differ between targets; do not assume every build uses Go 1.9.7.
 - **Python:** [Python 3 collector](../scripts/python/thunderstorm-collector.py), requiring Python 3.4+ and the standard library; [Python 2 collector](../scripts/python/thunderstorm-collector-py2.py), requiring Python 2.7. Verified HTTPS on Python 2 requires 2.7.9+ and a compatible SSL library. See the [Python guide](../scripts/python/README.md). The older v1.0.1 Python script requires Python 3.6+ and has a different interface.
@@ -44,6 +44,6 @@ The collector can upload only files visible and readable in its execution enviro
 
 ## Test Evidence and Future Updates
 
-The [script acceptance report in PR #52](https://github.com/NextronSystems/thunderstorm-collector/pull/52) records exact revisions, runtime versions, hashes and outstanding checks. Its successful real-THOR runs do not certify all products listed above. The [NetScaler/FreeBSD record](../go/README.md#compatibility-evidence-as-of-2026-10-08) separately identifies the tested legacy artifact and VM environments.
+The [script acceptance report](SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md) records exact revisions, runtime versions, hashes and outstanding checks. Its successful real-THOR runs do not certify all products listed above. The [NetScaler/FreeBSD record](../go/README.md#compatibility-evidence-as-of-2026-10-08) separately identifies the tested legacy artifact and VM environments.
 
 For a new product test, record product/firmware, OS and architecture, collector revision or asset hash, runtime, execution context and visible paths, HTTP/HTTPS mode, dry-run outcome and server-side receipt/results. Link that record here before changing a recommendation from an untested candidate to a product-tested combination. Runtime availability, successful startup and successful end-to-end collection are different evidence levels.

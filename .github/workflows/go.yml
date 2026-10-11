@@ -6,6 +6,16 @@ on:
   workflow_call:
 
 jobs:
+  release-toolchains:
+    name: Verify release compiler selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Check compiler selection and preservation of release assets
+        run: python3 .github/scripts/test-release-toolchains.py
+
   test:
     runs-on: ubuntu-latest
     strategy:

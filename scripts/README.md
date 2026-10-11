@@ -40,13 +40,13 @@ For VMware ESXi, start with [the Python 3 collector](python/thunderstorm-collect
 - The revised Python 3 collector requires **Python 3.4 or later** and only the standard library.
 - A separate, standalone [Python 2 collector](python/thunderstorm-collector-py2.py) supports **Python 2.7** for legacy hosts. Prefer Python 3 where available. Verified HTTPS requires Python 2.7.9 or later; older versions refuse it rather than silently disabling certificate verification.
 - Select an interpreter already available on the appliance. `python3` in the examples is not a guaranteed ESXi interpreter path. Runtime and SSL availability depend on the appliance; these instructions do not require installing an unsupported runtime or changing ESXi security settings.
-- As of **8 October 2026**, the [script acceptance report in PR #52](https://github.com/NextronSystems/thunderstorm-collector/pull/52) records successful HTTP/HTTPS tests with Python 3.9.6 on macOS and actual Python 3.4.10 and 2.7.18 in containers against real THOR. These are not ESXi deployment tests.
+- As of **8 October 2026**, the [script acceptance report](../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md) records successful HTTP/HTTPS tests with Python 3.9.6 on macOS and actual Python 3.4.10 and 2.7.18 in containers against real THOR. These are not ESXi deployment tests.
 
 ### Source checkout versus published releases
 
 The quick start below describes the revised source files in `scripts/python/` and later releases containing those files. Each collector is standalone: copy the selected `.py` file to the target; the rest of this repository and the test harness are not required there.
 
-As of 8 October 2026, the latest published release is **v1.0.1**; **v1.0.2 has not been published**. The older `thunderstorm-collector-1.0.1.py` requires Python 3.6+, has no `--dry-run` or configurable age/size options, and uses a 20 MiB size limit. Do not apply the revised examples below to that file. Consult [its tagged source](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/scripts/thunderstorm-collector.py) and its `--help` output instead. Release files are downloaded individually from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases); there is no scripts ZIP archive.
+As of 11 October 2026, the latest published release is **v1.0.1**; **v1.0.2 has not been published**. The older `thunderstorm-collector-1.0.1.py` requires Python 3.6+, has no `--dry-run` or configurable age/size options, and uses a 20 MiB size limit. Do not apply the revised examples below to that file. Consult [its tagged source](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/scripts/thunderstorm-collector.py) and its `--help` output instead. Release files are downloaded individually from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases); there is no scripts ZIP archive.
 
 ### Quick start for the revised collector
 
@@ -102,3 +102,10 @@ THUNDERSTORM_TEST_COLLECTORS=bash \
 Supported selector values are `bash`, `ash`, `python3`, `python2`, `perl`, `ps3`, and `ps2`.
 
 Use `THUNDERSTORM_TEST_REQUIRE_MATCH=1` when CI or manual test runs must fail if the requested collector is missing or not runnable.
+
+## Building a Collector for Another Platform
+
+The [collector construction guide](../docs/COLLECTOR_CONSTRUCTION_GUIDE.md) describes the
+upload protocol, optional capability profiles, safety requirements and acceptance
+tests without prescribing a language-specific implementation. It includes a
+reusable assignment for a coding agent targeting a new language, OS or architecture.

@@ -34,16 +34,16 @@ Each release includes platform-specific packages containing:
 - Default configuration file (`config.yml`)
 
 **Download the package for your platform:**
-- **Linux:** `thunderstorm-collector-amd64-linux.tar.gz` (or arm64, 386, etc.)
-- **Windows:** `thunderstorm-collector-amd64-windows.zip` (or arm64, 386, etc.)
-- **macOS:** `thunderstorm-collector-amd64-darwin.tar.gz` or `thunderstorm-collector-arm64-darwin.tar.gz`
+- **Linux:** `thunderstorm-collector-<version>-amd64-linux.tar.gz` (or arm64, 386, etc.)
+- **Windows:** `thunderstorm-collector-<version>-amd64-windows.zip` (or arm64, 386, etc.)
+- **macOS:** `thunderstorm-collector-<version>-amd64-darwin.tar.gz` or `thunderstorm-collector-<version>-arm64-darwin.tar.gz`
 - **BSD:** FreeBSD, OpenBSD, NetBSD packages available
 - **Other:** AIX, Solaris, Plan9, and more
 
 **Quick start:**
 ```bash
 # Linux/macOS example
-tar -xzf thunderstorm-collector-amd64-linux.tar.gz
+tar -xzf thunderstorm-collector-1.0.1-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
 ./amd64-linux-thunderstorm-collector --help
 ```
@@ -52,7 +52,7 @@ cd thunderstorm-collector-amd64-linux
 
 Releases provide separate, versioned script assets, for example `thunderstorm-collector-<version>.sh`; a release containing the Python 2 collector also provides `thunderstorm-collector-py2-<version>.py`. There is no combined scripts ZIP archive. A release contains the collectors and behavior from its tagged revision.
 
-As of 8 October 2026, v1.0.1 is the latest published release and v1.0.2 has not been published. The reorganized scripts and additional legacy variants described below are not in v1.0.1. Use the instructions matching your downloaded version; the [ESXi quick start](scripts/README.md#vmware-esxi-use-the-python-collector) explains the Python differences.
+As of 11 October 2026, v1.0.1 is the latest published release and v1.0.2 has not been published. The reorganized scripts and additional legacy variants described below are not in v1.0.1. Use the instructions matching your downloaded version; the [ESXi quick start](scripts/README.md#vmware-esxi-use-the-python-collector) explains the Python differences.
 
 Source code and per-collector documentation are organized in:
 - `scripts/bash/` (Bash)
@@ -89,6 +89,8 @@ make release-scripts   # Copy individual script assets only
 make help              # Show all available targets
 ```
 
+These local Makefile targets create regular assets; the dedicated NetScaler package uses the separate [legacy build procedure](go/legacy/README.md). The tagged-release workflow includes both.
+
 This creates:
 - **Binary packages:** `go/dist/*.tar.gz` and `go/dist/*.zip` (46+ platforms)
 - **Release assets:** versioned binary packages, individual collector scripts, and `config-<version>.yml` in `release/`
@@ -110,11 +112,17 @@ This creates:
 ## Automated Releases
 
 When a version tag is pushed (e.g., `v1.2.3`), GitHub Actions automatically:
-1. Builds binaries for all 46 supported platforms
-2. Creates compressed packages (tar.gz/zip) with binary + config
-3. Copies each available collector script and the standalone configuration into versioned release assets
-4. Publishes a GitHub release with binary packages and individual assets attached
+1. Tests and builds regular binaries for supported OS/architecture combinations
+2. Builds and verifies the separate Go 1.9.7 FreeBSD 8.4/amd64 NetScaler package
+3. Creates compressed binary packages and copies individual scripts and the standalone configuration into versioned assets
+4. Verifies the required legacy package and generates `SHA256SUMS`
+5. Publishes one GitHub release after the required build jobs succeed
 
 ## Craft Your Own Collector
+
+Use the [collector construction guide](docs/COLLECTOR_CONSTRUCTION_GUIDE.md)
+to build a standalone collector in another language or for an unusual platform.
+It covers the HTTP upload contract, optional features, security/resource limits,
+tests and a reusable coding-agent assignment.
 
 Interested in creating a unique collector? A Python module, `thunderstormAPI`, is available in [this](https://github.com/NextronSystems/thunderstormAPI) repository for your use.

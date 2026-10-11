@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034
-# Test: PowerShell collector default Extensions filter skips .dat, .sh, .jpg
-ARGS="-ThunderstormServer localhost -ThunderstormPort PORT -Folder TESTDIR"
+# Isolate extension filtering; mtime age selection has its own regressions.
+ARGS="-ThunderstormServer localhost -ThunderstormPort PORT -Folder TESTDIR -MaxAge 0"
 EXPECTED_FILES=(
     "small-file.txt"
     "medium-file.log"
