@@ -4,7 +4,7 @@
 
 collector_setup() {
     TEMP_SCRIPT_PATH=$("${MKTEMP_CMD}" --suffix=.bat)
-    "${CP_CMD}" "${PROJECT_ROOT}/scripts/thunderstorm-collector.bat" "${TEMP_SCRIPT_PATH}"
+    "${CP_CMD}" "${PROJECT_ROOT}/scripts/batch/thunderstorm-collector.bat" "${TEMP_SCRIPT_PATH}"
 
     # Convert path for Windows batch script
     local win_testdir

@@ -4,7 +4,7 @@
 
 collector_setup() {
     TEMP_SCRIPT_PATH=$("${MKTEMP_CMD}" --suffix=.sh)
-    "${CP_CMD}" "${PROJECT_ROOT}/scripts/thunderstorm-collector.sh" "${TEMP_SCRIPT_PATH}"
+    "${CP_CMD}" "${PROJECT_ROOT}/scripts/bash/thunderstorm-collector.sh" "${TEMP_SCRIPT_PATH}"
 
     # Modify variables for testing
     sed_inplace "s/THUNDERSTORM_SERVER=.*/THUNDERSTORM_SERVER=\"localhost\"/" "${TEMP_SCRIPT_PATH}"

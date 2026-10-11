@@ -15,14 +15,14 @@ PS_FLAGS = ("ThunderstormServer", "ThunderstormPort", "Folder", "Source", "MaxAg
 BATCH_FLAGS = ("SET _TS=%THUNDERSTORM_SERVER%", "SET _TP=%THUNDERSTORM_PORT%",
                "SET _DIRS=%COLLECT_DIRS%", "SET _MAXSZ=%COLLECT_MAX_SIZE%", "SET _SRC=%SOURCE%")
 COLLECTORS = {
-    "bash": ("linux", "thunderstorm-collector.sh", SHELL_FLAGS),
-    "ash": ("linux", "thunderstorm-collector-ash.sh", SHELL_FLAGS),
-    "python3": ("linux", "thunderstorm-collector.py", PYTHON_FLAGS),
-    "python2": ("linux", "thunderstorm-collector-py2.py", PYTHON_FLAGS),
-    "perl": ("linux", "thunderstorm-collector.pl", SHELL_FLAGS),
-    "ps3": ("windows", "thunderstorm-collector.ps1", PS_FLAGS),
-    "ps2": ("windows", "thunderstorm-collector-ps2.ps1", PS_FLAGS),
-    "batch": ("windows", "thunderstorm-collector.bat", BATCH_FLAGS),
+    "bash": ("linux", "bash/thunderstorm-collector.sh", SHELL_FLAGS),
+    "ash": ("linux", "ash/thunderstorm-collector-ash.sh", SHELL_FLAGS),
+    "python3": ("linux", "python/thunderstorm-collector.py", PYTHON_FLAGS),
+    "python2": ("linux", "python/thunderstorm-collector-py2.py", PYTHON_FLAGS),
+    "perl": ("linux", "perl/thunderstorm-collector.pl", SHELL_FLAGS),
+    "ps3": ("windows", "powershell/thunderstorm-collector.ps1", PS_FLAGS),
+    "ps2": ("windows", "powershell/thunderstorm-collector-ps2.ps1", PS_FLAGS),
+    "batch": ("windows", "batch/thunderstorm-collector.bat", BATCH_FLAGS),
 }
 DEFAULTS = {
     "linux": ("bash", "ash", "python3", "perl"),
