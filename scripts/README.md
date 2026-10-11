@@ -21,7 +21,7 @@ The eight collectors are organized by language. Choose a file using the target's
 | Legacy Windows PowerShell 2 | [PowerShell 2](powershell/thunderstorm-collector-ps2.ps1) | [Requirements and usage](powershell/README.md) |
 | Windows cmd with Windows Script Host and suitable curl | [Batch](batch/thunderstorm-collector.bat) | [Requirements and usage](batch/README.md) |
 
-Each collector is a standalone file; `scripts/tests/` contains development/acceptance tooling and is not needed on the collecting host. Start with an explicit input directory and a preview using the selected guide's syntax. Flags and units differ between languages.
+Each collector is a standalone file; `scripts/tests/` contains development/acceptance tooling and is not needed on the collecting host. Preview the collection using the selected guide's syntax. Most scripts have default collection directories; Batch requires an explicit directory. Override the defaults when you want a different scope. Flags and units differ between languages.
 
 ## VMware ESXi: use the Python collector
 
@@ -62,7 +62,7 @@ python3 ./thunderstorm-collector.py \
 
 For a later versioned release file, substitute its actual filename. For the legacy collector, copy `scripts/python/thunderstorm-collector-py2.py` instead and substitute the available Python 2.7 interpreter and that filename; the selection and upload options are the same.
 
-Always pass an explicit directory: omitting `--dirs` selects `/`. The revised collector defaults to port 8080, a maximum age of 30 days and a maximum size of **2048 KiB (2 MiB)**, including the exact limit. `--max-age 0` disables age filtering. Symlink entries, special files and configured system/cloud/VM path patterns are skipped; see the Python guide for the full selection rules.
+For normal collection, `--dirs` is optional: on ESXi/Unix, omitting it uses `/` unless `SCAN_DIRS` was changed in the header. Use an explicit synthetic-file directory for the test examples above. The revised collector defaults to port 8080, a maximum age of 30 days and a maximum size of **2048 KiB (2 MiB)**, including the exact limit. `--max-age 0` disables age filtering. Symlink entries, special files and configured system/cloud/VM path patterns are skipped; see the Python guide for the full selection rules.
 
 For HTTPS, add `--tls` and the appropriate port. Use `--ca-cert /path/to/ca.pem` for a private CA while retaining certificate and hostname verification. Old SSL libraries can still limit interoperability even when the Python version meets the minimum.
 

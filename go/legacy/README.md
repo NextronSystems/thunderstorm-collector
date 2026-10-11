@@ -6,16 +6,25 @@ This build uses exactly **Go 1.9.7**, `GOOS=freebsd`, `GOARCH=amd64` and `CGO_EN
 
 ## Download and select
 
-Use the [NetScaler package and compatibility guide](../README.md#citrix-netscaler-and-freebsd-84) for release availability, target selection, validation status and unsupported-toolchain limitations.
+Use the [NetScaler package and compatibility guide](../README.md#citrix-netscaler-and-freebsd-84) for target selection, validation status and unsupported-toolchain limitations. The [main download guide](../../README.md#download-a-collector) distinguishes published releases from current builds.
 
-The archive includes:
+To download the existing prebuilt CI package:
+
+1. Sign in to GitHub and open the [Legacy NetScaler workflow runs](https://github.com/NextronSystems/thunderstorm-collector/actions/workflows/legacy-netscaler.yml).
+2. Select a successful run for the branch and commit you intend to use.
+3. In the run's **Artifacts** section, download **`netscaler-freebsd8`**.
+4. Extract the downloaded ZIP. It contains the collector's `.tar.gz` package and its `.sha256` checksum file. Verify the checksum, then extract the `.tar.gz` package.
+
+These CI artifacts expire after **14 days**, as configured in the [workflow](../../.github/workflows/legacy-netscaler.yml). If an artifact has expired, select a newer successful run for an appropriate revision, or ask a maintainer to run the workflow for the required revision. GitHub documents [artifact download access and steps](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts). Local compilation is optional.
+
+The collector package includes:
 
 - `amd64-freebsd8-netscaler-thunderstorm-collector` (executable)
 - The shared, Go 1.9.7-validated `config.yml`
 - `COMPATIBILITY.txt` (target, limitations and safe first-use guidance)
 - `BUILD-INFO.txt` (actual compiler output, source commit/dirty state, target, flags, toolchain SHA-256 and dependency input hashes)
 
-Check the release checksum, unpack the archive, and start with a small directory containing synthetic files. From the unpacked directory:
+For an initial compatibility test, use a small existing directory containing synthetic files. Replace `/absolute/path/to/collector-test` in this test command with that directory. From the unpacked collector directory:
 
 ```sh
 ./amd64-freebsd8-netscaler-thunderstorm-collector \
