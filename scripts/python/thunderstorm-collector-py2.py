@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Florian Roth / Nextron Systems
 # Standalone collector; keep the paired Python implementation behavior in sync.
@@ -54,8 +54,8 @@ except ImportError:
     import httplib as http_client
     from urllib import quote
 
-PYTHON_MAJOR = 3
-MIN_VERSION = (3, 4)
+PYTHON_MAJOR = 2
+MIN_VERSION = (2, 7)
 VERSION = "0.2"
 MAX_RESPONSE = 1024 * 1024
 hard_skips = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots"]
