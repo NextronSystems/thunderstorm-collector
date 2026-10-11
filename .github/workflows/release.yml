@@ -48,6 +48,9 @@ jobs:
         env:
           VERSION: ${{ github.ref }}
         run: |
+          # Rebuild supported targets with this compiler. Keep release/ intact
+          # so packages for targets supported only by stable Go are preserved.
+          make -C go clean
           make release
       - name: Create Release
         id: create_release
