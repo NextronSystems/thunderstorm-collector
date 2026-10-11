@@ -57,23 +57,22 @@ tar -xzf thunderstorm-collector-1.0.1-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
 ```
 
-Review `config.yml` for the file filters and limits. Replace `/absolute/path/to/files` with an existing directory you intend to collect. Preview the selected filenames before uploading:
+The bundled `config.yml` is ready to use; changing its file filters and limits is optional. With the default configuration, the Go collector starts at `/` on Linux/Unix or `C:\` on Windows. File filters, limits, and filesystem exclusions still apply. Preview the selected filenames using these defaults:
+
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml --dry-run --debug
+```
+
+To upload the selected files, replace `thunderstorm.example.internal` with your Thunderstorm server's address:
 
 ```sh
 ./amd64-linux-thunderstorm-collector -t ./config.yml \
-  --path /absolute/path/to/files --dry-run --debug
+  --thunderstorm-server thunderstorm.example.internal --dry-run=false
 ```
 
-After checking the selection, supply your server and a source name identifying the collecting system:
+To collect only a specific directory, optionally add `--path /var/www` (or another existing directory) to either command. `--path` replaces the default or configured directory list; repeat it for multiple roots. The source name defaults to the detected hostname; use `--source custom-name` only to override it.
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml \
-  --path /absolute/path/to/files --dry-run=false \
-  --thunderstorm-server thunderstorm.example.internal \
-  --port 8080 --source host-example
-```
-
-`--path` replaces the configuration's directory list; repeat it for multiple roots. For an assessment profile, follow its guide and pass its configuration with `-t`. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
+For an assessment profile, follow its guide and pass its configuration with `-t`. The default server port is 8080; change it with `--port` if needed. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
 
 For scripts, follow the selected [language guide](scripts/README.md) to configure and preview the collection using its header settings, command-line options, or environment variables. Scripts use their own settings rather than the Go YAML file. Uploads are asynchronous by default in the examples above; check received files and analysis results on the server after collection.
 
