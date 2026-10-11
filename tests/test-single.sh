@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # test-single.sh - Run all tests for a single collector type
 #
 # Usage: test-single.sh <collector-type>
