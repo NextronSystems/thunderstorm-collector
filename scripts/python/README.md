@@ -1,8 +1,46 @@
 # Python Collectors
 
-Prefer `thunderstorm-collector.py` (Python 3.4+). Use the standalone
-`thunderstorm-collector-py2.py` only on legacy hosts with Python 2.7.
-Both need only the standard library. Python 2 is end-of-life.
+Use [thunderstorm-collector.py](thunderstorm-collector.py) with Python 3.4 or
+later. The standalone [thunderstorm-collector-py2.py](thunderstorm-collector-py2.py)
+is for legacy hosts with Python 2.7. Both need only the standard library; prefer
+Python 3 where available.
+
+These instructions describe the current source files. Check the
+[release availability note](../../README.md#download-a-collector) before using a
+published asset; older releases have different options. For other runtimes, see
+[script selection](../README.md#choosing-a-collector). For VMware ESXi interpreter
+and deployment considerations, see the [ESXi guide](../README.md#vmware-esxi-use-the-python-collector).
+
+## Quick Start
+
+Copy `scripts/python/thunderstorm-collector.py` from the source checkout to a
+working directory on the target, then run these commands from that directory.
+Replace the server and input path with your endpoint and an existing absolute
+directory containing a few synthetic files. Use the target's actual interpreter
+path if it is not `python3`.
+
+```sh
+python3 ./thunderstorm-collector.py \
+  --server thunderstorm.example.internal --port 8080 \
+  --dirs /absolute/path/to/collector-test --source host-example \
+  --max-age 14 --max-size-kb 2048 --dry-run
+```
+
+Review the selected paths, then enable uploads explicitly:
+
+```sh
+python3 ./thunderstorm-collector.py \
+  --server thunderstorm.example.internal --port 8080 \
+  --dirs /absolute/path/to/collector-test --source host-example \
+  --max-age 14 --max-size-kb 2048 --no-dry-run
+```
+
+For the legacy variant, copy `scripts/python/thunderstorm-collector-py2.py` and
+substitute that filename and a Python 2.7 interpreter. For HTTPS, add `--tls` and
+the endpoint's port; use `--ca-cert /path/to/ca.pem` for a private CA. Python
+before 2.7.9 refuses verified HTTPS. Dry-run makes no requests and does not check
+payload readability or TLS connectivity. Uploads are asynchronous by default;
+check received files and analysis results on the server.
 
 ## Configuration and Startup Output
 
@@ -11,8 +49,9 @@ the top. Set `THUNDERSTORM_SERVER` (hostname/IP, without scheme/port/path) and r
 `SCAN_DIRS`, for example `["/var/www", "/home/alice"]`. The default is the entire
 filesystem root, subject to exclusions below. Missing server configuration exits
 2 with an instruction; supplying `--server HOST` also satisfies the requirement.
-CLI values override header values. Any `--dir` replaces the whole header root
-list; repeated `--dir` options accumulate. `--no-tls`, `--verify-tls`, `--async`,
+Always select explicit roots. CLI values override header values. `--dirs`,
+`--dir` and `-d` are aliases: supplying any of them replaces the header root
+list, and repeated options accumulate. `--no-tls`, `--verify-tls`, `--async`,
 `--no-dry-run` and `--no-debug` disable corresponding enabled header flags.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**. Older/larger
@@ -52,8 +91,6 @@ by the collector itself. Always review a dry-run before collecting real data.
 - TLS verifies CA/hostname; custom CA via `--tls --ca-cert FILE`, explicit bypass
   via `--tls --insecure`. Python before 2.7.9 refuses verified HTTPS rather than
   silently disabling verification. Old SSL protocol support can still limit it.
-- Dry-run never contacts the service. It enumerates/selects but does not prove
-  payload readability or TLS connectivity. Repeated `-d` options accumulate.
 - Port 1..65535; IPv4/DNS and runtime-supported IPv6. Progress is count-based;
   `--debug` is accepted for compatibility, with path errors already always shown.
 
@@ -67,12 +104,20 @@ Unreadable directories count as `Scan errors`; unreadable selected files as
 `Failed`. Empty existing roots may succeed; missing roots cannot. Actual legacy
 SSL and Windows paths require target-system verification, not modern CI inference.
 
+## Validation Status
+
+The [8 October 2026 acceptance report](../../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
+records HTTP/HTTPS checks against real THOR with Python 3.9.6 on macOS and actual
+Python 3.4.10 and 2.7.18 in containers. Evidence applies to the exact revisions
+and assets recorded there. It does not establish ESXi or every legacy OS/SSL
+combination's compatibility.
+
 ## Manual Acceptance
 
-Record PR #46, exact commit, OS/architecture, interpreter/SSL/service versions,
-outputs and exit codes. Repeat applicable cases on both interpreters. Mark each
-PASS/FAIL/NOT SUPPORTED/NOT TESTED. Never scan default system roots or production
-data for acceptance. Keep licenses outside fixtures and Git.
+Follow the [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
+and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record) guidance. Record the exact collector revision or asset
+hash, OS/architecture and interpreter/SSL versions. Repeat the applicable cases
+below on each interpreter and target you intend to deploy.
 
 ### 1. Isolated Setup
 
@@ -97,12 +142,24 @@ printf 'semicolon\n' > "$ROOT/input/semi;colon.txt"
 printf 'quote\n' > "$ROOT/input/double\"quote.txt"
 collect() {
   "$PYTHON" "$COLLECTOR" -s "$SERVER" -p "$PORT" --source "$SOURCE" \
-    --max-age 0 --retries 1 --no-progress "$@"
+    --max-age 0 --retries 1 --no-dry-run --no-progress "$@"
   code=$?; printf 'exit_code=%s\n' "$code"; return "$code"
 }
 ```
 
-### 2. Positive and Sync
+### 2. No-network Dry-run and Unreachable Service
+
+```sh
+collect -d "$ROOT/input" --dry-run -s 127.0.0.1 -p 1
+collect -d "$ROOT/input" -s 127.0.0.1 -p 1
+```
+
+Dry-run: exit 0, seven would-submit lines, `Submitted: 0 Would submit: 7` in the
+summary, zero requests. Live: exit 2 at begin,
+zero uploads and connection errors. Port 1 must actually be closed. Use an
+external watchdog for slow networks; idle timeouts are not run deadlines.
+
+### 3. Positive and Sync
 
 ```sh
 collect -d "$ROOT/input"
@@ -114,18 +171,6 @@ Each: exit 0, seven accepted files including empty. Verify stored SHA-256/size
 of every payload, wait for async completion, check source if exposed (otherwise
 NOT OBSERVABLE). Optional marker 404/501 is acceptable. Empty-file rejection is
 a real backend failure, not a successful skip. Change SOURCE for subsequent runs.
-
-### 3. No-network Dry-run and Unreachable Service
-
-```sh
-collect -d "$ROOT/input" --dry-run -s 127.0.0.1 -p 1
-collect -d "$ROOT/input" -s 127.0.0.1 -p 1
-```
-
-Dry-run: exit 0, seven would-submit lines, `Submitted: 0 Would submit: 7` in the
-summary, zero requests. Live: exit 2 at begin,
-zero uploads and connection errors. Port 1 must actually be closed. Use an
-external watchdog for slow networks; idle timeouts are not run deadlines.
 
 ### 4. Missing Roots and Repeated Options
 
@@ -214,7 +259,8 @@ old OS/SSL build's compatibility. Keep remaining target-system checks explicit.
 
 ## Shared Stub E2E
 
-From repository root with a stub binary compiled for the host:
+Use the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md) for stub setup
+and shared options. From the repository root, select each installed interpreter:
 
 ```sh
 THUNDERSTORM_TEST_COLLECTORS=python3 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \

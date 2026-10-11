@@ -1,10 +1,12 @@
 # Legacy NetScaler package (FreeBSD 8.4 / amd64)
 
-This build uses exactly **Go 1.9.7**, `GOOS=freebsd`, `GOARCH=amd64` and `CGO_ENABLED=0`, using the shared collector source and pinned vendored dependencies. No collector features are intentionally removed, and regular builds retain their compilers and package names. HTTP 503 retries in the shared collector are now bounded to three retries, matching transport-error retries.
+[Go collector guide](../README.md) · [Collector downloads](../../README.md#download-a-collector) · [NetScaler assessment guide](../../emerging-threats/citrix-netscaler/README.md)
+
+This build uses exactly **Go 1.9.7**, `GOOS=freebsd`, `GOARCH=amd64` and `CGO_ENABLED=0`, using the shared collector source and pinned vendored dependencies.
 
 ## Download and select
 
-See the [NetScaler download guidance and compatibility evidence](../README.md#citrix-netscaler-and-freebsd-84) for release availability, target selection, validation status and the unsupported-toolchain limitations. That section is the canonical compatibility reference.
+Use the [NetScaler package and compatibility guide](../README.md#citrix-netscaler-and-freebsd-84) for release availability, target selection, validation status and unsupported-toolchain limitations.
 
 The archive includes:
 
@@ -17,14 +19,14 @@ Check the release checksum, unpack the archive, and start with a small directory
 
 ```sh
 ./amd64-freebsd8-netscaler-thunderstorm-collector \
-  --dry-run --debug -p /absolute/path/to/collector-test
+  -t ./config.yml --dry-run --debug -p /absolute/path/to/collector-test
 ```
 
-For uploads, use the [shared Go collector CLI](../README.md#usage), specifying your Thunderstorm server and the same small test directory. Keep TLS verification enabled.
+For uploads, use the [shared Go collector CLI](../README.md#usage), specifying your Thunderstorm server and the same small test directory. Keep TLS verification enabled. For a broad assessment, follow the [NetScaler profile guide](../../emerging-threats/citrix-netscaler/README.md) and download its separate YAML configuration.
 
 ## CI and optional advanced local build
 
-`.github/workflows/legacy-netscaler.yml` runs for PRs, main/master pushes and manual validation, and is reused by tagged releases. It has read-only repository permissions and no release credentials. A modern Go tool prepares only the exact go.mod/go.sum dependencies, verifies them and creates the vendor directory without changing module files. The isolated compiler is downloaded from the official Go archive and checked against the pinned SHA-256; it is never replaced by a newer compiler.
+The [legacy build workflow](../../.github/workflows/legacy-netscaler.yml) runs for PRs, main/master pushes and manual validation, and is reused by tagged releases. It has read-only repository permissions and no release credentials. A modern Go tool prepares only the exact go.mod/go.sum dependencies, verifies them and creates the vendor directory without changing module files. The isolated compiler is downloaded from the official Go archive and checked against the pinned SHA-256; it is never replaced by a newer compiler.
 
 On a Linux/amd64 build host with Git, curl, Python 3.9+, make/coreutils and tar available:
 
@@ -38,6 +40,4 @@ VERSION=validation-local bash .github/scripts/build-legacy-netscaler.sh
 python3 .github/scripts/test-legacy-release.py
 ```
 
-The build creates only its separate `go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz` and checksum. The publishing job downloads that required Actions artifact and verifies it before publishing the same tagged GitHub release as the regular packages. Missing/corrupt packages or checksums fail release preparation. Normal build flags, vendor layout and output paths remain intact.
-
-The artifact is a customer download after release; a local old toolchain is only an optional advanced build path. No tags or historical releases are changed to validate this pipeline.
+The local build creates `go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz` and its checksum. CI uploads them as the `netscaler-freebsd8` artifact. The [tagged-release workflow](../../.github/workflows/release.yml) requires and verifies that artifact before publishing the release.

@@ -1,15 +1,15 @@
 # Connect ESXi 7 without Secure Boot to THOR Thunderstorm
 
-This document describes on how to install a persistend THOR Thunderstorm collector on an ESXi host without Secure Boot enabled.
+This guide describes persistent THOR Thunderstorm collection on an ESXi 7 host without Secure Boot enabled. Before scheduling it, follow the current [ESXi collector requirements and quick start](../../scripts/README.md#vmware-esxi-use-the-python-collector) to select and validate the Python collector on the target.
 
 ## Preparing THOR Thunderstorm
 
 
 ### Choose Port for Outgoing Network Communication of ESXi
 
-After [installing THOR Thunderstorm](https://github.com/NextronSystems/nextron-helper-scripts/tree/master/thunderstorm), you need to select which port ESXi is using for outgoing communication. Configuring a custom port in the host based firewall of ESXi is not trivial. We suggest using an existing, unused rule such as `Software iSCI Client` or an existing and already enabled rule such as `NTP Client`. See `Navigator` > `Networking` > `Firewall rules` for your options.
+After [installing THOR Thunderstorm](https://github.com/NextronSystems/nextron-helper-scripts/tree/master/thunderstorm), choose a TCP port that the ESXi host is permitted to use for connections to that server. Inspect the rules under `Navigator` > `Networking` > `Firewall rules` and confirm the protocol, port, and allowed destinations.
 
-This guide uses `NTP Client` firwall rule and its `1514/tcp` outgoing port for further illustrations.
+The examples below use TCP port 1514, which Broadcom lists as an outbound port of the [syslog firewall ruleset](https://knowledge.broadcom.com/external/article/318939/configuring-syslog-on-vmware-vsphere-esx.html). Verify that the applicable rule is enabled and permits connections to the Thunderstorm endpoint. If your collection procedure uses a different allowed TCP port, substitute it throughout the examples.
 
 ### Configure THOR Thunderstorm Listening Port
 
@@ -58,7 +58,7 @@ sudo ufw allow proto tcp to any port 8080 # general purpose
 sudo ufw allow proto tcp to any port 1514 # ESXi
 ```
 
-Edit `/etc/ufw/before.rule` and insert at the very top (excluding comments, i.e. below the comments):
+Edit `/etc/ufw/before.rules` and insert at the very top (excluding comments, i.e. below the comments):
 ```sh
 *nat
 :PREROUTING ACCEPT [0:0]
@@ -85,20 +85,22 @@ sudo ufw reload
 
 ## Configure the ESXi Host
 
-1. Download the Python collector script from [scripts/thunderstorm-collector.py](../../scripts/thunderstorm-collector.py) and change any settings in the `Configuration` if you like to.
+The examples below use `/bin/python` as a placeholder for the available interpreter. Verify its version: the current Python 3 collector requires Python 3.4+, while the separate Python 2 collector requires Python 2.7. Substitute the selected interpreter and script filename in both cron examples. Replace the collection-directory placeholder with an explicit path for the intended assessment, and verify a manual preview and upload before scheduling it.
+
+1. Download the [Python 3 collector](../../scripts/python/thunderstorm-collector.py), or the [Python 2 collector](../../scripts/python/thunderstorm-collector-py2.py) if required, and configure its `USER CONFIGURATION` block or command-line options as described in the [Python guide](../../scripts/python/README.md).
 
 2. Place the collector script on persistent storage of your choice and create a directory for it: `/vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py`
 
 3. Add these lines to `/etc/rc.local.d/local.sh`. They recreate the needed cronjob after every reboot
 ```sh
-echo "15   02    *    *    *    /bin/python /vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py -s <THOR-Thunderstorm-IP/FQDN> -p 1514" >> /var/spool/cron/crontabs/root
+echo "15   02    *    *    *    /bin/python /vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py -s <THOR-Thunderstorm-IP/FQDN> -p 1514 --dirs /absolute/path/to/collection-root" >> /var/spool/cron/crontabs/root
 touch /var/spool/cron/crontabs/cron.update
 ```
 The first line adds the cronjob to run at 2:15 am every night and can be adapted for your own preferences. (For a bigger number of hosts, the cronjob ideally shouldn't start at the same time for each). The second line touches a file to signal to the cron service to update its configuration.
 
 4. We add the cronjob for the current session by appending to `/var/spool/cron/crontabs/root`
 ```sh
-15   02	  *    *    *    /bin/python /vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py -s <THOR-Thunderstorm-IP/FQDN> -p 1514
+15   02	  *    *    *    /bin/python /vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py -s <THOR-Thunderstorm-IP/FQDN> -p 1514 --dirs /absolute/path/to/collection-root
 ```
 5. and signaling the configuration update.
 ```sh
@@ -162,5 +164,5 @@ If there's no connectivity, you most likely will run into a timeout.
 If it doesn't show in the THOR Thunderstorm status page, you can check syslog on the ESXi host:
 ```sh
 [root@esxintern-30:~] grep crond /var/log/syslog.log |grep thunderstorm
-<date> crond[1049149]: USER root pid 1053495 cmd /bin/python /vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py -s <THOR-Thunderstorm-IP/FQDN> -p 1514
+<date> crond[1049149]: USER root pid 1053495 cmd /bin/python /vmfs/volumes/<persistent-storage>/THOR/thunderstorm-collector.py -s <THOR-Thunderstorm-IP/FQDN> -p 1514 --dirs /absolute/path/to/collection-root
 ```

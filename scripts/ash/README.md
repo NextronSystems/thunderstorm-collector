@@ -1,6 +1,10 @@
 # POSIX sh / BusyBox ash Collector
 
-Use `thunderstorm-collector-ash.sh` on Unix-like systems without Bash: BusyBox/Alpine, embedded Linux, routers, appliances, and recovery environments. Prefer the Bash collector when Bash is available and filenames containing newlines must be supported. No Python, Perl, or Go is required on the collector target.
+Use `thunderstorm-collector-ash.sh` on Unix-like systems without Bash: BusyBox/Alpine, embedded Linux, routers, appliances, and recovery environments. Use the [Bash collector](../bash/README.md) when Bash is available and filenames containing newlines must be supported. No Python, Perl, or Go is required on the collector target.
+
+For alternatives, use the [script chooser](../README.md#choosing-a-collector).
+See [download guidance](../../README.md#download-a-collector) for release availability;
+the options below describe the current source collector.
 
 ## Requirements and Transport Selection
 
@@ -92,22 +96,36 @@ Collection is not an atomic snapshot. Files can change between enumeration, meas
 
 ## Basic Usage
 
-From this directory:
+From the directory containing the standalone script, replace the server and
+approved input path, then preview the selected files:
 
 ```sh
 busybox ash ./thunderstorm-collector-ash.sh \
   --server thunderstorm.example.internal --port 8080 \
   --dir /path/to/approved/input --source appliance-test \
-  --max-age 30 --max-size-kb 2048
+  --max-age 30 --max-size-kb 2048 --dry-run
+```
+
+After reviewing the preview, enable uploads explicitly:
+
+```sh
+busybox ash ./thunderstorm-collector-ash.sh \
+  --server thunderstorm.example.internal --port 8080 \
+  --dir /path/to/approved/input --source appliance-test \
+  --max-age 30 --max-size-kb 2048 --no-dry-run
 ```
 
 Use `sh` or `dash` instead only when that is the runtime being validated. Run `--help` for all options. Never use the broad default system roots for acceptance tests.
 
 ## Manual Acceptance Against Real THOR
 
+Test the exact collector revision to be deployed. Follow the shared [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
+and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record); the cases below
+supply the ash-specific commands and expected results.
+
 ### 1. Record Environment and Prepare Harmless Fixtures
 
-Record PR #45, exact commit, tester, OS/architecture, shell/BusyBox version, selected upload-tool version, service version, HTTP/HTTPS and source. Keep licenses outside the repository. Never use production data for these tests.
+Record the exact commit, tester, OS/architecture, shell/BusyBox version, selected upload-tool version, service version, HTTP/HTTPS and source.
 
 Run from the directory containing the collector. Substitute the real service values. Examples use `sh`; change the invocation inside `collect` to `busybox ash` if `/bin/sh` is not already BusyBox ash.
 
@@ -130,7 +148,7 @@ printf 'quote\n' > "$ROOT/input/double\"quote.txt"
 collect() {
   sh "$COLLECTOR" --server "$SERVER" --port "$PORT" \
     --source "$SOURCE" --max-age 0 --retries 1 \
-    --no-log-file --no-progress "$@"
+    --no-dry-run --no-log-file --no-progress "$@"
   code=$?
   printf 'exit_code=%s\n' "$code"
   return "$code"
@@ -252,7 +270,9 @@ rm -rf -- "$ROOT"
 
 ## Automated Tests
 
-From the repository root, with Python 3 on the **test host**, not the collector target:
+For shared setup and test-host requirements, see the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md#running-tests-locally).
+Run these collector-specific commands from the repository root, with Python 3 on
+the **test host**, not the collector target:
 
 ```sh
 COLLECTOR_SH=/bin/dash python3 -B scripts/tests/test_ash_robustness.py
@@ -263,4 +283,5 @@ THUNDERSTORM_TEST_COLLECTORS=ash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
   scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
-Shared e2e requires Bash and GNU-compatible test-host utilities. Build the stub for your OS/architecture; a Linux binary does not run on macOS. Use a Unix host with curl/GNU wget for the complete matrix and non-root for permissions. CI runs under dash and BusyBox ash. Only synthetic local fixtures are used; no THOR license is needed for regression/stub suites.
+CI runs under dash and BusyBox ash; validate the actual appliance shell,
+utilities and selected transport separately. Run permission cases as non-root.

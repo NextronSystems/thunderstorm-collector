@@ -2,127 +2,90 @@
 
 # THOR Thunderstorm Collector
 
-THOR Thunderstorm collectors facilitate effortless file uploads to a THOR Thunderstorm instance. More details on THOR Thunderstorm are available [here](https://www.nextron-systems.com/2020/10/01/theres-a-thunderstorm-coming/).
+Thunderstorm collectors select files on a system and upload them to a [THOR Thunderstorm](https://www.nextron-systems.com/2020/10/01/theres-a-thunderstorm-coming/) server for analysis. This repository provides a compiled Go collector, standalone script collectors, and assessment guides with collection configurations. Available filters, dependencies, and capabilities vary by collector.
 
-Users can filter files based on their size, age, extension or type.
+## Choose a Collector
 
-This repository features:
+| Starting point | When to use it | Documentation |
+| --- | --- | --- |
+| **Go collector** | Recommended for most general-purpose systems with a compatible OS and CPU architecture. Runs as a compiled binary without an installed Go runtime. | [Go usage, configuration, and platform compatibility](go/README.md) |
+| **Script collectors** | Use an available scripting runtime when a compiled binary is impractical or you need to adapt the collection logic. | [Script selection and requirements](scripts/README.md#choosing-a-collector) |
 
-- **[Go Collector](go/)** - Compiled binary for 46+ platforms (Linux, Windows, macOS, BSD, etc.)
-- **[Collection Scripts](scripts/)** - Alternative scripts in Bash, PowerShell, Python, Perl, and Batch
+The eight standalone scripts are organized into [Bash](scripts/bash/README.md), [POSIX sh / ash](scripts/ash/README.md), [Python](scripts/python/README.md), [Perl](scripts/perl/README.md), [PowerShell](scripts/powershell/README.md), and [Batch](scripts/batch/README.md) directories. Python and PowerShell each include a separate legacy variant.
 
-For a comprehensive guide on each collector, refer to the linked subdirectories.
+For appliances and infrastructure platforms, start with the **[collector recommendations by product and platform](docs/COLLECTOR_RECOMMENDATIONS.md)**. The table covers Nutanix, VMware, Cisco, F5, Kubernetes, Amazon Linux, and Citrix NetScaler, including runtime prerequisites and available test evidence. For VMware ESXi, see the [Python quick start](scripts/README.md#vmware-esxi-use-the-python-collector); for older NetScaler systems, check the [dedicated FreeBSD 8.4 package guidance](go/README.md#citrix-netscaler-and-freebsd-84).
 
-## Appliance Collector Recommendations
+## Emerging Threats: Assessment Guides and Collection Profiles
 
-Choose the collector for your appliance before selecting a generic OS download. The [product and platform recommendation list](docs/COLLECTOR_RECOMMENDATIONS.md) covers Nutanix, VMware, Cisco, F5, Kubernetes, Amazon Linux and Citrix NetScaler, with preferred collectors, alternatives, prerequisites and links to available test evidence.
+Use the [Emerging Threats guides](emerging-threats/README.md) to choose the files and directories to collect for a particular assessment. Profiles configure existing collectors; analysis uses the signatures installed on the Thunderstorm server.
 
-| Appliance or target | Recommended collector | Requirements and testing status | Download or instructions |
-| --- | --- | --- | --- |
-| VMware ESXi | Python collector (`scripts/python/thunderstorm-collector.py`) | Revised collector: Python 3.4+ and standard library only; separate Python 2.7 file for legacy hosts. Earlier Python collectors have been used on ESXi, but this revision still needs target-system validation. | [ESXi quick start and compatibility notes](scripts/README.md#vmware-esxi-use-the-python-collector) |
-| Older Citrix NetScaler based on FreeBSD 8.4 (amd64) | Separate legacy Go collector built with Go 1.9.7 | A regular FreeBSD package is not interchangeable. Check release availability; appliance validation remains pending. | [NetScaler package selection and testing status](go/README.md#citrix-netscaler-and-freebsd-84) |
-| Other NetScaler versions | Select for the actual OS version and architecture | Verify compatibility for your appliance; neither Go 1.9.7 nor a generic FreeBSD package is suitable for every NetScaler. | [NetScaler compatibility guidance](go/README.md#citrix-netscaler-and-freebsd-84) |
+| Assessment | Guide and configuration |
+| --- | --- |
+| **Citrix NetScaler** | [Broad assessment guide](emerging-threats/citrix-netscaler/README.md), with a [Go configuration](emerging-threats/citrix-netscaler/config.yml) and presets for the existing Bash collector. |
 
-## Download Pre-Built Releases
+Each guide documents its scope, limits, execution requirements, and validation status. Profiles are repository files downloaded separately from release packages. Go uses the profile's YAML file; the Bash preset is applied to the script's configuration header.
 
-The easiest way to get started is to download a pre-built release from the [Releases](../../releases) page.
+## Download a Collector
 
-### Binary Packages
+Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases) for published versions. Select the asset matching your OS and architecture, and follow the documentation for that release.
 
-Each release includes platform-specific packages containing:
-- Pre-compiled binary for your platform
-- Default configuration file (`config.yml`)
+- **Go packages** contain the executable and a default `config.yml`. Windows packages use ZIP; other platforms use `.tar.gz`. The standalone `config-<version>.yml` asset is an additional copy of that configuration.
+- **Script assets** are individual, versioned files. Download the selected collector and check its runtime requirements. Each script runs independently; the repository's test harness is not required on the target.
 
-**Download the package for your platform:**
-- **Linux:** `thunderstorm-collector-<version>-amd64-linux.tar.gz` (or arm64, 386, etc.)
-- **Windows:** `thunderstorm-collector-<version>-amd64-windows.zip` (or arm64, 386, etc.)
-- **macOS:** `thunderstorm-collector-<version>-amd64-darwin.tar.gz` or `thunderstorm-collector-<version>-arm64-darwin.tar.gz`
-- **BSD:** FreeBSD, OpenBSD, NetBSD packages available
-- **Other:** AIX, Solaris, Plan9, and more
+**Release availability, 11 October 2026:** v1.0.1 is the latest published release; v1.0.2 has not been published. The revised script collectors, additional legacy script variants, and dedicated NetScaler package described on `master` are newer than v1.0.1. For those scripts, use the current [source and language guides](scripts/README.md); for the NetScaler binary, follow the [legacy build and artifact instructions](go/legacy/README.md). The [v1.0.1 Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/go/README.md) documents the published binary release.
 
-**Quick start:**
-```bash
-# Linux/macOS example
+## Quick Start
+
+This example uses the **Linux amd64 Go package from v1.0.1**. Download it from Releases and extract it:
+
+```sh
 tar -xzf thunderstorm-collector-1.0.1-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
-./amd64-linux-thunderstorm-collector --help
 ```
 
-### Script Assets
+Review `config.yml` for the file filters and limits. Replace `/absolute/path/to/files` with an existing directory you intend to collect. Preview the selected filenames before uploading:
 
-Releases provide separate, versioned script assets, for example `thunderstorm-collector-<version>.sh`; a release containing the Python 2 collector also provides `thunderstorm-collector-py2-<version>.py`. There is no combined scripts ZIP archive. A release contains the collectors and behavior from its tagged revision.
-
-As of 11 October 2026, v1.0.1 is the latest published release and v1.0.2 has not been published. The reorganized scripts and additional legacy variants described below are not in v1.0.1. Use the instructions matching your downloaded version; the [ESXi quick start](scripts/README.md#vmware-esxi-use-the-python-collector) explains the Python differences.
-
-Source code and per-collector documentation are organized in:
-- `scripts/bash/` (Bash)
-- `scripts/ash/` (POSIX sh / ash)
-- `scripts/python/` (Python 3 and Python 2)
-- `scripts/perl/` (Perl)
-- `scripts/powershell/` (PowerShell 3+ and PowerShell 2)
-- `scripts/batch/` (Windows Batch)
-
-See the [scripts README](scripts/README.md) for usage instructions.
-
-## Building from Source
-
-To build the Thunderstorm Collector from source:
-
-### Go Collector
-
-```bash
-cd go
-make        # Build for your current platform
-make all    # Build binaries for all platforms
-make release # Create distribution packages for all platforms
-make help   # Show all available build targets
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml \
+  --path /absolute/path/to/files --dry-run --debug
 ```
 
-### Creating Release Packages Locally
+After checking the selection, supply your server and a source name identifying the collecting system:
 
-From the repository root:
-
-```bash
-make release           # Build binary packages and individual script assets
-make release-binary    # Build binary packages and copy standalone config
-make release-scripts   # Copy individual script assets only
-make help              # Show all available targets
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml \
+  --path /absolute/path/to/files --dry-run=false \
+  --thunderstorm-server thunderstorm.example.internal \
+  --port 8080 --source host-example
 ```
 
-These local Makefile targets create regular assets; the dedicated NetScaler package uses the separate [legacy build procedure](go/legacy/README.md). The tagged-release workflow includes both.
+`--path` replaces the configuration's directory list; repeat it for multiple roots. For an assessment profile, follow its guide and pass its configuration with `-t`. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
 
-This creates:
-- **Binary packages:** `go/dist/*.tar.gz` and `go/dist/*.zip` (46+ platforms)
-- **Release assets:** versioned binary packages, individual collector scripts, and `config-<version>.yml` in `release/`
+For scripts, follow the selected [language guide](scripts/README.md) to configure and preview the collection using its header settings, command-line options, or environment variables. Scripts use their own settings rather than the Go YAML file. Uploads are asynchronous by default in the examples above; check received files and analysis results on the server after collection.
 
-## Which Collector Should You Choose?
+## Product Integration Guides
 
-**Go Collector** - Our recommendation for most general-purpose systems; use the appliance recommendations above for ESXi and NetScaler:
-- ✅ Pre-compiled binaries for 46+ platforms
-- ✅ Fast, efficient, single binary
-- ✅ No runtime dependencies
-- ✅ Includes configuration file
-- ✅ Comprehensive features (dry-run mode, statistics, rate limiting, etc.)
+[Product integration guides](integration-guides/Readme.md) describe deployment, networking, and recurring collection on particular systems. The existing [ESXi 7 without Secure Boot guide](integration-guides/esxi/esxi7-wo-secure-boot.md) covers a persistent Python deployment. Start with the current [ESXi collector requirements and quick start](scripts/README.md#vmware-esxi-use-the-python-collector) before scheduling collection.
 
-**Scripts** - Use when:
-- Running a compiled binary isn't feasible
-- Using unsupported platforms (proprietary OS, IoT devices)
-- Requiring low-effort customization of collection logic
+## Testing and Compatibility
 
-## Automated Releases
+- [Testing overview](docs/COLLECTOR_TESTING_OVERVIEW.md): automated checks, local HTTP/HTTPS test backends, runtime coverage, and commands for running focused tests.
+- [Script acceptance report, 8 October 2026](docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md): real-THOR results for the exact revisions and assets recorded there, plus remaining checks.
+- [NetScaler compatibility and FreeBSD VM evidence](go/README.md#citrix-netscaler-and-freebsd-84): the tested legacy binary, OS versions, and the FreeBSD 14.3 ASLR note.
 
-When a version tag is pushed (e.g., `v1.2.3`), GitHub Actions automatically:
-1. Tests and builds regular binaries for supported OS/architecture combinations
-2. Builds and verifies the separate Go 1.9.7 FreeBSD 8.4/amd64 NetScaler package
-3. Creates compressed binary packages and copies individual scripts and the standalone configuration into versioned assets
-4. Verifies the required legacy package and generates `SHA256SUMS`
-5. Publishes one GitHub release after the required build jobs succeed
+Automated checks and recorded VM/runtime tests have specific scopes. Confirm the collector and collection profile on the intended product and firmware; each guide identifies remaining target-system validation.
 
-## Craft Your Own Collector
+## Build or Extend a Collector
 
-Use the [collector construction guide](docs/COLLECTOR_CONSTRUCTION_GUIDE.md)
-to build a standalone collector in another language or for an unusual platform.
-It covers the HTTP upload contract, optional features, security/resource limits,
-tests and a reusable coding-agent assignment.
+From the repository root, use the [Go build instructions](go/README.md#build) and these targets:
 
-Interested in creating a unique collector? A Python module, `thunderstormAPI`, is available in [this](https://github.com/NextronSystems/thunderstormAPI) repository for your use.
+```sh
+make -C go           # Build the Go collector for the current platform
+make release-scripts # Package individual script assets
+make release         # Build regular Go packages and script assets
+make help            # List available targets
+```
+
+Regular binary archives are created in `go/dist/`; versioned release assets are assembled in `release/`. The dedicated NetScaler package has a separate [legacy build procedure](go/legacy/README.md). The [tagged-release workflow](.github/workflows/release.yml) builds both regular and legacy packages, verifies the required assets, and publishes them with checksums after its required jobs succeed.
+
+To add a language or platform, follow the [collector construction guide](docs/COLLECTOR_CONSTRUCTION_GUIDE.md). It covers the upload protocol, optional features, resource limits, acceptance tests, and a reusable coding-agent assignment. The separate [thunderstormAPI Python library](https://github.com/NextronSystems/thunderstormAPI) is another resource for custom integrations.
