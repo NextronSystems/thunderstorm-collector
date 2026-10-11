@@ -70,7 +70,7 @@ python3 ./thunderstorm-collector.py \
 
 For a later versioned release file, substitute its actual filename. For the legacy collector, copy `scripts/python/thunderstorm-collector-py2.py` instead and substitute the available Python 2.7 interpreter and that filename; the selection and upload options are the same.
 
-Always pass an explicit directory: omitting `--dirs` selects `/`. The revised collector defaults to port 8080, a maximum age of 14 days and a maximum size of **2048 KiB (2 MiB)**, including the exact limit. `--max-age 0` disables age filtering. Symlink entries, special files and configured system/cloud/VM path patterns are skipped; see the Python guide for the full selection rules.
+Always pass an explicit directory: omitting `--dirs` selects `/`. The revised collector defaults to port 8080, a maximum age of 30 days and a maximum size of **2048 KiB (2 MiB)**, including the exact limit. `--max-age 0` disables age filtering. Symlink entries, special files and configured system/cloud/VM path patterns are skipped; see the Python guide for the full selection rules.
 
 For HTTPS, add `--tls` and the appropriate port. Use `--ca-cert /path/to/ca.pem` for a private CA while retaining certificate and hostname verification. Old SSL libraries can still limit interoperability even when the Python version meets the minimum.
 
