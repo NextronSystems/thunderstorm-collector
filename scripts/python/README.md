@@ -1,207 +1,224 @@
 # Python Collectors
 
-The Python collectors are cross-platform script collectors for systems where Python is available. Prefer the Python 3 collector. Use the Python 2 collector only for legacy systems that do not provide Python 3.
+Prefer `thunderstorm-collector.py` (Python 3.4+). Use the standalone
+`thunderstorm-collector-py2.py` only on legacy hosts with Python 2.7.
+Both need only the standard library. Python 2 is end-of-life.
 
-## Intended Use
+## Configuration and Startup Output
 
-Use `thunderstorm-collector.py` on systems with Python 3. Use `thunderstorm-collector-py2.py` on legacy Unix/Linux systems where Python 2 is the only available Python runtime.
+Both standalone files have the same commented `USER CONFIGURATION` block near
+the top. Set `THUNDERSTORM_SERVER` (hostname/IP, without scheme/port/path) and review
+`SCAN_DIRS`, for example `["/var/www", "/home/alice"]`. The default is the entire
+filesystem root, subject to exclusions below. Missing server configuration exits
+2 with an instruction; supplying `--server HOST` also satisfies the requirement.
+CLI values override header values. Any `--dir` replaces the whole header root
+list; repeated `--dir` options accumulate. `--no-tls`, `--verify-tls`, `--async`,
+`--no-dry-run` and `--no-debug` disable corresponding enabled header flags.
 
-## Requirements
+Defaults are **30 days since modification** and **2048 KiB (2 MiB)**. Older/larger
+files are intentionally excluded. The console log on stderr shows resolved roots
+and effective limits before collection, also with `--dry-run`. For a persistent
+log while keeping output visible, append `2>&1 | tee /path/outside-input/collector.log`
+to your chosen command. That pipeline's status may be tee's status;
+capture the collector's exit code separately when testing. No log file is created
+by the collector itself. Always review a dry-run before collecting real data.
 
-| Collector | Runtime | Dependencies |
-|---|---|---|
-| `thunderstorm-collector.py` | Python 3 | Python standard library |
-| `thunderstorm-collector-py2.py` | Python 2.7 | Python standard library |
+## Capability Profile
 
-## Capabilities
+- Recursive regular files; symlink entries/special files are skipped. Explicit
+  roots resolve physically. All extensions except built-in exclusions: `/mnt`
+  trees, `.dat`, `.npm`, and VM artifacts ending in `.vmdk`, `.vswp`, `.nvram`,
+  `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts are best-effort
+  exclusions, not a security boundary. Explicit excluded roots remain excluded.
+- Age defaults to 30 days; `--max-age 0..36500`, zero disables filtering.
+  Positive values compare mtime to run start minus N times 86400 seconds.
+- Size defaults to 2048 KiB; `--max-size-kb 1..204800`, exact limit included.
+  Binary/empty/Unicode/newline files work. Unsafe multipart filename characters
+  are sanitized, not payload bytes. Metadata may not survive the backend verbatim.
+- Bounded in-memory snapshots before network access; allow selected size plus
+  overhead in RAM. Changed/replaced/unreadable files fail. Files that grow past
+  selectors before reading are skipped. No atomic filesystem snapshot or defense
+  against privileged races.
+- Async `/api/checkAsync`; `--sync` selects `/api/check`. Complete 2xx means
+  accepted, not completed analysis. No polling, resume or deduplication.
+- Optional markers: 404/501 is nonfatal, without scan ID. Begin retries once
+  after two seconds then exits 2; end failure exits 1. SIGINT/SIGTERM exits 1
+  with a best-effort interrupted marker for a live started collection.
+- `--retries 1..10` counts total attempts, including first. 503 Retry-After
+  integer seconds clamp to 0..120; other exponential delays cap at 60 seconds.
+  Lost responses/retries can duplicate samples.
+- Socket idle-I/O timeouts: uploads 30 seconds, markers 10. **Not whole-attempt
+  or run deadlines**. Responses over 1 MiB or incomplete responses fail.
+- TLS verifies CA/hostname; custom CA via `--tls --ca-cert FILE`, explicit bypass
+  via `--tls --insecure`. Python before 2.7.9 refuses verified HTTPS rather than
+  silently disabling verification. Old SSL protocol support can still limit it.
+- Dry-run never contacts the service. It enumerates/selects but does not prove
+  payload readability or TLS connectivity. Repeated `-d` options accumulate.
+- Port 1..65535; IPv4/DNS and runtime-supported IPv6. Progress is count-based;
+  `--debug` is accepted for compatibility, with path errors already always shown.
 
-- No external `curl` or `wget` dependency.
-- Recursive directory scanning.
-- File age and file size filtering.
-- HTTP and HTTPS upload support.
-- Configurable source identifier.
-- Dry-run mode.
-- Collection markers.
+| Exit | Meaning |
+|---|---|
+| 0 | All eligible files accepted, or successful dry-run; intentional skips allowed |
+| 1 | Failed files, traversal/partial-root errors, interruption or failed end marker |
+| 2 | Invalid config/TLS setup, no valid roots or failed begin |
 
-## Limitations
+Unreadable directories count as `Scan errors`; unreadable selected files as
+`Failed`. Empty existing roots may succeed; missing roots cannot. Actual legacy
+SSL and Windows paths require target-system verification, not modern CI inference.
 
-- Python 2 is end-of-life and should only be used for legacy hosts.
-- TLS behavior on older Python 2 runtimes can be limited by the runtime SSL module.
-- Runtime-specific path and Unicode behavior can differ on old systems.
+## Manual Acceptance
 
-## Basic Usage
+Record PR #46, exact commit, OS/architecture, interpreter/SSL/service versions,
+outputs and exit codes. Repeat applicable cases on both interpreters. Mark each
+PASS/FAIL/NOT SUPPORTED/NOT TESTED. Never scan default system roots or production
+data for acceptance. Keep licenses outside fixtures and Git.
 
-Python 3:
+### 1. Isolated Setup
 
-```bash
-python3 scripts/python/thunderstorm-collector.py \
-  -s thunderstorm.local \
-  -p 8080 \
-  -d /tmp \
-  --max-age 14
+From this folder, substitute service values. Use a shell without `set -e` for
+expected failures. On Windows use equivalent isolated files and Python arguments.
+
+```sh
+PYTHON=python3
+COLLECTOR="$(pwd)/thunderstorm-collector.py"
+# Legacy: PYTHON=python2; COLLECTOR="$(pwd)/thunderstorm-collector-py2.py"
+SERVER=thunderstorm.example.internal
+PORT=8080
+SOURCE=manual-python-yourname
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ts-python.XXXXXX")
+mkdir -p "$ROOT/input/sub"
+printf 'text\n' > "$ROOT/input/plain.txt"
+printf '\000\001\377THUNDER\n' > "$ROOT/input/binary.bin"
+: > "$ROOT/input/empty.bin"
+printf 'nested\n' > "$ROOT/input/sub/nested.txt"
+printf 'spaces\n' > "$ROOT/input/file with spaces.txt"
+printf 'semicolon\n' > "$ROOT/input/semi;colon.txt"
+printf 'quote\n' > "$ROOT/input/double\"quote.txt"
+collect() {
+  "$PYTHON" "$COLLECTOR" -s "$SERVER" -p "$PORT" --source "$SOURCE" \
+    --max-age 0 --retries 1 --no-progress "$@"
+  code=$?; printf 'exit_code=%s\n' "$code"; return "$code"
+}
 ```
 
-Python 2:
+### 2. Positive and Sync
 
-```bash
-python scripts/python/thunderstorm-collector-py2.py \
-  -s thunderstorm.local \
-  -p 8080 \
-  -d /tmp \
-  --max-age 14
+```sh
+collect -d "$ROOT/input"
+SOURCE=manual-python-sync-yourname
+collect -d "$ROOT/input" --sync
 ```
 
-## Manual Acceptance Test
+Each: exit 0, seven accepted files including empty. Verify stored SHA-256/size
+of every payload, wait for async completion, check source if exposed (otherwise
+NOT OBSERVABLE). Optional marker 404/501 is acceptable. Empty-file rejection is
+a real backend failure, not a successful skip. Change SOURCE for subsequent runs.
 
-Python 3:
+### 3. No-network Dry-run and Unreachable Service
 
-```bash
-rm -rf /tmp/ts-python-acceptance
-mkdir -p /tmp/ts-python-acceptance/subdir
-printf 'python acceptance text\n' > /tmp/ts-python-acceptance/sample.txt
-printf '\x00\x01\x02THUNDER\n' > /tmp/ts-python-acceptance/sample.bin
-printf 'nested\n' > /tmp/ts-python-acceptance/subdir/nested.txt
-
-python3 scripts/python/thunderstorm-collector.py \
-  -s thunderstorm.local \
-  -p 8080 \
-  -d /tmp/ts-python-acceptance \
-  --source manual-python3-acceptance \
-  --max-age 30
+```sh
+collect -d "$ROOT/input" --dry-run -s 127.0.0.1 -p 1
+collect -d "$ROOT/input" -s 127.0.0.1 -p 1
 ```
 
-Python 2, if applicable:
+Dry-run: exit 0, seven would-submit lines, `Submitted: 0 Would submit: 7` in the
+summary, zero requests. Live: exit 2 at begin,
+zero uploads and connection errors. Port 1 must actually be closed. Use an
+external watchdog for slow networks; idle timeouts are not run deadlines.
 
-```bash
-python scripts/python/thunderstorm-collector-py2.py \
-  -s thunderstorm.local \
-  -p 8080 \
-  -d /tmp/ts-python-acceptance \
-  --source manual-python2-acceptance \
-  --max-age 30
+### 4. Missing Roots and Repeated Options
+
+```sh
+collect -d "$ROOT/input" -d "$ROOT/missing"
+collect -d "$ROOT/missing"
 ```
 
-Acceptance criteria:
+Mixed: exit 1, seven uploads, one scan error. All missing: exit 2/no requests.
+The second `-d` must not discard the first.
 
-- The command exits successfully.
-- Thunderstorm records uploads for the test files.
-- The source field matches the selected manual test source.
-- Text, binary, and nested files are uploaded.
+### 5. Permissions (Non-root/Non-administrator)
 
-## Manual Robustness Tests
-
-Run the same tests with Python 3 and, when validating legacy support, repeat them with Python 2 by replacing the interpreter and script path.
-
-### Dry-run does not contact the server
-
-```bash
-python3 scripts/python/thunderstorm-collector.py \
-  -s 127.0.0.1 \
-  -p 1 \
-  -d /tmp/ts-python-acceptance \
-  --source manual-python3-dry-run \
-  --dry-run
+```sh
+mkdir -p "$ROOT/permissions/blocked-dir"
+printf readable > "$ROOT/permissions/ok.txt"
+printf blocked > "$ROOT/permissions/blocked.txt"
+chmod 000 "$ROOT/permissions/blocked.txt" "$ROOT/permissions/blocked-dir"
+collect -d "$ROOT/permissions"
+chmod 600 "$ROOT/permissions/blocked.txt"
+chmod 700 "$ROOT/permissions/blocked-dir"
 ```
 
-Expected result:
+Exit 1, only ok.txt accepted, one failed file and one scan error. Always restore
+permissions. Root results do not validate this test.
 
-- The command exits successfully.
-- No upload is visible in Thunderstorm.
-- The output reports what would be submitted.
+### 6. Exact Size and Age
 
-### Thunderstorm service unreachable
-
-```bash
-python3 scripts/python/thunderstorm-collector.py \
-  -s 127.0.0.1 \
-  -p 1 \
-  -d /tmp/ts-python-acceptance \
-  --source manual-python3-unreachable \
-  --max-age 30
+```sh
+mkdir "$ROOT/size" "$ROOT/age"
+dd if=/dev/zero of="$ROOT/size/limit.bin" bs=1024 count=1 2>/dev/null
+cp "$ROOT/size/limit.bin" "$ROOT/size/over.bin"
+printf x >> "$ROOT/size/over.bin"
+collect -d "$ROOT/size" --max-size-kb 1
+printf recent > "$ROOT/age/recent.txt"
+printf old > "$ROOT/age/old.txt"
+touch -t 202001010000 "$ROOT/age/old.txt"
+collect -d "$ROOT/age" --max-age 1
+collect -d "$ROOT/age" --max-age 0
 ```
 
-Expected result:
+Exit 0 each. Size: only 1024, not 1025 bytes. Age 1: recent only; age 0: both.
 
-- The command exits non-zero or reports failed submissions.
-- The collector prints a clear connection failure.
-- The command does not hang indefinitely.
+### 7. Links and Special Names
 
-### Missing and unreadable paths
-
-This test is meaningful only when not running as `root`.
-
-```bash
-rm -rf /tmp/ts-python-errors
-mkdir -p /tmp/ts-python-errors/readable /tmp/ts-python-errors/unreadable
-printf 'readable\n' > /tmp/ts-python-errors/readable/ok.txt
-printf 'secret\n' > /tmp/ts-python-errors/unreadable/blocked.txt
-chmod 000 /tmp/ts-python-errors/unreadable/blocked.txt
-
-python3 scripts/python/thunderstorm-collector.py \
-  -s thunderstorm.local \
-  -p 8080 \
-  -d /tmp/ts-python-errors/readable \
-  -d /tmp/ts-python-errors/unreadable \
-  -d /tmp/ts-python-errors/missing \
-  --source manual-python3-error-paths \
-  --max-age 30
-
-chmod 644 /tmp/ts-python-errors/unreadable/blocked.txt
+```sh
+printf outside > "$ROOT/outside.txt"
+ln -s "$ROOT/outside.txt" "$ROOT/input/link.txt"
+ln -s "$ROOT/input" "$ROOT/input/loop"
+collect -d "$ROOT/input"
 ```
 
-Expected result:
+Still seven uploads, exit 0; no outside data/loop. In fresh fixtures add Unicode
+and literal-newline names and verify all payload hashes and sanitized headers.
 
-- The collector does not crash on missing or unreadable paths.
-- The readable file is still submitted.
-- Warnings or failed-file statistics are acceptable.
+### 8. TLS
 
-### File size filter
+Use a test HTTPS service, its actual CA paths and the correct PORT:
 
-```bash
-rm -rf /tmp/ts-python-filter
-mkdir -p /tmp/ts-python-filter
-printf 'small\n' > /tmp/ts-python-filter/small.txt
-dd if=/dev/zero of=/tmp/ts-python-filter/large.bin bs=1024 count=32 2>/dev/null
-
-python3 scripts/python/thunderstorm-collector.py \
-  -s thunderstorm.local \
-  -p 8080 \
-  -d /tmp/ts-python-filter \
-  --source manual-python3-size-filter \
-  --max-age 30 \
-  --max-size-kb 1
+```sh
+collect -d "$ROOT/input" --tls
+collect -d "$ROOT/input" --tls --ca-cert /path/to/unrelated-valid-ca.pem
+collect -d "$ROOT/input" --tls --ca-cert /path/to/correct-ca.pem
+collect -d "$ROOT/input" --tls --insecure
 ```
 
-Expected result:
+For private untrusted certificates: first two exit 2/no uploads; correct CA and
+explicit insecure exit 0/seven uploads. Public trust can legitimately pass the
+first case. Python <2.7.9 must refuse verified HTTPS. Do not install test CAs
+globally; remove private keys afterwards.
 
-- `small.txt` is submitted.
-- `large.bin` is skipped by the size filter.
+### 9. Interruption and Injected Failures
 
-### Python 2 repeat
+Interrupt a slow run: exit 1, no normal end marker, best-effort interrupted
+marker if supported. Do not disrupt a shared real service for failure injection.
+The isolated regression suite covers 503 bounds, end HTTP 500, incomplete 2xx,
+malformed marker JSON and SIGTERM on the actual interpreters:
 
-When validating the Python 2 collector, repeat the above commands with:
-
-```bash
-python scripts/python/thunderstorm-collector-py2.py
+```sh
+python3 -B ../tests/test_python_robustness.py
+python2 -B ../tests/test_python_robustness.py
 ```
 
-Expected result:
+Both must execute without unexpected skips. Modern CI cannot establish every
+old OS/SSL build's compatibility. Keep remaining target-system checks explicit.
 
-- Behavior is equivalent where the Python 2 runtime and SSL stack support the requested operation.
-- TLS issues on very old Python 2 runtimes should be documented as runtime limitations, not silently ignored.
+## Shared Stub E2E
 
-## Automated Stub Test
+From repository root with a stub binary compiled for the host:
 
-Python 3:
-
-```bash
+```sh
 THUNDERSTORM_TEST_COLLECTORS=python3 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
-```
-
-Python 2:
-
-```bash
+  THUNDERSTORM_TEST_REQUIRE_ALL=1 scripts/tests/run_e2e_compliance.sh /path/to/stub
 THUNDERSTORM_TEST_COLLECTORS=python2 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
+  THUNDERSTORM_TEST_REQUIRE_ALL=1 scripts/tests/run_e2e_compliance.sh /path/to/stub
 ```
