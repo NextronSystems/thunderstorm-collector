@@ -37,16 +37,20 @@ Use the [Emerging Threats guides](emerging-threats/README.md) to choose the file
 | --- | --- |
 | **Citrix NetScaler** | [Broad assessment guide](emerging-threats/citrix-netscaler/README.md), with a [Go configuration](emerging-threats/citrix-netscaler/config.yml) and presets for the existing Bash collector. |
 
-Each guide documents its scope, limits, execution requirements, and validation status. Profiles are repository files downloaded separately from release packages. Go uses the profile's YAML file; the Bash preset is applied to the script's configuration header.
+These profiles are optional and downloaded separately from release packages. Each guide documents its scope, limits, execution requirements, and validation status. For Go, download the profile YAML using GitHub's **Download raw file** control and load it with `-t`; for Bash, apply the guide's preset to a deployment copy of the script.
 
 ## Download a Collector
 
-Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases) for published versions. Select the asset matching your OS and architecture, and follow the documentation for that release.
+Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases) for published versions. Under **Assets**, select the package matching your OS and architecture: `amd64` means x86-64, and `arm64` means AArch64. Follow the documentation for that release.
 
 - **Go packages** contain the executable and a default `config.yml`. Windows packages use ZIP; other platforms use `.tar.gz`. The standalone `config-<version>.yml` asset is an additional copy of that configuration.
 - **Script assets** are individual, versioned files. Download the selected collector and check its runtime requirements. Each script runs independently; the repository's test harness is not required on the target.
 
-**Release availability, 11 October 2026:** v1.0.1 is the latest published release; v1.0.2 has not been published. The revised script collectors, additional legacy script variants, and dedicated NetScaler package described on `master` are newer than v1.0.1. For those scripts, use the current [source and language guides](scripts/README.md); for the NetScaler binary, follow the [legacy build and artifact instructions](go/legacy/README.md). The [v1.0.1 Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/go/README.md) documents the published binary release.
+**Release availability, 12 October 2026:** v1.0.1 is the latest published release; v1.0.2 has not been published. The revised script collectors, additional legacy script variants, and dedicated NetScaler package described on `master` are newer than v1.0.1.
+
+- **Current scripts:** open the collector file linked in the [script selection table](scripts/README.md#choosing-a-collector) and use GitHub's **Download raw file** control, preserving the filename and extension. A single script is sufficient; no repository clone or build is needed. Follow its language guide for runtime requirements and settings.
+- **Current NetScaler binary:** follow the [CI artifact download steps](go/legacy/README.md#download-and-select) to get a prebuilt package. Local compilation is optional.
+- **Published v1.0.1 Go binaries:** use the [matching Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/go/README.md).
 
 ## Quick Start
 
@@ -57,23 +61,22 @@ tar -xzf thunderstorm-collector-1.0.1-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
 ```
 
-Review `config.yml` for the file filters and limits. Replace `/absolute/path/to/files` with an existing directory you intend to collect. Preview the selected filenames before uploading:
+The bundled `config.yml` is ready to use; changing its file filters and limits is optional. With the default configuration, the Go collector starts at `/` on Linux/Unix or `C:\` on Windows. File filters, limits, filesystem exclusions, and the current account's read permissions still apply. This local preview needs no server connection:
+
+```sh
+./amd64-linux-thunderstorm-collector -t ./config.yml --dry-run --debug
+```
+
+To upload the selected files, replace `thunderstorm.example.internal` with the hostname or IP address of a running, reachable Thunderstorm service. Supply the hostname/IP only; configure HTTPS and the port using the options below:
 
 ```sh
 ./amd64-linux-thunderstorm-collector -t ./config.yml \
-  --path /absolute/path/to/files --dry-run --debug
+  --thunderstorm-server thunderstorm.example.internal --dry-run=false
 ```
 
-After checking the selection, supply your server and a source name identifying the collecting system:
+To collect only a specific directory, optionally add `--path /var/www` (or another existing directory) to either command. `--path` replaces the default or configured directory list; repeat it for multiple roots. The source name defaults to the detected hostname; use `--source custom-name` only to override it.
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml \
-  --path /absolute/path/to/files --dry-run=false \
-  --thunderstorm-server thunderstorm.example.internal \
-  --port 8080 --source host-example
-```
-
-`--path` replaces the configuration's directory list; repeat it for multiple roots. For an assessment profile, follow its guide and pass its configuration with `-t`. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
+For an assessment profile, follow its guide and pass its configuration with `-t`. The default server port is 8080; change it with `--port` if needed. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
 
 For scripts, follow the selected [language guide](scripts/README.md) to configure and preview the collection using its header settings, command-line options, or environment variables. Scripts use their own settings rather than the Go YAML file. Uploads are asynchronous by default in the examples above; check received files and analysis results on the server after collection.
 
@@ -91,15 +94,15 @@ Automated checks and recorded VM/runtime tests have specific scopes. Confirm the
 
 ## Build or Extend a Collector
 
-From the repository root, use the [Go build instructions](go/README.md#build) and these targets:
+Downloaded binaries and standalone scripts can be run directly; building is optional. For source builds, follow the [Go build requirements](go/README.md#build-requirements). From the repository root, choose the target you need; these commands are independent:
 
 ```sh
 make -C go           # Build the Go collector for the current platform
 make release-scripts # Package individual script assets
-make release         # Build regular Go packages and script assets
+make release         # Package all regular targets supported by the installed Go compiler, plus scripts
 make help            # List available targets
 ```
 
-Regular binary archives are created in `go/dist/`; versioned release assets are assembled in `release/`. The dedicated NetScaler package has a separate [legacy build procedure](go/legacy/README.md). The [tagged-release workflow](.github/workflows/release.yml) builds both regular and legacy packages, verifies the required assets, and publishes them with checksums after its required jobs succeed.
+A current-platform build writes its executable to `go/bin/`. To use the packaged filters, pass `-t go/config.yml` when running it from the repository root. Regular binary archives are created in `go/dist/`; versioned release assets are assembled locally in `release/`. `make release` prepares files locally; publishing is handled by the tagged workflow below. The dedicated NetScaler package has a separate [legacy build procedure](go/legacy/README.md). The [tagged-release workflow](.github/workflows/release.yml) builds both regular and legacy packages, verifies the required assets, and publishes them with checksums after its required jobs succeed.
 
 To add a language or platform, follow the [collector construction guide](docs/COLLECTOR_CONSTRUCTION_GUIDE.md). It covers the upload protocol, optional features, resource limits, acceptance tests, and a reusable coding-agent assignment. The separate [thunderstormAPI Python library](https://github.com/NextronSystems/thunderstormAPI) is another resource for custom integrations.

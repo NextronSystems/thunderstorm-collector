@@ -206,13 +206,13 @@ Transport errors and HTTP 503 share a budget of **three retries after the initia
 
 ### Build requirements
 
-Use Go and `make`. Regular builds retain Go 1.10 compatibility where that compiler supports the target; newer targets require a newer compiler. The separate [NetScaler procedure](legacy/README.md) prepares its Go 1.9.7 build.
+Use Go, `make`, and a Unix-like shell with standard command-line utilities. Creating release archives also requires `tar`, `gzip`, and `zip`. Running downloaded collectors requires no Go compiler or `make`; scripts still need the runtimes and tools listed in their guides. Regular builds retain Go 1.10 compatibility where that compiler supports the target; newer targets require a newer compiler. The separate [NetScaler procedure](legacy/README.md) prepares its Go 1.9.7 build.
 
 Dependencies are declared in `go.mod` and `go.sum`. For a Go 1.10 build, first run `go mod vendor` from this directory with a modern Go toolchain, then select Go 1.10 for the build. The generated `vendor/` directory is not committed. The [CI setup action](../.github/actions/setup-go/action.yml) follows that preparation sequence; the Makefile provides the GOPATH symlink needed by the legacy compiler.
 
 ### Build Steps
 
-From this `go/` directory:
+From this `go/` directory, choose the target you need. These commands are alternatives, not a sequence:
 
 ```sh
 make              # Build for the current OS/architecture
