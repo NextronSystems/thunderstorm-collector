@@ -1,4 +1,4 @@
-#requires -Version 3.0
+#requires -Version 2.0
 # THOR Thunderstorm Collector - Florian Roth / Nextron Systems
 # USER CONFIGURATION -----------------------------------------------------------
 # Edit the parameter defaults below or pass named parameters (higher priority).
@@ -51,7 +51,7 @@ $DefaultExtensions = @(".asp",".vbs",".ps",".ps1",".rar",".tmp",".bas",".bat",".
 # collector to retain a log on legacy PowerShell too; store it OUTSIDE scan roots.
 
 # INTERNAL IMPLEMENTATION - no user settings below this line -------------------
-$collectorId = "powershell3/0.3"
+$collectorId = "powershell2/0.3"
 $ErrorActionPreference = "Stop"
 $exitCode = 0
 $started = $false
