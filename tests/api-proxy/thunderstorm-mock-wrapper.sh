@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # thunderstorm-mock-wrapper.sh - Wraps thunderstorm-mock with an API proxy
 #
 # Drop-in replacement for the thunderstorm-mock executable. Accepts the same

@@ -6,29 +6,51 @@ help:
 	@echo "============================================="
 	@echo ""
 	@echo "Available targets:"
-	@echo "  make release - Build distribution packages (binary + config) and arrange scripts"
-	@echo "  make clean   - Remove all release artifacts"
-	@echo "  make test    - Run tests"
-	@echo "  make help    - Show this help menu"
+	@echo "  make release         - Build binary packages and individual script assets"
+	@echo "  make release-binary  - Build binary packages"
+	@echo "  make release-scripts - Copy individual script assets"
+	@echo "  make clean           - Remove all release artifacts"
+	@echo "  make test            - Run tests"
+	@echo "  make help            - Show this help menu"
 	@echo ""
 	@echo "Note: Use go/Makefile directly for more specific build options."
 
 # Define version if not provided by the environment
 VERSION ?= $(shell git describe --tags --always --dirty)
 VERSION := ${VERSION:refs/tags/%=%}
+RELEASE_VERSION := $(patsubst v%,%,$(VERSION:refs/tags/%=%))
 
 .PHONY: release
-release:
+release: release-binary release-scripts
+	@echo "Release artifacts placed in release/"
+
+.PHONY: release-binary
+release-binary:
 	@mkdir -p release
 	@echo "Building release ${VERSION}"
 	@$(MAKE) --no-print-directory -C go release
 	@for f in go/dist/thunderstorm-collector*; do \
 		suffix=$${f##*thunderstorm-collector-}; \
-		cp "$$f" "release/thunderstorm-collector-${VERSION:v%=%}-$${suffix}"; done
-	@for f in scripts/thunderstorm-collector.* go/config.yml; do \
-		ext=$${f##*.}; if [ "$$ext" = "$$f" ]; then ext=''; else ext=".$$ext"; fi ; \
-		cp "$$f" "release/$$(basename $${f%$$ext})-${VERSION:v%=%}$${ext}"; done
-	@echo "Release artifacts placed in release/"
+		cp "$$f" "release/thunderstorm-collector-${RELEASE_VERSION}-$${suffix}" || exit 1; done
+	@cp go/config.yml "release/config-${RELEASE_VERSION}.yml"
+
+.PHONY: release-scripts
+release-scripts:
+	@mkdir -p release
+	@echo "Building script release ${RELEASE_VERSION}"
+	@find scripts \
+		-path 'scripts/tests' -prune -o \
+		-path '*/__pycache__' -prune -o \
+		-type f \( -name 'thunderstorm-collector*.sh' -o \
+			-name 'thunderstorm-collector*.py' -o -name 'thunderstorm-collector*.pl' -o \
+			-name 'thunderstorm-collector*.ps1' -o -name 'thunderstorm-collector*.bat' \) -print | \
+	while IFS= read -r f; do \
+		base=$$(basename "$$f"); \
+		ext=$${base##*.}; \
+		stem=$${base%.$$ext}; \
+		target="release/$${stem}-${RELEASE_VERSION}.$$ext"; \
+		cp "$$f" "$$target" || exit 1; \
+	done
 
 .PHONY: clean
 clean: ## Remove all release artifacts

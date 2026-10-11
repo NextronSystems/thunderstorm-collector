@@ -4,6 +4,7 @@ settings.json
 
 # Logs
 *.log
+*.lic
 
 # Build artifacts
 go/bin/

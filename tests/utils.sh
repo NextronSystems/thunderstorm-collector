@@ -1,8 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # utils.sh - Shared utilities for Thunderstorm collector tests
 #
 # Sourced by test-collectors.sh and test-single.sh. Variables defined here are
 # used by collector scripts in test-collectors.d/.
+
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+    echo "ERROR: Collector tests require Bash 4.3 or newer (nameref support)." >&2
+    exit 1
+fi
 
 # ==============================================================================
 # Paths & Configuration

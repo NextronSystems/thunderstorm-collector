@@ -11,4 +11,8 @@ collector_check_requirements() {
         echo "ERROR: cmd.exe not found"
         return 1
     fi
+    if ! command -v curl.exe >/dev/null 2>&1 || ! command -v cscript.exe >/dev/null 2>&1; then
+        echo "ERROR: Batch collector requires native curl.exe and Windows Script Host"
+        return 1
+    fi
 }

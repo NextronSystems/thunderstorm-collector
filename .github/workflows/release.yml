@@ -53,6 +53,9 @@ jobs:
         env:
           VERSION: ${{ github.ref }}
         run: |
+          # Rebuild supported targets with this compiler. Keep release/ intact
+          # so packages for targets supported only by stable Go are preserved.
+          make -C go clean
           make release
       - name: Download required legacy package
         uses: actions/download-artifact@v8
