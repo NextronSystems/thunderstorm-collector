@@ -1,0 +1,39 @@
+# Citrix NetScaler broad assessment profile, reviewed 2026-10-11.
+# Use with the Go collector: -t /absolute/path/to/this/config.yml
+# Read README.md for platform compatibility, scope, and collection limitations.
+
+# Recursive roots, not glob patterns. /var intentionally includes top-level files
+# and all subdirectories, including web content, staging areas, logs, and cores.
+# The collector does not follow symlinks. /flash/nsconfig covers a common physical
+# configuration location when /nsconfig is a symlink.
+path:
+  - /netscaler
+  - /netscaler.local
+  - /var
+  - /nsconfig
+  - /flash/nsconfig
+  - /tmp
+  - /etc
+
+# All regular file types: include hidden and extensionless files, renamed scripts,
+# numeric suffixes, state files, packages, and certificates regardless of header.
+extension: []
+magic: []
+exclude: []
+
+# Empty string means no age cutoff in the Go collector. "0" does NOT disable it.
+max-age: ""
+# MiB per file; larger files are skipped, not truncated. Review skipped files.
+max-filesize: 64
+threads: 1
+uploads-per-minute: 120
+
+# Preview first. Explicitly use --dry-run=false and set a server for live upload.
+dry-run: true
+debug: true
+thunderstorm-server: ""
+port: 8080
+ssl: false
+insecure: false
+upload-synchronous: false
+all-filesystems: false
