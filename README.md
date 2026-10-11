@@ -19,7 +19,15 @@ This repository provides a compiled Go collector, standalone script collectors, 
 
 The eight standalone scripts are organized into [Bash](scripts/bash/README.md), [POSIX sh / ash](scripts/ash/README.md), [Python](scripts/python/README.md), [Perl](scripts/perl/README.md), [PowerShell](scripts/powershell/README.md), and [Batch](scripts/batch/README.md) directories. Python and PowerShell each include a separate legacy variant.
 
-For appliances and infrastructure platforms, start with the **[collector recommendations by product and platform](docs/COLLECTOR_RECOMMENDATIONS.md)**. The table covers Nutanix, VMware, Cisco, F5, Kubernetes, Amazon Linux, and Citrix NetScaler, including runtime prerequisites and available test evidence. For VMware ESXi, see the [Python quick start](scripts/README.md#vmware-esxi-use-the-python-collector); for older NetScaler systems, check the [dedicated FreeBSD 8.4 package guidance](go/README.md#citrix-netscaler-and-freebsd-84).
+For platform-specific selection, start with the **[collector recommendations](docs/COLLECTOR_RECOMMENDATIONS.md)**. They are ordered approximately by deployment prevalence, with related products grouped together:
+
+- **Common systems and infrastructure:** Windows, Linux (including legacy kernels), macOS, VMware, Amazon Linux, and Kubernetes.
+- **Edge appliances and NAS:** Cisco, Fortinet, Palo Alto Networks, Citrix NetScaler, F5, Check Point, Sophos, Ivanti, SonicWall, Synology, QNAP, pfSense/OPNsense, and OpenWrt.
+- **Specialist platforms:** Nutanix, FreeBSD, OpenBSD, NetBSD, Solaris/illumos, and IBM AIX. The [binary inventory](docs/COLLECTOR_RECOMMENDATIONS.md#published-go-binary-targets) covers their available CPU targets, including ARM, MIPS, PowerPC, s390x, RISC-V, and LoongArch on applicable systems.
+
+Prefer direct THOR scanning where the target is supported and local scanning is permitted. **THOR 11 is planned to add Windows ARM64 and Linux ARM64 support**, reducing the need for collectors on those supported systems. Collectors remain useful for legacy systems, appliances, other architectures, and central file-analysis workflows. See the [announcement and selection guidance](docs/COLLECTOR_RECOMMENDATIONS.md#direct-thor-scanning-and-arm64).
+
+For VMware ESXi, use the [Python quick start](scripts/README.md#vmware-esxi-use-the-python-collector); for older NetScaler systems, check the [dedicated FreeBSD 8.4 package guidance](go/README.md#citrix-netscaler-and-freebsd-84).
 
 ## Emerging Threats: Assessment Guides and Collection Profiles
 
