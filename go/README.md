@@ -103,6 +103,67 @@ You can find precompiled binaries for numerous platforms in the [releases](https
 
 **Note:** In general, Go 1.10 is used to build the binaries to ensure the broadest possible compatibility with older operating system versions. Additionally, this is complemented by builds with the latest stable Go version for targets that are not supported by Go 1.10.
 
+### Citrix NetScaler and FreeBSD 8.4
+
+For older Citrix NetScaler appliances based on **FreeBSD 8.4**, select the separate **amd64 (64-bit x86)** collector built with **Go 1.9.7** and `CGO_ENABLED=0`. Confirm the appliance's OS and architecture first; regular FreeBSD packages are not interchangeable with this legacy target. Other NetScaler versions need a collector selected using their actual OS, architecture and verified compatibility evidence.
+
+**Release availability:** `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` is included starting with the first tagged release containing the legacy packaging workflow. **v1.0.1 and earlier do not contain this dedicated package.** Check the [selected release's assets](https://github.com/NextronSystems/thunderstorm-collector/releases): if the package is absent, that release does not provide the legacy build. This guidance does not imply that a containing release has already been published.
+
+The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the release checksum and consult its build information for the exact source commit and compiler. Downloading the package is the normal path; for releases containing this build, optional advanced build instructions are in `go/legacy/README.md` in that release's source tree.
+
+#### Compatibility evidence as of 2026-10-08
+
+| Evidence level | Status for the dedicated legacy build |
+| --- | --- |
+| Compilation for freebsd/amd64 with Go 1.9.7 | Verified, including static FreeBSD ELF, architecture, executable permissions, package contents and checksums |
+| Shared source/runtime on Linux/amd64 with Go 1.9.7 | Automated Go tests and synthetic HTTP checks verified; these do not execute the FreeBSD binary |
+| Runtime on FreeBSD 8.4-RELEASE amd64 | Reported successful in a KVM/QEMU VM without a workaround; 253 files uploaded with zero errors |
+| Runtime on FreeBSD 14.3-RELEASE amd64 | Reported successful in a KVM/QEMU VM with per-process ASLR disabled; 302 files uploaded with zero errors |
+| Runtime on a named NetScaler appliance/firmware | Pending; the VM results do not establish appliance/firmware compatibility |
+
+##### How the FreeBSD binaries were tested
+
+The [external test report on PR #51](https://github.com/NextronSystems/thunderstorm-collector/pull/51#issuecomment-6056935463), supplied on **8 October 2026**, used the same GitHub Actions artifact on both VMs. These are reported VM results, separate from the automated Linux tests. The artifact identity and archive checksum were independently checked against the CI download; the VM runs were performed by the report's author.
+
+| Test environment | Startup | Dry run over `/etc` | Upload to Thunderstorm |
+| --- | --- | --- | --- |
+| FreeBSD 8.4-RELEASE amd64, r251259 (2013-06-02); KVM/QEMU, qemu64 CPU, RTL8139 NIC, IDE disk | Ran directly, without an ASLR workaround | `--dry-run -p /etc`: 253 files would be sent, zero errors | 253 successful uploads, zero read/transmission errors |
+| FreeBSD 14.3-RELEASE amd64; KVM/QEMU, host-passthrough CPU, virtio NIC | Direct start failed with `runtime: address space conflict`; ran with ASLR disabled for the invocation | `--dry-run -p /etc`: 600 files discovered, 302 selected, zero errors | 302 successful uploads, zero errors |
+
+The server was **Thunderstorm v10**, using **THOR 10.7.32 (build 1cabaee)** over **HTTP port 8082**. The report records 555 scanned samples across both runs, no denied requests and no upload errors. These tests cover startup, file collection/filtering and HTTP submission; they do not establish HTTPS/TLS interoperability or compatibility with a particular NetScaler firmware. `/etc` describes the VM test input; for a first appliance test, use a small directory containing synthetic files.
+
+The reported FreeBSD 8.4 installation ISO SHA-256 was `2fb17d77d4eba34736eb98c142c56546dd73a4e7ac38895bb6c8517949282438`.
+
+##### Exact tested artifact
+
+| Field | Value |
+| --- | --- |
+| CI run / artifact | [Legacy NetScaler run 37743060852](https://github.com/NextronSystems/thunderstorm-collector/actions/runs/37743060852), artifact `netscaler-freebsd8`, ID `11534377782` |
+| PR head at the time of the run | `2af4e908e078674a3821b9f106eaee85a576f97b` |
+| Built source commit from `BUILD-INFO.txt` | `ed70dd980d4e4132e319f15090a58f927cd85035` (the PR test-merge commit; clean source tree) |
+| Compiler / target | Go 1.9.7 on Linux/amd64; `GOOS=freebsd`, `GOARCH=amd64`, `CGO_ENABLED=0` |
+| Archive | `thunderstorm-collector-validation-ed70dd980d4e-amd64-freebsd8-netscaler.tar.gz` |
+| Archive SHA-256, verified against its sidecar | `018efbc71a7b0ac5f53b5b376f2e155fa64c542ca98a7eb6e683c29cd8186b92` |
+| Executable | `amd64-freebsd8-netscaler-thunderstorm-collector`, 5,644,000 bytes; static, stripped FreeBSD ELF64 x86-64 |
+| Executable SHA-256, computed from the downloaded artifact | `3cf8abd09c964095f795dc8f680d646c24e91541e01da605d94c5bc803dee3d4` |
+| Go Build ID, matching the report | `24b3731e01aa0df55459eb274cafee81a99d5de4` |
+
+These runtime results apply to the identified artifact. Later builds are not automatically VM-tested. The `pending` runtime fields in its `BUILD-INFO.txt` reflect the CI build-time checks, which preceded these external tests; this section records the subsequent VM evidence.
+
+##### ASLR when testing on modern FreeBSD
+
+For the FreeBSD 14.3 VM, the per-invocation workaround can be applied to a help check as follows:
+
+```sh
+proccontrol -m aslr -s disable ./amd64-freebsd8-netscaler-thunderstorm-collector --help
+```
+
+The failure and workaround are consistent with an ASLR-sensitive legacy runtime. The [FreeBSD 13.2 release notes](https://www.freebsd.org/releases/13.2R/relnotes/#kernel) document default ASLR for 64-bit executables and this per-invocation control. The FreeBSD 8.4 VM ran without this workaround. It is not a required NetScaler configuration change.
+
+The repository also records historical Go 1.9.7 use on FreeBSD 8.4 NetScaler gateways, without their firmware, architecture or collector revision. The [official Go FreeBSD table](https://go.dev/wiki/FreeBSD) supports the amd64 toolchain choice. No 386 legacy package is promised without a verified target need. Add future OS/appliance results and their artifact identities here so compatibility evidence has one reference location.
+
+**Go 1.9.7 is unsupported** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its shipped runtime and standard library, including HTTP/TLS code, lack later security fixes. An isolated build job does not remove these limitations. Retain certificate verification and server security settings; if secure interoperability fails, use a supported collector/platform rather than weakening them.
+
 ### Unsupported Versions
 
 The Go Collector does not run on:
@@ -120,7 +181,7 @@ If you need to check which Go version was used to build a specific binary, unfor
 
 The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
 
-The pre-compiled binaries for FreeBSD have been built with Go 1.10, which supports FreeBSD 10, 11 and 12. If you have to use the collector on older FreeBSD versions, visit [this page](https://github.com/golang/go/wiki/FreeBSD) to get information on the last supported Go version. E.g. to build a version of the Thunderstorm Collector that runs on old Citrix Netscaler gateways, we had to use Go 1.9.7 for the FreeBSD 8.4 used on these platforms.
+Regular FreeBSD packages follow the normal Go 1.10/stable build process. For FreeBSD 8.4 NetScaler gateways, see the [separate legacy package guidance](#citrix-netscaler-and-freebsd-84) above.
 
 Note: We haven't tested all compiled binaries on the respective platforms. Please report issues with the execution.
 
