@@ -533,17 +533,19 @@ Manual test procedure:
 - Set `COLLECTOR="ash"` when creating Unix test data.
 - Run all commands with the shell that represents the target environment, for example `sh`, `ash`, `dash`, or `busybox sh`.
 - Run the README manual acceptance command against the real Thunderstorm service with the test `input` directory.
-- Verify `sample.txt` and `nested/nested.txt` in Thunderstorm.
-- If the target environment should support binary upload, add `sample.bin` to the acceptance check and compare size/hash if Thunderstorm exposes that data.
+- Follow the current ash README's isolated eight-file fixture, exact upload counts, exit codes and eleven acceptance sections rather than treating this overview as the detailed test procedure.
+- Binary integrity is required for every supported ash transport. Verify text, binary, empty, nested and special-name files by received size/hash; record unavailable backend evidence as NOT TESTED.
 - Run the dry-run test against `127.0.0.1:1` and verify no upload appears.
-- Run the unreachable-service test and verify a visible failure or failed-submission report.
-- Run missing/unreadable path testing and verify readable files are still processed.
-- On BusyBox-only systems, explicitly record which upload tool was used, for example BusyBox `wget` or `curl`.
+- Unreachable-service testing must produce exit 2 with curl/GNU wget or exit 1 with nc, with no uploads. Warnings alone are not a pass.
+- Missing/unreadable paths must produce exit 1 while readable files are still processed. Test permissions as non-root.
+- Test rejection of newline paths, temporary/log/symlink exclusions, age/size boundaries and TLS trust where supported.
+- Record the actual transport: curl, GNU wget, or nc plus timeout. BusyBox/unknown wget alone must be refused before uploads. Netcat supports only plain HTTP, no collection markers, and strict length-framed responses.
 
 Automated stub test:
 
 ```bash
 THUNDERSTORM_TEST_COLLECTORS=ash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
+  THUNDERSTORM_TEST_REQUIRE_ALL=1 \
   scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
@@ -717,3 +719,16 @@ Recommended merge sequence after acceptance remains:
 3. Merge accepted collector PRs #44 through #48.
 
 If a collector fails manual acceptance, keep its PR open and merge only the PRs that passed.
+
+## Collector Construction Guide
+
+The separate documentation-only [PR #52](https://github.com/NextronSystems/thunderstorm-collector/pull/52)
+provides the collector construction guide for coding agents targeting other
+languages, runtime versions, operating systems or architectures. It covers the
+verified upload protocol, selectors, failure/security/resource semantics, optional
+capability profiles, acceptance matrix and a reusable agent assignment.
+
+It is not another collector implementation and does not certify untested platforms.
+Optional markers and the full feature set of one language remain optional; actual
+target tests and human acceptance are still required. After merging the guide,
+find it at `docs/COLLECTOR_CONSTRUCTION_GUIDE.md`.
