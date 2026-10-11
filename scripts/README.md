@@ -55,3 +55,10 @@ THUNDERSTORM_TEST_COLLECTORS=bash \
 Supported selector values are `bash`, `ash`, `python3`, `python2`, `perl`, `ps3`, and `ps2`.
 
 Use `THUNDERSTORM_TEST_REQUIRE_MATCH=1` when CI or manual test runs must fail if the requested collector is missing or not runnable.
+
+## Building a Collector for Another Platform
+
+The [collector construction guide](../docs/COLLECTOR_CONSTRUCTION_GUIDE.md) describes the
+upload protocol, optional capability profiles, safety requirements and acceptance
+tests without prescribing a language-specific implementation. It includes a
+reusable assignment for a coding agent targeting a new language, OS or architecture.
