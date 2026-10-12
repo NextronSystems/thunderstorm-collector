@@ -1,6 +1,6 @@
 # THOR Thunderstorm Collector
 
-This guide covers the compiled Go collector: configuration, filtering, platform compatibility, and builds. Start with the [main README](../README.md) for collector selection, downloads, and a preview-first quick start. Published binaries do not require an installed Go runtime, but their OS/kernel and CPU requirements still apply.
+This guide covers the compiled Go collector: configuration, filtering, platform compatibility, and builds. Start with the [main README](../README.md) for collector selection, downloads, and a minimal quick start with an optional preview. Published binaries do not require an installed Go runtime, but their OS/kernel and CPU requirements still apply.
 
 For product-specific collection scope, use the [Emerging Threats profiles](../emerging-threats/README.md). Script collectors have their own [configuration and runtime guides](../scripts/README.md).
 
@@ -58,7 +58,7 @@ Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
 
 The **Go collector** reads YAML. By default it looks for `config.yml` in the current working directory. Use `-t`/`--template` to select a configuration explicitly: a missing explicit file is an error, while an absent implicit `config.yml` falls back to built-in defaults. Those defaults include the filesystem root and no extension or magic-header filter.
 
-Command-line values override YAML values. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
+Command-line values override YAML values. The server can be set once as `thunderstorm-server: HOST` in the existing `config.yml`; from that directory, the executable then needs no flags for a normal collection. With the shipped configuration, only `-s HOST` is needed if the server is not stored in YAML. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
 
 For example, save this preview-first configuration as `my-config.yml`, replacing the input path and server:
 

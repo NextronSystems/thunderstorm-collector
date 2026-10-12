@@ -54,31 +54,71 @@ Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases
 
 ## Quick Start
 
-This example uses the **Linux amd64 Go package from v1.0.1**. Download it from Releases and extract it:
+For the **Linux amd64 Go package from v1.0.1**, download the archive from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.0.1), extract it, and enter the package directory:
 
 ```sh
 tar -xzf thunderstorm-collector-1.0.1-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
 ```
 
-The bundled `config.yml` is ready to use; changing its file filters and limits is optional. With the default configuration, the Go collector starts at `/` on Linux/Unix or `C:\` on Windows. File filters, limits, filesystem exclusions, and the current account's read permissions still apply. This local preview needs no server connection:
+Start collecting by supplying just your Thunderstorm server's hostname or IP address:
 
 ```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml --dry-run --debug
+./amd64-linux-thunderstorm-collector -s thunderstorm.example.internal
 ```
 
-To upload the selected files, replace `thunderstorm.example.internal` with the hostname or IP address of a running, reachable Thunderstorm service. Supply the hostname/IP only; configure HTTPS and the port using the options below:
+Replace `thunderstorm.example.internal` with your server. The collector automatically loads `config.yml` from the **current directory**, uses its file filters and limits, and uploads matching readable files. With the bundled configuration, collection starts at `/` on Linux/Unix or `C:\` on Windows; HTTP port **8080** and the local hostname as the source name are already the defaults. No other options or configuration edits are needed for that setup.
+
+### Save the server once
+
+For repeated use, add this line to the **existing** `config.yml`, keeping its filters and other settings:
+
+```yaml
+thunderstorm-server: thunderstorm.example.internal
+```
+
+Then, from the package directory, simply run:
 
 ```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml \
-  --thunderstorm-server thunderstorm.example.internal --dry-run=false
+./amd64-linux-thunderstorm-collector
 ```
 
-To collect only a specific directory, optionally add `--path /var/www` (or another existing directory) to either command. `--path` replaces the default or configured directory list; repeat it for multiple roots. The source name defaults to the detected hostname; use `--source custom-name` only to override it.
+The server setting can be supplied in YAML or with `-s`; it does not need to be specified in both places. Use a hostname or IP only; HTTPS and non-default ports have separate settings below.
 
-For an assessment profile, follow its guide and pass its configuration with `-t`. The default server port is 8080; change it with `--port` if needed. For HTTPS, add `--ssl`, select the endpoint's port, and use `--ca /path/to/ca.pem` if a custom CA is required. See the [Go configuration guide](go/README.md#configuration-files) for the remaining options.
+### Optional preview
 
-For scripts, follow the selected [language guide](scripts/README.md) to configure and preview the collection using its header settings, command-line options, or environment variables. Scripts use their own settings rather than the Go YAML file. Uploads are asynchronous by default in the examples above; check received files and analysis results on the server after collection.
+To see which files would be uploaded without contacting the server:
+
+```sh
+./amd64-linux-thunderstorm-collector --dry-run --debug
+```
+
+Normal runs upload files by default. `--dry-run=false` is only needed when overriding `dry-run: true` in a loaded configuration, such as a preview-enabled assessment profile.
+
+### Common command-line and YAML settings
+
+Command-line options override YAML settings. **Only the server address is required for uploads**, and it can be stored in `config.yml`. Everything else below is optional. The defaults shown assume the bundled configuration is loaded.
+
+| Setting | Command-line option | YAML key | Default / when to change it |
+| --- | --- | --- | --- |
+| Server | `-s HOST` / `--thunderstorm-server HOST` | `thunderstorm-server` | Required for uploads, in YAML or on the command line; unnecessary for a preview. |
+| Configuration file | `-t FILE` / `--template FILE` | — | Automatically reads `config.yml` in the current directory. Use `-t` for another file or location. |
+| Collection directories | `-p DIR` / `--path DIR` | `path` | `/` on Unix, `C:\` on Windows. Override only to change the scope. |
+| Server port | `--port PORT` | `port` | `8080`. |
+| HTTPS | `--ssl` | `ssl` | `false` (HTTP). Enabling HTTPS does not change the port automatically. |
+| Custom CA certificate | `--ca FILE` | `ca` | Uses system trust by default; set for a custom CA. |
+| Source name | `-o NAME` / `--source NAME` | `source` | The local hostname. |
+| Maximum file size | `-m MiB` / `--max-filesize MiB` | `max-filesize` | **64 MiB** per file. |
+| Maximum file age | `-a 7d` / `--max-age 7d` | `max-age` | No age cutoff. In YAML, `max-age: ""` disables the cutoff; `"0"` does not. |
+| Preview only | `--dry-run` | `dry-run` | `false`: files are uploaded. Set `true` to preview. |
+| Verbose output | `--debug` | `debug` | `false`. Add to a preview to list filenames and skip reasons. |
+| Wait for analysis results | `--upload-synchronous` | `upload-synchronous` | `false`: asynchronous uploads. Check results on the server. |
+| Upload workers | `-r N` / `--threads N` | `threads` | `1`. |
+| Upload rate limit | `--uploads-per-minute N` | `uploads-per-minute` | `0`: no rate limit. |
+
+List-valued YAML settings use lists, for example `path: ["/var/www", "/home"]` or `ca: ["/path/to/ca.pem"]`. The first `--path` replaces the default or configured directory list; repeat it to add more roots. To adjust extension/magic filters or exclusions, see the [Go configuration guide](go/README.md#configuration-files). Use `--help` or the [full Go option reference](go/README.md#usage) for all flags.
+
+These settings apply to the **Go collector**. Script collectors have their own defaults and option names; use the selected [language guide](scripts/README.md). For an assessment profile, follow its guide and load its configuration with `-t`.
 
 ## Product Integration Guides
 
