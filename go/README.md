@@ -1,64 +1,18 @@
 # THOR Thunderstorm Collector
 
-This guide covers the compiled Go collector: configuration, filtering, platform compatibility, and builds. Start with the [main README](../README.md) for collector selection, downloads, and a preview-first quick start. Published binaries do not require an installed Go runtime, but their OS/kernel and CPU requirements still apply.
+This guide covers the compiled Go collector: configuration, filtering, platform compatibility, and builds. Start with the [main README](../README.md) for collector selection, downloads, and a minimal quick start with an optional preview. Published binaries do not require an installed Go runtime, but their OS/kernel and CPU requirements still apply.
 
 For product-specific collection scope, use the [Emerging Threats profiles](../emerging-threats/README.md). Script collectors have their own [configuration and runtime guides](../scripts/README.md).
 
 ## Usage
 
-Run your executable with `--help` to see its options and effective defaults. The reference below shows built-in defaults; loading a YAML configuration can change them, including the file-size limit.
-
-<details>
-<summary>Command-line reference</summary>
-
-```help
-Usage: amd64-windows-thunderstorm-collector.exe [OPTION]...
-      --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.
-      --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
-                                     Specify multiple CAs by using this flag multiple times.
-      --debug                        Print debugging information. Shows detailed information about each file processed, including why files are skipped or would be sent.
-      --dry-run                      Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode.
-      --exclude strings              Paths that should be excluded. Supports globbing with ?, * and **.
-                                     Specify multiple excludes by using this flag multiple times.
-                                     Example: --exclude C:\tools --exclude C:\Users\**\.git\**
-  -e, --extension strings            File extensions that should be collected. If left empty, file extensions are ignored.
-                                     Extensions are checked first; if no extension matches and magic headers are specified, magic headers are checked.
-                                     Specify multiple extensions by using this flag multiple times.
-                                     Example: -e .exe -e .dll
-  -h, --help                         Show this help.
-      --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
-                                     If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
-      --insecure                     Don't verify the Thunderstorm certificate if HTTPS is used.
-  -l, --logfile string               Write the log to this file as well as to the console.
-      --magic strings                Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.
-                                     Specify multiple wanted Magic Headers by using this flag multiple times.
-                                     Magic headers are checked only if file extensions don't match (or if no extensions are specified). Maximum magic header length is 1024 bytes.
-                                     Example: --magic 4d5a --magic cffa
-  -a, --max-age string               Max age of collected files. Files with older modification date are ignored.
-                                     Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.
-                                     Example: --max-age 10h
-  -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
-  -p, --path strings                 Root paths from where files should be collected.
-                                     Specify multiple root paths by using this flag multiple times. (default [C:\])
-      --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
-  -o, --source string                Name for this device in the Thunderstorm log messages. (default "DESKTOP-EEM5B52")
-      --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
-  -t, --template string              Process default scan parameters from this YAML file. (default "config.yml")
-  -r, --threads int                  How many threads should upload files simultaneously. Set to 0 to use all available CPU cores, or use negative values to reserve cores (e.g., -2 = all cores except 2). (default 1)
-  -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
-                                     Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
-                                     Note: Not required when using --dry-run mode.
-      --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files.
-      --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
-```
-
-</details>
+Run your executable with `--help` to see every available option and the effective defaults for the loaded configuration. The [main README contains the complete help output](../README.md#command-line-help). It shows built-in Unix defaults; a loaded YAML configuration can change them, including the file-size limit.
 
 ## Configuration Files
 
 The **Go collector** reads YAML. By default it looks for `config.yml` in the current working directory. Use `-t`/`--template` to select a configuration explicitly: a missing explicit file is an error, while an absent implicit `config.yml` falls back to built-in defaults. Those defaults include the filesystem root and no extension or magic-header filter.
 
-Command-line values override YAML values. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
+Command-line values override YAML values. The server can be set once as `thunderstorm-server: HOST` in the existing `config.yml`; from that directory, the executable then needs no flags for a normal collection. With the shipped configuration, only `-s HOST` is needed if the server is not stored in YAML. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
 
 For example, save this preview-first configuration as `my-config.yml`, replacing the input path and server:
 
