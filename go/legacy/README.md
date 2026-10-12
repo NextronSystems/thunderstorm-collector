@@ -49,4 +49,4 @@ VERSION=validation-local bash .github/scripts/build-legacy-netscaler.sh
 python3 .github/scripts/test-legacy-release.py
 ```
 
-The local build creates `go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz` and its checksum. CI uploads them as the `netscaler-freebsd8` artifact. The [tagged-release workflow](../../.github/workflows/release.yml) requires and verifies that artifact before publishing the release.
+The local build creates `go/legacy/dist/*-amd64-freebsd8-netscaler.tar.gz` and its checksum. CI uploads them as the `netscaler-freebsd8` artifact. The [tagged-release workflow](../../.github/workflows/release.yml) requires and verifies that artifact before attaching the packages to a draft release. A maintainer publishes the draft separately after review.
