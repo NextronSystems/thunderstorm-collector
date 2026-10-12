@@ -95,28 +95,55 @@ To see which files would be uploaded without contacting the server:
 
 Normal runs upload files by default. `--dry-run=false` is only needed when overriding `dry-run: true` in a loaded configuration, such as a preview-enabled assessment profile.
 
-### Common command-line and YAML settings
+### Command-line help
 
-Command-line options override YAML settings. **Only the server address is required for uploads**, and it can be stored in `config.yml`. Everything else below is optional. The defaults shown assume the bundled configuration is loaded.
+Run `--help` to list every available option and the effective defaults for your loaded configuration:
 
-| Setting | Command-line option | YAML key | Default / when to change it |
-| --- | --- | --- | --- |
-| Server | `-s HOST` / `--thunderstorm-server HOST` | `thunderstorm-server` | Required for uploads, in YAML or on the command line; unnecessary for a preview. |
-| Configuration file | `-t FILE` / `--template FILE` | — | Automatically reads `config.yml` in the current directory. Use `-t` for another file or location. |
-| Collection directories | `-p DIR` / `--path DIR` | `path` | `/` on Unix, `C:\` on Windows. Override only to change the scope. |
-| Server port | `--port PORT` | `port` | `8080`. |
-| HTTPS | `--ssl` | `ssl` | `false` (HTTP). Enabling HTTPS does not change the port automatically. |
-| Custom CA certificate | `--ca FILE` | `ca` | Uses system trust by default; set for a custom CA. |
-| Source name | `-o NAME` / `--source NAME` | `source` | The local hostname. |
-| Maximum file size | `-m MiB` / `--max-filesize MiB` | `max-filesize` | **64 MiB** per file. |
-| Maximum file age | `-a 7d` / `--max-age 7d` | `max-age` | No age cutoff. In YAML, `max-age: ""` disables the cutoff; `"0"` does not. |
-| Preview only | `--dry-run` | `dry-run` | `false`: files are uploaded. Set `true` to preview. |
-| Verbose output | `--debug` | `debug` | `false`. Add to a preview to list filenames and skip reasons. |
-| Wait for analysis results | `--upload-synchronous` | `upload-synchronous` | `false`: asynchronous uploads. Check results on the server. |
-| Upload workers | `-r N` / `--threads N` | `threads` | `1`. |
-| Upload rate limit | `--uploads-per-minute N` | `uploads-per-minute` | `0`: no rate limit. |
+```sh
+./amd64-linux-thunderstorm-collector --help
+```
 
-List-valued YAML settings use lists, for example `path: ["/var/www", "/home"]` or `ca: ["/path/to/ca.pem"]`. The first `--path` replaces the default or configured directory list; repeat it to add more roots. To adjust extension/magic filters or exclusions, see the [Go configuration guide](go/README.md#configuration-files). Use `--help` or the [full Go option reference](go/README.md#usage) for all flags.
+Reference output with built-in Unix defaults; the executable name and hostname are generalized below. The bundled `config.yml` overrides the file-size limit to **64 MiB**, while the built-in limit shown here is **100 MiB**.
+
+```text
+Usage: thunderstorm-collector [OPTION]...
+      --all-filesystems              Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type.
+      --ca strings                   Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.
+                                     Specify multiple CAs by using this flag multiple times.
+      --debug                        Print debugging information. Shows detailed information about each file processed, including why files are skipped or would be sent.
+      --dry-run                      Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode.
+      --exclude strings              Paths that should be excluded. Supports globbing with ?, * and **.
+                                     Specify multiple excludes by using this flag multiple times.
+                                     Example: --exclude C:\tools --exclude C:\Users\**\.git\**
+  -e, --extension strings            File extensions that should be collected. If left empty, file extensions are ignored.
+                                     Specify multiple extensions by using this flag multiple times.
+                                     Example: -e .exe -e .dll
+  -h, --help                         Show this help.
+      --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
+                                     If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
+      --insecure                     Don't verify the Thunderstorm certificate if HTTPS is used.
+  -l, --logfile string               Write the log to this file as well as to the console.
+      --magic strings                Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.
+                                     Specify multiple wanted Magic Headers by using this flag multiple times.
+                                     Example: --magic 4d5a --magic cffa
+  -a, --max-age string               Max age of collected files. Files with older modification date are ignored.
+                                     Unit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.
+                                     Example: --max-age 10h
+  -m, --max-filesize int             Maximum file size up to which files should be uploaded (in MB). (default 100)
+  -p, --path strings                 Root paths from where files should be collected.
+                                     Specify multiple root paths by using this flag multiple times. (default [/])
+      --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
+  -o, --source string                Name for this device in the Thunderstorm log messages. (default "HOSTNAME")
+      --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
+  -t, --template string              Process default scan parameters from this YAML file. (default "config.yml")
+  -r, --threads int                  How many threads should upload files simultaneously. Set to 0 to use all available CPU cores, or use negative values to reserve cores (e.g., -2 = all cores except 2). (default 1)
+  -s, --thunderstorm-server string   FQDN or IP of the Thunderstorm Server to which files should be uploaded.
+                                     Examples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1
+      --upload-synchronous           Whether files should be uploaded synchronously to Thunderstorm. If yes, the collector takes longer, but displays the results of all scanned files.
+      --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
+```
+
+Only the server address is required for uploads, either in `config.yml` or with `-s`. Other settings are optional. Command-line values override YAML settings. Long option names also serve as YAML keys, such as `thunderstorm-server`, `port`, and `path`; `--help` and `--template` are command-line controls only. List-valued settings use YAML lists, for example `path: ["/var/www", "/home"]`. See the [Go configuration guide](go/README.md#configuration-files) for examples and filter behavior.
 
 These settings apply to the **Go collector**. Script collectors have their own defaults and option names; use the selected [language guide](scripts/README.md). For an assessment profile, follow its guide and load its configuration with `-t`.
 
