@@ -25,7 +25,7 @@ For BusyBox environments, see the [ash collector](../ash/README.md).
 ## Configuration and Startup Output
 
 Edit the `USER CONFIGURATION` block near the top of the script, or pass options.
-Set `THUNDERSTORM_SERVER` to a hostname/IP without a scheme, port or API path;
+Set `THUNDERSTORM_SERVER` to a DNS name, IPv4 address or bracketed IPv6 address without a scheme, credentials, port or API path (anything else is rejected before any request);
 an empty server stops with exit 2 and an instruction explaining how to set it.
 Use `SCAN_FOLDERS=("/var/www" "/home/alice")` for explicit roots. Header roots
 are respected; an empty array selects the platform defaults listed below.
@@ -57,11 +57,15 @@ console output. Keep externally captured logs outside the input directories.
 - HTTP/HTTPS, asynchronous `/api/checkAsync` only; there is no synchronous mode,
   and `--async` is accepted and ignored so existing command lines keep working.
   An accepted asynchronous upload does not mean analysis has finished.
-- TLS verification is enabled. `--ca-cert FILE` selects HTTPS and a trusted CA
-  bundle. `--insecure` deliberately disables verification; do not use it as a
+- TLS verification is enabled. `--ca-cert FILE` selects HTTPS and makes that CA
+  bundle the **only** trust anchor: an empty CA directory is passed to curl
+  (`--capath`) and wget (`--ca-directory`), so system CAs are not trusted in
+  addition. `--insecure` deliberately disables verification; do not use it as a
   routine workaround for a certificate error.
 - Binary contents and unusual local filenames are supported. Multipart filename
-  metadata replaces quotes, semicolons, backslashes, CR, and LF with underscores.
+  metadata replaces quotes, semicolons, backslashes and every control character
+  (CR, LF, TAB, ESC, DEL, ...) with underscores; a strict multipart parser rejects
+  control characters in a part header and the file would never be collected.
   This does not change the uploaded bytes.
 - Source defaults to the hostname; `--source NAME` overrides it and is URL-encoded.
   Begin/end markers and returned scan IDs are supported. Marker HTTP 404/501 are
@@ -103,7 +107,9 @@ Missing roots are errors, not successful empty collections.
   against a hostile process concurrently replacing filesystem entries.
 - Overlapping roots can submit the same file repeatedly. There is no deduplication,
   resume database, content-type filter, or concurrent uploading.
-- Known pseudo-filesystems and cloud-folder names are pruned. Automatic detection
+- Known pseudo-filesystems and cloud-folder names are pruned. Cloud-folder names
+  are matched against directories only: a regular file called `mega` or
+  `OneDrive-Setup.exe` is an ordinary sample and is collected. Automatic detection
   of network/special mounts uses Linux `/proc/mounts`; it is not comprehensive on
   other systems. Select known local roots on macOS and other Unix systems.
 - Curl: 10-second connection timeout and 300-second total upload timeout. GNU wget:
