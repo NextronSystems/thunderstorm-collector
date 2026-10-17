@@ -434,6 +434,9 @@ try {
     Write-Host "[INFO] Scan roots (recursive; exclusions apply):"
     foreach ($root in $roots) { Write-Host "[INFO]   Scan root: $root" }
     Write-Host "[INFO] Limits: max-age=$MaxAge days (0=disabled); max-size=$MaxSize MiB; dry-run=$DryRun"
+    if ([IntPtr]::Size -eq 4 -and $env:PROCESSOR_ARCHITEW6432) {
+        Write-Host "[WARN] 32-bit PowerShell on 64-bit Windows: file-system redirection shows %windir%\SysWOW64 as %windir%\System32, so the real System32 is not collected. Use 64-bit PowerShell (%windir%\SysNative\WindowsPowerShell\v1.0\powershell.exe from a 32-bit host) to scan it."
+    }
     if ($AllExtensions) { Write-Host "[INFO] Extensions: all" }
     else { Write-Host ("[INFO] Extensions: " + ($extensionSet -join ", ")) }
     $script:jsonParser = $null
