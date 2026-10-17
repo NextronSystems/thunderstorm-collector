@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 )
 
 type Config struct {
@@ -70,6 +71,13 @@ func ParseConfig() Config {
 	err = flags.Parse(os.Args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		flags.Usage()
+		os.Exit(1)
+	}
+	// A stray value, e.g. a path without -p, would otherwise be ignored silently
+	// and the collector would walk the default root (the whole filesystem).
+	if extra := unexpectedArguments(flags); len(extra) > 0 && !config.Help {
+		fmt.Fprintf(os.Stderr, "Unexpected argument(s): %s\nScan roots must be passed with -p/--path, other values need their option, for example -s HOST.\n", strings.Join(extra, " "))
 		flags.Usage()
 		os.Exit(1)
 	}

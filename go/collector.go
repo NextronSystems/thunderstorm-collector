@@ -75,6 +75,10 @@ type Collector struct {
 
 	logger *log.Logger
 
+	// HTTP client for all requests to Thunderstorm. It never follows redirects,
+	// see refuseRedirects.
+	client *http.Client
+
 	// Set before starting workers; defaults to time.Sleep.
 	retrySleep func(time.Duration)
 
@@ -110,6 +114,12 @@ type CollectionStatistics struct {
 	uploadedFiles int64
 	uploadErrors  int64
 	fileErrors    int64
+	// rootErrors counts scan roots that could not be read; they fail the run.
+	rootErrors int64
+	// walkErrors counts directories and entries below a root that could not be
+	// read. They are reported but, like the permission-denied directories of any
+	// full-disk scan, do not change the exit status.
+	walkErrors int64
 
 	// Timings (in nanoseconds, converted to seconds/milliseconds for display)
 
@@ -144,10 +154,37 @@ func (s *CollectionStatistics) getSkipCount(reason SkipReason) int64 {
 	return s.skipReasons[reason]
 }
 
+// ErrorCount returns the number of failures that make the run unsuccessful:
+// selected files that could not be read or accepted, and scan roots that could
+// not be read. Unreadable directories below a root are only reported, see
+// walkErrors.
+func (s *CollectionStatistics) ErrorCount() int64 {
+	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors)
+}
+
+// refuseRedirects makes the HTTP client hand a redirect response back to the
+// caller instead of following it. Following a 301/302/303 replays the upload as
+// a body-less GET, so a gateway that answers with a redirect to a login page
+// would make the collector report a successful transfer for a sample that
+// Thunderstorm never accepted.
+func refuseRedirects(req *http.Request, via []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+// redirectHint describes an unfollowed redirect response, or returns an empty
+// string for any other response.
+func redirectHint(response *http.Response) string {
+	if response.StatusCode < 300 || response.StatusCode > 399 {
+		return ""
+	}
+	return fmt.Sprintf(" (redirect to %q, redirects are not followed; check --ssl, --port and any gateway or proxy in front of Thunderstorm)", response.Header.Get("Location"))
+}
+
 func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 	collector := &Collector{
 		CollectorConfig: config,
 		logger:          logger,
+		client:          &http.Client{CheckRedirect: refuseRedirects},
 		retrySleep:      time.Sleep,
 		Statistics: &CollectionStatistics{
 			skipReasons: make(map[SkipReason]int64),
@@ -193,7 +230,7 @@ func (c *Collector) StartWorkers() {
 
 func (c *Collector) CheckThunderstormUp() error {
 	c.debugf("Checking whether Thunderstorm at %s answers", c.Server)
-	response, err := http.Get(fmt.Sprintf("%s/api/status", c.Server))
+	response, err := c.client.Get(fmt.Sprintf("%s/api/status", c.Server))
 	if err != nil {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
 			if opError, isOpError := urlError.Err.(*net.OpError); isOpError {
@@ -211,7 +248,7 @@ func (c *Collector) CheckThunderstormUp() error {
 		return fmt.Errorf("could not read response body: %v", err)
 	}
 	if response.StatusCode != 200 {
-		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d: %s", response.StatusCode, body)
+		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d%s: %s", response.StatusCode, redirectHint(response), body)
 	}
 	c.debugf("Read status page from %s/api/status", c.Server)
 	return nil
@@ -223,12 +260,31 @@ func (c *Collector) Collect() {
 	}
 }
 
+// reportWalkError logs and counts a path that filepath.Walk could not read. A
+// scan root that cannot be read fails the run; a directory below it is only
+// reported. An entry below the root that disappeared after its directory was
+// listed is not an error of the collector and is only noted in debug output.
+func (c *Collector) reportWalkError(root string, path string, err error) {
+	if path == root {
+		atomic.AddInt64(&c.Statistics.rootErrors, 1)
+		c.logger.Printf("Could not read scan root '%s': %v", root, err)
+		return
+	}
+	if os.IsNotExist(err) {
+		c.debugf("Skipping '%s', it vanished during the walk: %v", path, err)
+		return
+	}
+	atomic.AddInt64(&c.Statistics.walkErrors, 1)
+	c.logger.Printf("Could not read '%s' while walking '%s': %v", path, root, err)
+}
+
 func (c *Collector) collectPath(root string) {
 	c.logger.Printf("Walking through '%s' to find files to upload", root)
 	walkStart := time.Now()
 	var submissionWait time.Duration
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			c.reportWalkError(root, path, err)
 			return nil
 		}
 		for _, glob := range c.ExcludeGlobs {
@@ -312,6 +368,7 @@ func (c *Collector) Stop() {
 	}
 	c.logger.Printf("  - Successfully %s: %d", uploadLabel, atomic.LoadInt64(&c.Statistics.uploadedFiles))
 	c.logger.Printf("  - Read/transmission errors: %d", atomic.LoadInt64(&c.Statistics.fileErrors)+atomic.LoadInt64(&c.Statistics.uploadErrors))
+	c.logger.Printf("  - Paths that could not be read during the walk: %d", atomic.LoadInt64(&c.Statistics.rootErrors)+atomic.LoadInt64(&c.Statistics.walkErrors))
 	c.logger.Printf("")
 	c.logger.Printf("Timing:")
 	walkTime := time.Duration(atomic.LoadInt64(&c.Statistics.timeWalking))
@@ -335,6 +392,9 @@ type infoWithPath struct {
 const (
 	maxRetries     = 3               // Maximum number of retry attempts for failed uploads
 	baseRetryDelay = 4 * time.Second // Base delay for exponential backoff
+
+	defaultRetryAfter = 30  // Seconds to wait after HTTP 503 without a usable Retry-After header
+	maxRetryAfter     = 120 // Upper bound in seconds for a server-supplied Retry-After, so one header cannot stall a worker for hours
 )
 
 // throttle ensures uploads respect the minimum period between uploads.
@@ -394,7 +454,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 
 	transmitStart := time.Now()
 	contentType, formData := c.getFileContentAsFormData(f, info.path)
-	response, err := http.Post(c.thunderstormUrl(), contentType, formData)
+	response, err := c.client.Post(c.thunderstormUrl(), contentType, formData)
 	if err != nil {
 		if info.retries < maxRetries {
 			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, err)
@@ -418,7 +478,10 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		retryAfter := response.Header.Get("Retry-After")
 		retryTime, err := strconv.Atoi(retryAfter)
 		if err != nil || retryTime < 0 {
-			retryTime = 30 // Default to 30 seconds cooldown time
+			retryTime = defaultRetryAfter
+		}
+		if retryTime > maxRetryAfter {
+			retryTime = maxRetryAfter
 		}
 		c.logger.Printf("Thunderstorm has no free capacities for file '%s', retrying in %d seconds", info.path, retryTime)
 		c.retrySleep(time.Second * time.Duration(retryTime))
@@ -432,7 +495,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	}
 	if response.StatusCode != http.StatusOK {
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
-		c.logger.Printf("Received error from Thunderstorm for file '%s': %d %v\n", info.path, response.StatusCode, string(responseBody))
+		c.logger.Printf("Received error from Thunderstorm for file '%s': %d%s %v\n", info.path, response.StatusCode, redirectHint(response), string(responseBody))
 		return
 	}
 	transmitDuration := time.Since(transmitStart)
@@ -484,9 +547,12 @@ func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 //   - If neither extensions nor magic headers match (and at least one is specified), exclude the file.
 //   - If no extensions or magic headers are specified, all files pass content filtering.
 func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason, bool) {
+	// Extensions are matched case-insensitively: Windows (and the default macOS
+	// filesystem) treat RUN.EXE and run.exe as the same file type.
 	var extensionWanted bool
+	lowerPath := strings.ToLower(info.path)
 	for _, extension := range c.FileExtensions {
-		if strings.HasSuffix(info.path, extension) {
+		if strings.HasSuffix(lowerPath, strings.ToLower(extension)) {
 			extensionWanted = true
 			break
 		}

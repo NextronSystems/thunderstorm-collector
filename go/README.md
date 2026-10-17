@@ -147,7 +147,7 @@ The collector uses a two-stage filtering approach for optimal performance:
 1. **Metadata filtering** (before queuing): Files are checked for size, age, and file type before being added to the upload queue. This prevents unnecessary processing of files that will be excluded.
 
 2. **Content filtering** (after opening): Files are checked for extension and magic header matches. The logic works as follows:
-   - If file extensions are specified and the file matches an extension, it's included
+   - If file extensions are specified and the file matches an extension, it's included. Extensions are compared case-insensitively, so `.exe` also selects `RUN.EXE`
    - If extensions don't match (or aren't specified) and magic headers are specified, magic headers are checked
    - If neither extensions nor magic headers match (and at least one is configured), the file is excluded
    - If no extensions or magic headers are specified, all files pass content filtering
@@ -156,7 +156,18 @@ File-size limits are in MiB (1024 × 1024 bytes), with the exact boundary includ
 
 ### Error Handling and Retry Logic
 
-Transport errors and HTTP 503 share a budget of **three retries after the initial attempt**. Transport failures use exponential delays of 4, 8, and 16 seconds; HTTP 503 uses an integer `Retry-After` value, or 30 seconds when it is missing or invalid. Other HTTP errors and response-body read failures are logged and counted without a retry. A lost response can still cause a duplicate submission.
+Transport errors and HTTP 503 share a budget of **three retries after the initial attempt**. Transport failures use exponential delays of 4, 8, and 16 seconds; HTTP 503 uses an integer `Retry-After` value capped at 120 seconds, or 30 seconds when it is missing or invalid. Other HTTP errors and response-body read failures are logged and counted without a retry. A lost response can still cause a duplicate submission.
+
+Redirects (HTTP 3xx) are never followed, for the status check or for uploads. Replaying an upload against a redirect target would send a body-less request and could report a transfer that Thunderstorm never accepted, so a redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy in front of Thunderstorm if you see one.
+
+### Exit Status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | The run completed and every selected file was read and accepted (or, with `--dry-run`, every selected file could be opened). |
+| `1` | Startup or configuration failed (invalid option, unreachable server), **or** the run completed with errors: a scan root could not be read, or a selected file could not be read or was not accepted by Thunderstorm. The statistics and the log show which. |
+
+A missing scan root, an unreadable directory and every failed upload are logged when they happen and summarised in the statistics. A directory below a scan root that cannot be listed (permission denied is routine on a full scan, for example `System Volume Information` on Windows) is reported and counted under "Paths that could not be read during the walk" but does not change the exit status. Files that were skipped on purpose (size, age, type, exclusions, irregular files) are not errors. A file that disappears while the collector walks its directory is not counted either.
 
 ## Build
 
@@ -236,6 +247,7 @@ Exclusions:
 Processing:
   - Successfully uploaded: 763
   - Read/transmission errors: 2
+  - Paths that could not be read during the walk: 0
 
 Timing:
   - File system walk: 2.5s
@@ -273,6 +285,7 @@ After reviewing the preview, use the same configuration and roots for upload. `-
 ### Common Error Messages
 
 - **"thunderstorm-server: not specified"**: The `--thunderstorm-server` parameter is required (unless using `--dry-run`). Make sure to specify the server address or use `--dry-run` for testing.
+- **"Unexpected argument(s)"**: A value was passed without an option, for example `-s HOST /data`. Every scan root needs its own `-p`/`--path`; the collector refuses to guess instead of silently walking the default root, the whole filesystem.
 - **Thread count options**: Use `-r 4` for a specific number of threads, `-r 0` for all available CPU cores, or negative values to reserve cores (e.g., `-r -2` uses all cores except 2). The minimum is always 1 thread.
 - **"max-filesize: must be > 0"**: The maximum file size must be greater than 0 MB.
 - **"max-age: invalid suffix"**: The max-age parameter supports suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Example: `--max-age 10h`
