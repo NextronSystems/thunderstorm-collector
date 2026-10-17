@@ -60,7 +60,8 @@ output. Keep externally captured logs outside the input directories.
 - Known cloud-folder paths are skipped. `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots` and detected Linux network/special mounts are excluded. These are best-effort exclusions, not a security boundary.
 - Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
 - A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
-- Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and CR/LF with underscores.
+- Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and every control character (CR, LF, TAB, ESC, DEL, ...) with underscores; a strict multipart parser rejects control characters in a part header and the file would never be collected.
+- `--ca-cert FILE` is the **only** trust anchor: an empty CA directory is passed to curl (`--capath`) and GNU wget (`--ca-directory`), so system CAs are not trusted in addition. The nc transport has no TLS.
 - Async `/api/checkAsync` submission only; there is no synchronous mode, and `--async` is accepted and ignored so existing command lines keep working. Async success means accepted, not analysis completed. The collector does not poll async results.
 - Optional begin/end/interrupted `/api/collection` markers. HTTP 404/501 is nonfatal and supplies no scan ID. Other begin failures retry once after two seconds, then abort; end failures produce a nonzero exit.
 - Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
@@ -253,7 +254,7 @@ Repeat positive binary/special-name tests on the actual appliance where curl is 
 
 ### 10. Interruption and Server Failures
 
-Interrupt an isolated fixture run with Ctrl-C or SIGTERM, not a broad system-directory scan. Expected: exit 1 and workspace cleanup. Interrupted markers are best-effort and only available with curl/GNU wget and a supporting service. A client message does not prove receipt.
+Interrupt an isolated fixture run with Ctrl-C, SIGTERM, SIGHUP or SIGQUIT, not a broad system-directory scan. Expected: exit 1 and workspace cleanup. Interrupted markers are best-effort and only available with curl/GNU wget and a supporting service. A client message does not prove receipt.
 
 Do not disrupt real THOR to simulate HTTP 500/503 or truncated responses. The regression suite injects those failures locally, checks retry bounds, and rejects incomplete responses despite a 2xx status. A service returning 404/501 for markers can pass uploads; record marker functionality as NOT SUPPORTED.
 
