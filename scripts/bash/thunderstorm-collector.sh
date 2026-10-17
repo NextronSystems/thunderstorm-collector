@@ -187,7 +187,7 @@ send_interrupted_marker() {
             _elapsed=$(( _now - START_TS ))
             [ "$_elapsed" -lt 0 ] && _elapsed=0
         fi
-        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${_elapsed}}"
+        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_elapsed}}"
         local _scheme="http"
         [ "$USE_SSL" -eq 1 ] && _scheme="https"
         local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
@@ -1336,7 +1336,7 @@ main() {
 
     # Send collection end marker with run statistics
     if [ "$DRY_RUN" -eq 0 ]; then
-        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${elapsed}}"
+        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${elapsed}}"
         collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null || {
             log_msg warn "Collection end marker failed; uploads may still have succeeded"
             return 1

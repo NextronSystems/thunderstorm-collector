@@ -205,6 +205,16 @@ exit 1
                 self.assertEqual(result.returncode, 0, self.output)
                 self.assertNotIn("Server must be", self.output)
 
+    def test_end_marker_reports_scan_errors(self):
+        # The guide's marker example carries scan_errors; without it the server-side
+        # record of a run with a missing root looks complete.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        result = self.run_collector(roots=[self.samples, self.root / "missing"])
+        self.assertEqual(result.returncode, 1, self.output)
+        stats = self.markers[-1]["stats"]
+        self.assertEqual(self.markers[-1]["type"], "end")
+        self.assertEqual((stats["scan_errors"], stats["submitted"], stats["failed"]), (1, 1, 0))
+
     def test_control_characters_never_reach_the_multipart_header(self):
         # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
         # other than TAB or DEL in a part header, so the file would never be collected.
