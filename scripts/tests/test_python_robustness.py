@@ -55,6 +55,7 @@ class PythonRobustness(unittest.TestCase):
         self.partial = False
         self.partial_marker = False
         self.marker_body = {"scan_id": "scan + & /"}
+        self.marker_raw = None
         self.pause = False
         self.started = threading.Event()
         self.release = threading.Event()
@@ -71,7 +72,7 @@ class PythonRobustness(unittest.TestCase):
                     marker = json.loads(data.decode("utf-8"))
                     test.markers.append(marker)
                     status = test.begin_status if marker["type"] == "begin" else test.end_status
-                    body = json.dumps(test.marker_body).encode("utf-8")
+                    body = json.dumps(test.marker_body).encode("utf-8") if test.marker_raw is None else test.marker_raw
                     partial = test.partial_marker
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
@@ -386,6 +387,22 @@ class PythonRobustness(unittest.TestCase):
         self.file()
         self.marker_body = []
         self.assertEqual(self.run_collector(), 0, self.output)
+
+    def test_hostile_marker_json_does_not_crash_the_collector(self):
+        # Nesting deeper than the recursion limit made json.loads raise RecursionError
+        # (a RuntimeError), which was not caught: traceback, exit 1, no end marker.
+        self.file()
+        bodies = [b"[" * 30000 + b"]" * 30000,                       # under the size cap, too deep
+                  b"[" * 100000 + b"]" * 100000,                     # over the size cap
+                  b'{"scan_id":"' + b"x" * 100000 + b'"}']           # valid but oversized
+        for body in bodies:
+            self.marker_raw = body
+            del self.paths[:]
+            del self.uploads[:]
+            self.assertEqual(self.run_collector(), 0, self.output)
+            self.assertNotIn("Traceback", self.output)
+            self.assertEqual(len(self.uploads), 1)
+            self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
 
     def test_non_string_scan_id_is_not_used(self):
         self.file()

@@ -58,6 +58,7 @@ MIN_VERSION = (2, 7)
 VERSION = "0.2"
 MAX_RESPONSE = 1024 * 1024
 SEND_CHUNK = 64 * 1024
+MAX_MARKER_JSON = 64 * 1024
 hard_skips = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots"]
 skip_elements = [r"^/mnt(?:/|$)", r"\.dat$", r"\.npm", r"\.vmdk$",
                  r"\.vswp$", r"\.nvram$", r"\.vmsd$", r"\.lck$"]
@@ -218,13 +219,16 @@ class Collector(object):
                     log("[WARN] Collection markers unsupported (HTTP {})".format(response.status))
                     return True
                 if 200 <= response.status < 300:
-                    if kind == "begin":
+                    if kind == "begin" and len(body) > MAX_MARKER_JSON:
+                        log("[WARN] Ignoring oversized collection marker response")
+                    elif kind == "begin":
                         try:
                             data = json.loads(body.decode("utf-8"))
                             value = data.get("scan_id") if isinstance(data, dict) else None
                             if isinstance(value, text_type) and value:
                                 self.scan_id = value
-                        except (ValueError, UnicodeError):
+                        except (ValueError, UnicodeError, RuntimeError):
+                            # RuntimeError (RecursionError): nesting deeper than the recursion limit
                             pass
                     return True
                 raise ValueError("HTTP {}".format(response.status))
