@@ -1,4 +1,4 @@
-// +build aix android dragonfly linux darwin
+// +build aix android dragonfly linux
 
 package main
 

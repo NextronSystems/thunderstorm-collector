@@ -140,6 +140,10 @@ Analysis runs on the Thunderstorm server. Collection scope, file sizes, signatur
 
 Start with a small collection and inspect server load and results before increasing scope or concurrency. Adjust `--threads` and `--uploads-per-minute` to control upload pressure. Asynchronous acceptance means the server accepted a file; check analysis completion separately.
 
+### Filesystem Types
+
+Unless `--all-filesystems` is set, the collector does not walk directories on pseudo or network filesystems. Linux recognises them by the statfs magic number and macOS by the filesystem type name (`devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`). Other platforms, including Windows and FreeBSD, do not detect filesystem types; use `--exclude` for such paths.
+
 ### File Filtering Logic
 
 The collector uses a two-stage filtering approach for optimal performance:
