@@ -182,6 +182,29 @@ exit 1
         self.assertIn("first 4096 diagnostic bytes", self.output)
         self.assertLess(len(self.output), 8192)
 
+    def test_server_must_be_a_plain_host_name_and_secrets_are_never_logged(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        log = self.root / "collector.log"
+        for bad in ["user:s3cret@127.0.0.1", "http://127.0.0.1", "127.0.0.1:8080", "127.0.0.1/path",
+                    "127.0.0.1#fragment", "127.0.0.1?query", "-option", "host name", "127.0.0.1\n",
+                    "s3cret@", "[::1", "::1"]:
+            with self.subTest(server=bad):
+                self.requests.clear()
+                result = self.run_collector("--server", bad, log_file=log)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("Server must be a DNS name", self.output)
+                self.assertEqual(self.requests, [])
+                self.assertNotIn("s3cret", self.output)
+                self.assertNotIn("s3cret", log.read_text())
+
+    def test_valid_server_forms_pass_validation(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        for good in ["localhost", "127.0.0.1", "thunderstorm.example-1.org", "[::1]"]:
+            with self.subTest(server=good):
+                result = self.run_collector("--server", good, "--dry-run")
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertNotIn("Server must be", self.output)
+
     def test_control_characters_never_reach_the_multipart_header(self):
         # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
         # other than TAB or DEL in a part header, so the file would never be collected.

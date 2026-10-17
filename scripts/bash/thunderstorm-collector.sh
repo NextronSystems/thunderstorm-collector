@@ -1033,6 +1033,15 @@ parse_args() {
     done
 }
 
+# A host name or address only: no scheme, credentials, port or path. curl would
+# send user:password@ as Basic authentication and the URL is logged, so a secret
+# in this field would end up in the log file, syslog and the process list.
+is_valid_server() {
+    local LC_ALL=C
+    local pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$'
+    [[ "$1" =~ $pattern ]]
+}
+
 validate_config() {
     is_integer "$THUNDERSTORM_PORT" || die "Port must be numeric: '$THUNDERSTORM_PORT'"
     is_integer "$MAX_AGE" || die "max-age must be numeric: '$MAX_AGE'"
@@ -1047,6 +1056,8 @@ validate_config() {
     [ "$RETRIES" -le 10 ] || die "retries must be <= 10"
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST."
+    is_valid_server "$THUNDERSTORM_SERVER" ||
+        die "Server must be a DNS name, IPv4 address or bracketed IPv6 address, without a scheme, credentials, port or path"
     if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
         die "At least one directory is required"
     fi
