@@ -105,6 +105,10 @@ SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts cgroup cgroup2 pstore bpf tr
 CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive iCloudDrive Nextcloud ownCloud MEGA MEGAsync Tresorit SyncThing"
 CLOUD_DIR_NAMES_SPACED="Google Drive|iCloud Drive"
 CLOUD_DIR_PATTERNS="OneDrive -|OneDrive-|Nextcloud-"
+# Lowercase copies for the case-insensitive per-file comparison in is_cloud_path.
+CLOUD_DIR_NAMES_LC="$(printf '%s' "$CLOUD_DIR_NAMES" | tr '[:upper:]' '[:lower:]')"
+CLOUD_DIR_NAMES_SPACED_LC="$(printf '%s' "$CLOUD_DIR_NAMES_SPACED" | tr '[:upper:]' '[:lower:]')"
+CLOUD_DIR_PATTERNS_LC="$(printf '%s' "$CLOUD_DIR_PATTERNS" | tr '[:upper:]' '[:lower:]')"
 
 # get_excluded_mounts: parse /proc/mounts and return mount points for
 # network and special filesystem types (NUL-delimited, like find -print0).
@@ -127,37 +131,36 @@ get_excluded_mounts() {
     done < "$mounts"
 }
 
-# is_cloud_path: check if a path contains a known cloud storage folder name.
-# Returns 0 (true) if it matches, 1 (false) otherwise.
+# is_cloud_path: check the directory components of a FILE path against the known
+# cloud storage folder names, never the file's own name: a regular file called
+# "mega", "syncthing" or "OneDrive-Setup.exe" is an ordinary sample. The path is
+# lowercased once and compared with the pre-lowercased names, so the check costs one
+# process per file. Returns 0 (true) if it matches, 1 (false) otherwise.
 is_cloud_path() {
-    local path_lower
-    path_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    local name name_lower
-    for name in $CLOUD_DIR_NAMES; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    local path_lower name
+    path_lower="$(printf '%s/' "${1%/*}" | tr '[:upper:]' '[:lower:]')"
+    for name in $CLOUD_DIR_NAMES_LC; do
         case "$path_lower" in
-            *"/$name_lower"/*|*"/$name_lower") return 0 ;;
+            *"/$name"/*) return 0 ;;
         esac
     done
     local old_ifs
     old_ifs="$IFS"
     IFS='|'
-    for name in $CLOUD_DIR_NAMES_SPACED; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    for name in $CLOUD_DIR_NAMES_SPACED_LC; do
         case "$path_lower" in
-            *"/$name_lower"/*|*"/$name_lower") IFS="$old_ifs"; return 0 ;;
+            *"/$name"/*) IFS="$old_ifs"; return 0 ;;
         esac
     done
-    for name in $CLOUD_DIR_PATTERNS; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    for name in $CLOUD_DIR_PATTERNS_LC; do
         case "$path_lower" in
-            *"/$name_lower"*) IFS="$old_ifs"; return 0 ;;
+            *"/$name"*) IFS="$old_ifs"; return 0 ;;
         esac
     done
     IFS="$old_ifs"
     # macOS: ~/Library/CloudStorage
     case "$path_lower" in
-        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+        */library/cloudstorage/*) return 0 ;;
     esac
     return 1
 }
@@ -184,7 +187,7 @@ send_interrupted_marker() {
             _elapsed=$(( _now - START_TS ))
             [ "$_elapsed" -lt 0 ] && _elapsed=0
         fi
-        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${_elapsed}}"
+        local _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_elapsed}}"
         local _scheme="http"
         [ "$USE_SSL" -eq 1 ] && _scheme="https"
         local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
@@ -342,6 +345,9 @@ build_query_source() {
 }
 
 urlencode() {
+    # Bracket expressions are locale dependent: under en_US.UTF-8, Bash 3.2 and 5.2 on
+    # macOS match accented and Latin Extended letters as [a-zA-Z] and leave them raw.
+    local LC_ALL=C
     local input="$1"
     local out=""
     local i ch hex_bytes byte
@@ -368,12 +374,13 @@ urlencode() {
 
 sanitize_filename_for_multipart() {
     local input="$1"
-    # Keep multipart header/form attribute values simple and safe.
-    input="${input//\"/_}"
-    input="${input//;/_}"
-    input="${input//\\/_}"
-    input="${input//$'\r'/_}"
-    input="${input//$'\n'/_}"
+    # Keep multipart header/form attribute values simple and safe: quotes, backslashes
+    # and semicolons end the parameter value, and every control character (CR, LF, TAB,
+    # ESC, DEL, ...) makes a strict multipart parser reject the whole request, so the
+    # file would never be collected. Only this metadata changes, never the file bytes.
+    # (\134 is the backslash; no newline survives the replacement, so the command
+    # substitution cannot strip anything.)
+    input="$(printf '%s' "$input" | LC_ALL=C tr '"\134;\001-\037\177' '_')"
     [ -z "$input" ] && input="sample.bin"
     printf "%s" "$input"
 }
@@ -588,7 +595,9 @@ upload_with_curl() {
     : > "$header_file" || return 91
 
     # Read through stdin so curl never interprets delimiters in the local path.
-    local form_arg="file=@-;filename=\"${safe_filename}\""
+    # Fix the part type: curl would otherwise guess it from the file name (text/plain
+    # for .txt, image/jpeg for .jpg, no Content-Type header for unknown extensions).
+    local form_arg="file=@-;type=application/octet-stream;filename=\"${safe_filename}\""
 
     run_http curl --disable --noproxy '*' --globoff -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
         --connect-timeout 10 --max-time 300 \
@@ -1027,6 +1036,15 @@ parse_args() {
     done
 }
 
+# A host name or address only: no scheme, credentials, port or path. curl would
+# send user:password@ as Basic authentication and the URL is logged, so a secret
+# in this field would end up in the log file, syslog and the process list.
+is_valid_server() {
+    local LC_ALL=C
+    local pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$'
+    [[ "$1" =~ $pattern ]]
+}
+
 validate_config() {
     is_integer "$THUNDERSTORM_PORT" || die "Port must be numeric: '$THUNDERSTORM_PORT'"
     is_integer "$MAX_AGE" || die "max-age must be numeric: '$MAX_AGE'"
@@ -1041,6 +1059,8 @@ validate_config() {
     [ "$RETRIES" -le 10 ] || die "retries must be <= 10"
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST."
+    is_valid_server "$THUNDERSTORM_SERVER" ||
+        die "Server must be a DNS name, IPv4 address or bracketed IPv6 address, without a scheme, credentials, port or path"
     if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
         die "At least one directory is required"
     fi
@@ -1088,8 +1108,14 @@ main() {
         WGET_EXTRA_OPTS+=("--no-check-certificate")
     fi
     if [ -n "$CA_CERT" ]; then
-        CURL_EXTRA_OPTS+=("--cacert" "$CA_CERT")
-        WGET_EXTRA_OPTS+=("--ca-certificate=$CA_CERT")
+        # With only a CA file, curl keeps its built-in CA directory and GnuTLS wget its
+        # system trust, so the private CA would be trusted in addition to every system
+        # CA. An empty directory makes the configured CA the only trust anchor.
+        local ca_dir
+        ca_dir="$(mktemp -d "$WORK_DIR/empty-ca.XXXXXX")" ||
+            die "Cannot create a CA directory in the private temporary directory"
+        CURL_EXTRA_OPTS+=("--cacert" "$CA_CERT" "--capath" "$ca_dir")
+        WGET_EXTRA_OPTS+=("--ca-certificate=$CA_CERT" "--ca-directory=$ca_dir")
     fi
 
     query_source="$(build_query_source "$SOURCE_NAME")"
@@ -1227,7 +1253,10 @@ main() {
             find "$scandir" "${find_excludes[@]}" -type f -print0 > "$find_results_file" 2> "$WORK_DIR/find.stderr"
         fi
         if [ "$?" -ne 0 ]; then
-            log_msg warn "Incomplete scan of '$scandir': $(cat "$WORK_DIR/find.stderr")"
+            # Bound the diagnostics: log_msg collapses newlines with ${var//pat/rep}, which is
+            # super-linear on Bash 3.2, and a tree with thousands of unreadable
+            # directories would otherwise produce one warning of hundreds of kilobytes.
+            log_msg warn "Incomplete scan of '$scandir' (first 4096 diagnostic bytes): $(head -c 4096 "$WORK_DIR/find.stderr" 2>/dev/null)"
             SCAN_ERRORS=$((SCAN_ERRORS + 1))
         fi
         all_find_files+=("$find_results_file")
@@ -1310,7 +1339,7 @@ main() {
 
     # Send collection end marker with run statistics
     if [ "$DRY_RUN" -eq 0 ]; then
-        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"elapsed_seconds\":${elapsed}}"
+        local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${elapsed}}"
         collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null || {
             log_msg warn "Collection end marker failed; uploads may still have succeeded"
             return 1
