@@ -93,12 +93,15 @@ func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	if !templateSpecified {
 		template = defaultFilename
 	}
+	configSource = ConfigSource{Path: absolutePath(template), Explicit: templateSpecified}
 	f, err := os.Open(template)
 	if err != nil {
 		if templateSpecified {
 			return fmt.Errorf("Template file %s could not be opened: %v\n", template, err)
 		} else {
-			return nil // If we can't find the default template, don't give an error, just move on silently
+			// A missing default template is not an error; main logs that none was found.
+			configSource.OpenErr = err
+			return nil
 		}
 	}
 	defer f.Close()
@@ -108,5 +111,6 @@ func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	if err != nil {
 		return fmt.Errorf("Template file %s could not be parsed: %v\n", template, err)
 	}
+	configSource.Loaded = true
 	return nil
 }
