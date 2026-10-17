@@ -120,9 +120,12 @@ func buildStartupSummary(cc CollectorConfig) []string {
 	} else {
 		add("Exclude globs", "none")
 	}
-	if cc.AllFilesystems {
+	switch {
+	case cc.AllFilesystems:
 		add("Filesystems", "all filesystem types are scanned (--all-filesystems)")
-	} else {
+	case !filesystemTypesDetected:
+		add("Filesystems", "all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)")
+	default:
 		add("Filesystems", "network and pseudo filesystems are skipped (--all-filesystems includes them)")
 	}
 	if cc.Sync {
