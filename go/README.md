@@ -158,6 +158,8 @@ File-size limits are in MiB (1024 × 1024 bytes), with the exact boundary includ
 
 Transport errors and HTTP 503 share a budget of **three retries after the initial attempt**. Transport failures use exponential delays of 4, 8, and 16 seconds; HTTP 503 uses an integer `Retry-After` value capped at 120 seconds, or 30 seconds when it is missing or invalid. Other HTTP errors and response-body read failures are logged and counted without a retry. A lost response can still cause a duplicate submission.
 
+Upload file names are sent as a quoted `filename` parameter with `\` and `"` backslash-escaped and every control character except TAB, plus DEL, percent-encoded (for example `%0D`, `%0A`, `%1B`), so a hostile file name cannot add MIME headers, alter the uploaded content or make the server reject the upload, whichever Go version built the binary.
+
 Redirects (HTTP 3xx) are never followed, for the status check or for uploads. Replaying an upload against a redirect target would send a body-less request and could report a transfer that Thunderstorm never accepted, so a redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy in front of Thunderstorm if you see one.
 
 ### Exit Status

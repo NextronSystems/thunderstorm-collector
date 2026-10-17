@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -602,6 +603,37 @@ func (c *Collector) thunderstormUrl() string {
 	return fmt.Sprintf("%s/%s?%s", c.Server, apiEndpoint, urlParams.Encode())
 }
 
+// headerParamEscaper escapes a value placed inside a quoted MIME header parameter.
+// Backslash and double quote use backslash escapes. CR and LF are percent-encoded,
+// which is what CreateFormFile does since Go 1.26; earlier toolchains, including
+// the Go 1.10 used for most release binaries, leave them untouched, so a file name
+// containing them would inject MIME headers or end the part header early. The
+// other control characters (except TAB) and DEL are percent-encoded as well:
+// Go's multipart parser rejects such a header with "malformed MIME header line",
+// so the server would answer HTTP 400 and the file would never be collected. File
+// names on a host under investigation are untrusted.
+var headerParamEscaper = newHeaderParamEscaper()
+
+func newHeaderParamEscaper() *strings.Replacer {
+	pairs := []string{"\\", "\\\\", `"`, "\\\""}
+	for c := 0; c < 0x20; c++ {
+		if c != '\t' {
+			pairs = append(pairs, string(rune(c)), fmt.Sprintf("%%%02X", c))
+		}
+	}
+	return strings.NewReplacer(append(pairs, "\x7f", "%7F")...)
+}
+
+// formFileHeader returns the header of the multipart part that carries a file.
+func formFileHeader(fieldName string, fileName string) textproto.MIMEHeader {
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition",
+		fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+			headerParamEscaper.Replace(fieldName), headerParamEscaper.Replace(fileName)))
+	h.Set("Content-Type", "application/octet-stream")
+	return h
+}
+
 // getFileContentAsFormData creates multipart form data from a file for HTTP upload.
 // Returns the Content-Type header value (including boundary) and a PipeReader for the form data.
 func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (string, *io.PipeReader) {
@@ -612,7 +644,7 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 		abspath = filename
 	}
 	go func() {
-		fw, err := w.CreateFormFile("file", abspath)
+		fw, err := w.CreatePart(formFileHeader("file", abspath))
 		if err != nil {
 			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %v", err))
 			return

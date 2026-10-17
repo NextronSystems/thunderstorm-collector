@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"io/ioutil"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -259,5 +261,46 @@ func TestStrayArgumentsAreDetected(t *testing.T) {
 		if strings.Join(got, "|") != strings.Join(tc.extra, "|") {
 			t.Errorf("%v: expected %v, got %v", tc.args, tc.extra, got)
 		}
+	}
+}
+
+// A file name is attacker-controlled on a host under investigation. Toolchains
+// before the one that percent-encodes CR and LF in multipart.Writer.CreateFormFile
+// (Go 1.10 builds most release binaries) would let it inject MIME headers into
+// the upload or end the part header early.
+func TestUploadFileNameCannotInjectPartHeaders(t *testing.T) {
+	hostile := "/data/evil\r\nContent-Transfer-Encoding: quoted-printable\r\nX-Injected: yes\r\n\r\nfake-body\"name\\x.exe\x1b[2K\x01\x7f\ttab"
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreatePart(formFileHeader("file", hostile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw.Write([]byte("REAL-CONTENT"))
+	w.Close()
+
+	r := multipart.NewReader(&buf, w.Boundary())
+	part, err := r.NextPart()
+	if err != nil {
+		t.Fatalf("the part did not parse: %v", err)
+	}
+	if len(part.Header) != 2 || part.Header.Get("Content-Type") != "application/octet-stream" {
+		t.Errorf("expected exactly Content-Disposition and Content-Type, got %v", part.Header)
+	}
+	if part.Header.Get("X-Injected") != "" || part.Header.Get("Content-Transfer-Encoding") != "" {
+		t.Errorf("file name injected MIME headers: %v", part.Header)
+	}
+	want := "/data/evil%0D%0AContent-Transfer-Encoding: quoted-printable%0D%0AX-Injected: yes%0D%0A%0D%0Afake-body\"name\\x.exe%1B[2K%01%7F\ttab"
+	// Parse Content-Disposition directly: Part.FileName() reduces the name to its
+	// base name in current Go versions but not in older ones.
+	if got := getFileName(part); got != want {
+		t.Errorf("file name did not survive escaping:\n got %q\nwant %q", got, want)
+	}
+	body, err := ioutil.ReadAll(part)
+	if err != nil || string(body) != "REAL-CONTENT" {
+		t.Errorf("payload changed: %q (%v)", body, err)
+	}
+	if _, err := r.NextPart(); err != io.EOF {
+		t.Errorf("expected exactly one part, next part error: %v", err)
 	}
 }
