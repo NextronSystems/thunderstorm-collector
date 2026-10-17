@@ -1239,7 +1239,10 @@ main() {
             find "$scandir" "${find_excludes[@]}" -type f -print0 > "$find_results_file" 2> "$WORK_DIR/find.stderr"
         fi
         if [ "$?" -ne 0 ]; then
-            log_msg warn "Incomplete scan of '$scandir': $(cat "$WORK_DIR/find.stderr")"
+            # Bound the diagnostics: log_msg collapses newlines with ${var//pat/rep}, which is
+            # super-linear on Bash 3.2, and a tree with thousands of unreadable
+            # directories would otherwise produce one warning of hundreds of kilobytes.
+            log_msg warn "Incomplete scan of '$scandir' (first 4096 diagnostic bytes): $(head -c 4096 "$WORK_DIR/find.stderr" 2>/dev/null)"
             SCAN_ERRORS=$((SCAN_ERRORS + 1))
         fi
         all_find_files+=("$find_results_file")

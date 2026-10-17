@@ -162,6 +162,26 @@ class BashRobustnessTests(unittest.TestCase):
                 self.assertEqual(len(self.uploads), len(names), self.output)
                 self.assertEqual(self.part_types, ["application/octet-stream"] * len(names))
 
+    def test_traversal_diagnostics_are_bounded_without_losing_partial_results(self):
+        sample = self.samples / "real.txt"
+        sample.write_bytes(b"readable")
+        path = self.tool_path(find='''#!/bin/sh
+printf '%s\\000' "$SAMPLE"
+i=0
+while [ "$i" -lt 3000 ]; do
+    echo "find: '/some/unreadable/directory-$i': Permission denied" >&2
+    i=$((i + 1))
+done
+exit 1
+''')
+        (Path(path) / "curl").symlink_to(shutil.which("curl"))
+        result = self.run_collector(env={"PATH": path, "SAMPLE": str(sample)})
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assert_payloads([b"readable"])
+        self.assertIn("Incomplete scan", self.output)
+        self.assertIn("first 4096 diagnostic bytes", self.output)
+        self.assertLess(len(self.output), 8192)
+
     def test_control_characters_never_reach_the_multipart_header(self):
         # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
         # other than TAB or DEL in a part header, so the file would never be collected.
