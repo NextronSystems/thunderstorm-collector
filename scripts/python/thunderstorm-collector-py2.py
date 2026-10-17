@@ -133,8 +133,10 @@ def is_cloud_path(path):
 
 def _build_multipart_preamble(boundary, filepath):
     name = _bytes(filepath).replace(b"\\", b"/")
-    for char in (b'"', b";", b"\r", b"\n", b"\x00", b"\t"):
-        name = name.replace(char, b"_")
+    # Quotes and semicolons end the parameter value. Every control character (CR, LF,
+    # TAB, ESC, DEL, ...) makes a strict multipart parser reject the whole request, so the
+    # file would never be collected. Only this metadata changes, never the file bytes.
+    name = re.sub(br'[\x00-\x1f\x7f";]', b"_", name)
     return (b"--" + _bytes(boundary) +
             b'\r\nContent-Disposition: form-data; name="file"; filename="' +
             name + b'"\r\nContent-Type: application/octet-stream\r\n\r\n')

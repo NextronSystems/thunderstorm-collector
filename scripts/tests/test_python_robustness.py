@@ -46,6 +46,7 @@ class PythonRobustness(unittest.TestCase):
         self.samples = os.path.join(self.root, "samples")
         os.mkdir(self.samples)
         self.uploads = []
+        self.filenames = []
         self.markers = []
         self.paths = []
         self.upload_statuses = []
@@ -73,6 +74,8 @@ class PythonRobustness(unittest.TestCase):
                     partial = test.partial_marker
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    declared = re.search(b'filename="([^"]*)"', data.split(b"\r\n\r\n", 1)[0])
+                    test.filenames.append(declared.group(1) if declared else None)
                     mime = ("Content-Type: " + self.headers["Content-Type"] +
                             "\r\nMIME-Version: 1.0\r\n\r\n").encode("ascii") + data
                     parser = BytesParser()
@@ -150,6 +153,25 @@ class PythonRobustness(unittest.TestCase):
                 expected = source.encode("utf-8") if MAJOR == 2 else source
                 self.assertEqual(query["source"], [expected])
                 self.assertEqual(query["scan_id"], ["scan + & /"])
+
+    def test_control_characters_never_reach_the_multipart_header(self):
+        # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
+        # other than TAB or DEL in a part header, so the file would never be collected.
+        controls = [b"\x01", b"\x08", b"\x0b", b"\x0c", b"\x1b", b"\x1f", b"\x7f", b"\t", b"\r", b"\n"]
+        for index, control in enumerate(controls):
+            name = b"ctl" + str(index).encode("ascii") + control + b"name.exe"
+            self.file(name if MAJOR == 2 else os.fsdecode(name), b"payload" + str(index).encode("ascii"))
+        nested = os.path.join(self.samples, "dir\x1b[2K\x01")
+        os.mkdir(nested)
+        with open(os.path.join(nested, "inside.txt"), "wb") as stream:
+            stream.write(b"nested")
+        self.assertEqual(self.run_collector(), 0, self.output)
+        expected = [b"payload" + str(i).encode("ascii") for i in range(len(controls))] + [b"nested"]
+        self.assertEqual(sorted(self.uploads), sorted(expected))
+        self.assertEqual(len(self.filenames), len(expected))
+        for name in self.filenames:
+            self.assertTrue(name is not None)
+            self.assertEqual(re.findall(b"[\x00-\x1f\x7f]", name), [], name)
 
     def test_dry_run_does_not_contact_unreachable_service(self):
         self.file()
