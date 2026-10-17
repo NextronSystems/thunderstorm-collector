@@ -281,14 +281,14 @@ class Collector(object):
 
     def upload(self, path, metadata):
         if self.args.dry_run:
-            log("[DRY-RUN] Would submit {}".format(_text(path)))
+            log("[DRY-RUN] Would submit {}".format(path))
             self.would_submit += 1
             return
         self.in_flight = path
         try:
             data = self.snapshot(path, metadata)
         except (IOError, OSError, ValueError) as error:
-            log("[ERROR] Cannot read {}: {}".format(_text(path), error))
+            log("[ERROR] Cannot read {}: {}".format(path, error))
             self.failed += 1
             self.in_flight = None
             return
@@ -331,9 +331,9 @@ class Collector(object):
                         delay = max(0, min(int(response.getheader("Retry-After", "2")), 120))
                     except (ValueError, TypeError):
                         delay = 2
-                log("[ERROR] Upload {}: HTTP {}".format(_text(path), response.status))
+                log("[ERROR] Upload {}: HTTP {}".format(path, response.status))
             except (IOError, OSError, ValueError, http_client.HTTPException) as error:
-                log("[ERROR] Upload {}: {}".format(_text(path), error))
+                log("[ERROR] Upload {}: {}".format(path, error))
             finally:
                 if connection is not None:
                     connection.close()
@@ -395,7 +395,7 @@ class Collector(object):
             path = os.path.realpath(os.path.abspath(path))
             if not os.path.isdir(path):
                 self.scan_errors += 1
-                log("[ERROR] Missing or invalid directory {}".format(_text(path)))
+                log("[ERROR] Missing or invalid directory {}".format(path))
             else:
                 roots.append(path)
         if not roots:
@@ -403,7 +403,7 @@ class Collector(object):
             return 2
         log("[INFO] Scan roots (recursive; exclusions apply):")
         for root in roots:
-            log("[INFO]   Scan root: {}".format(_text(root)))
+            log("[INFO]   Scan root: {}".format(root))
         log("[INFO] Limits: max-age={} days (0=disabled); max-size={} KiB; dry-run={}".format(
             self.args.max_age, self.args.max_size_kb, self.args.dry_run))
         hard_skips.extend(os.path.normpath(p) for p in get_excluded_mounts())

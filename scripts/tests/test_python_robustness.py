@@ -268,6 +268,25 @@ class PythonRobustness(unittest.TestCase):
             close()
         self.assertFalse(any(b"/api/check" in line for line in requests), requests)
 
+    def test_non_ascii_paths_do_not_abort_logging(self):
+        # On Python 2, "{}".format(_text(path)) mixed a byte-string template with a non-ASCII
+        # unicode argument: UnicodeEncodeError (a ValueError), caught by main() as a startup
+        # failure: exit 2, no summary, no end marker.
+        self.file(u"unicode-\u00e4.bin")
+        self.assertEqual(self.run_collector("--dry-run"), 0, self.output)
+        self.assertIn("Would submit: 1", self.output)
+        self.upload_statuses = [500]
+        self.assertEqual(self.run_collector(), 1, self.output)
+        self.assertIn("Failed: 1", self.output)
+        self.assertIn("HTTP 500", self.output)  # the failure was logged, and was not fatal
+        directory = os.path.join(self.root, u"m\u00fcller-root")
+        os.mkdir(directory)
+        with open(os.path.join(directory, "inside.bin"), "wb") as stream:
+            stream.write(b"inside")
+        del self.uploads[:]
+        self.assertEqual(self.run_collector(roots=[directory]), 0, self.output)
+        self.assertEqual(self.uploads, [b"inside"])
+
     def test_dry_run_does_not_contact_unreachable_service(self):
         self.file()
         self.assertEqual(self.run_collector("--dry-run", "--port", "1"), 0, self.output)
