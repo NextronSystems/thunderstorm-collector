@@ -804,6 +804,23 @@ exec "$REAL_FIND" "$@"
         self.assertEqual(self.requests, [])
 
     def test_sigterm_reports_interruption_and_cleans_workspace(self):
+        self.interruption_cleans_workspace(signal.SIGTERM)
+
+    def test_sighup_and_sigquit_report_interruption_and_clean_workspace(self):
+        # A closed terminal (SSH disconnect) sends HUP; dash and BusyBox ash do not run
+        # the EXIT trap when an untrapped signal kills the shell.
+        for number in (signal.SIGHUP, signal.SIGQUIT):
+            with self.subTest(signal=number):
+                self.markers.clear()
+                self.upload_started.clear()
+                self.release_upload.clear()
+                self.interruption_cleans_workspace(number)
+
+    def interruption_cleans_workspace(self, number):
+        # A runner that was started as a background job or under nohup passes "ignored" for INT, QUIT or
+        # HUP on to its children, and a shell cannot trap a signal that was ignored on entry.
+        for ignored in (signal.SIGHUP, signal.SIGQUIT):
+            self.addCleanup(signal.signal, ignored, signal.signal(ignored, signal.SIG_DFL))
         (self.samples / "real.txt").write_bytes(b"readable")
         self.pause_upload = True
         command = SHELL + [str(COLLECTOR), "--server", "127.0.0.1", "--port",
@@ -814,7 +831,7 @@ exec "$REAL_FIND" "$@"
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             self.assertTrue(self.upload_started.wait(timeout=10), "upload did not start")
-            process.send_signal(signal.SIGTERM)
+            process.send_signal(number)
             self.release_upload.set()
             output, _ = process.communicate(timeout=15)
         finally:

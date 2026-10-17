@@ -137,7 +137,7 @@ on_exit() {
 }
 
 on_signal() {
-    trap '' INT TERM
+    trap '' INT TERM HUP QUIT
     INTERRUPTED=1
     # Close file descriptors that may be open from the main loop
     exec 3<&- 4<&-
@@ -157,7 +157,10 @@ on_signal() {
 }
 
 trap on_exit 0
-trap on_signal INT TERM
+# dash and BusyBox ash do not run the EXIT trap when an untrapped signal kills the
+# shell, so a closed terminal (HUP) or QUIT would leave the workspace, which holds a
+# copy of the in-flight sample, behind. The next run over /tmp would then upload it.
+trap on_signal INT TERM HUP QUIT
 
 log_msg() {
     _lm_level="$1"
