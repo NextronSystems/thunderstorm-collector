@@ -310,6 +310,33 @@ class PythonRobustness(unittest.TestCase):
         self.assertEqual(self.run_collector(roots=[self.samples, other]), 0, self.output)
         self.assertEqual(len(self.uploads), 2)
 
+    def test_deep_directory_tree_does_not_abort_the_walk(self):
+        # os.walk recurses once per level before Python 3.12 and on Python 2, so a tree deeper
+        # than the recursion limit raised RecursionError and ended the whole run. The limit is
+        # lowered here instead of building a thousand levels, which macOS cannot hold.
+        import inspect
+        module = self.load_collector("collector_deep_walk")
+        depth = 60
+        directory = self.samples
+        for _ in range(depth):
+            directory = os.path.join(directory, "d")
+            os.mkdir(directory)
+        for name in ("deepest.bin", "second.bin"):
+            with open(os.path.join(directory, name), "wb") as stream:
+                stream.write(b"deep")
+        self.file("top.bin")
+        args = type("Args", (object,), dict(
+            tls=False, insecure=False, ca_cert=None, dry_run=True, sync=False, retries=1,
+            server="127.0.0.1", port=1, source="deep", max_size_kb=2048, max_age=0, progress=False))()
+        collector = module.Collector(args)
+        limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(len(inspect.stack()) + 25)
+        try:
+            collector.walk(self.samples)
+        finally:
+            sys.setrecursionlimit(limit)
+        self.assertEqual((collector.would_submit, collector.scan_errors, collector.failed), (3, 0, 0))
+
     def test_symlinks_and_fifo_not_uploaded(self):
         path = self.file()
         os.symlink(path, self.samples + "/link")

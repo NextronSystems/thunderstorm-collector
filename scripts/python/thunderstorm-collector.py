@@ -338,32 +338,52 @@ class Collector(object):
         self.failed += 1
         self.in_flight = None
 
-    def walk(self, root):
-        if self.excluded(root):
-            log("[SKIP] Excluded root {}".format(_text(root)))
-            return
-        for directory, directories, files in os.walk(root, followlinks=False,
-                                                    onerror=self.traversal_error):
-            directories[:] = [name for name in directories
-                              if not os.path.islink(os.path.join(directory, name)) and
-                              not self.excluded(os.path.join(directory, name))]
-            for name in files:
+    def entries(self, root):
+        """Yield (path, metadata, error) for every entry below root that is not a directory.
+
+        The walk is iterative and never follows links. os.walk is a recursive generator
+        before Python 3.12 (and on Python 2), so a directory tree deeper than the recursion
+        limit, a single mkdir -p of about 1000 one-character levels, would abort the whole
+        run with a RecursionError and leave the rest of the filesystem unscanned."""
+        stack = [root]
+        while stack:
+            directory = stack.pop()
+            try:
+                names = os.listdir(directory)
+            except (IOError, OSError) as error:
+                self.traversal_error(error)
+                continue
+            for name in names:
                 path = os.path.join(directory, name)
-                self.scanned += 1
                 try:
                     metadata = os.lstat(path)
                 except (IOError, OSError) as error:
-                    self.failed += 1
-                    log("[ERROR] Cannot stat {}: {}".format(_text(path), error))
+                    yield path, None, error
                     continue
-                if (not stat.S_ISREG(metadata.st_mode) or
-                        any(re.search(pattern, path) for pattern in skip_elements) or
-                        not self.eligible(metadata)):
-                    self.skipped += 1
-                    continue
-                self.upload(path, metadata)
-                if self.args.progress:
-                    log("[{} examined]".format(self.scanned))
+                if stat.S_ISDIR(metadata.st_mode):
+                    if not self.excluded(path):
+                        stack.append(path)
+                elif not (stat.S_ISLNK(metadata.st_mode) and os.path.isdir(path)):
+                    yield path, metadata, None
+
+    def walk(self, root):
+        if self.excluded(root):
+            log("[SKIP] Excluded root {}".format(root))
+            return
+        for path, metadata, error in self.entries(root):
+            self.scanned += 1
+            if error is not None:
+                self.failed += 1
+                log("[ERROR] Cannot stat {}: {}".format(path, error))
+                continue
+            if (not stat.S_ISREG(metadata.st_mode) or
+                    any(re.search(pattern, path) for pattern in skip_elements) or
+                    not self.eligible(metadata)):
+                self.skipped += 1
+                continue
+            self.upload(path, metadata)
+            if self.args.progress:
+                log("[{} examined]".format(self.scanned))
 
     def run(self):
         roots = []
