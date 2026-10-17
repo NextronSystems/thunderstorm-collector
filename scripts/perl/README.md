@@ -67,6 +67,8 @@ this profile. Errors and the startup scope are always reported.
 - --ssl verifies hostname and peer explicitly; --ca-cert FILE selects a CA; --insecure is explicit bypass. TLS-only options without --ssl are rejected, never silently converted to plaintext.
 - Dry-run sends no network requests, including markers, and does not prove file readability. Repeated --dir/-d options accumulate. Default root is /; use explicit approved roots.
 - Source (`--source` or legacy `--so`) is UTF-8 encoded in the query and JSON. Invalid filename bytes are replaced in metadata only; payloads remain unchanged. Port 1..65535; DNS/IPv4 or bracketed IPv6, subject to installed LWP/SSL support.
+- A reply must start with a real HTTP/1.x status line. LWP would read an SSH banner, SMTP greeting, TLS alert or HTML sent by a wrong port as an HTTP/0.9 success, so such a reply is a transport failure (exit 2 at the begin marker, otherwise a failed file).
+- The multipart file name has quotes, backslashes, semicolons and all control characters (including TAB, CR, LF and DEL) replaced by `_`; a strict multipart parser rejects control characters in a part header and the upload would never succeed. File bytes are untouched.
 
 | Exit | Meaning |
 |---|---|

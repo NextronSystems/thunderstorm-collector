@@ -221,6 +221,10 @@ sub request {
     die "No HTTP response\n" unless $resp;
     die "Transport aborted\n" if $resp->header('Client-Aborted') || $resp->header('X-Died') ||
         ($resp->header('Client-Warning') || '') =~ /Internal response/;
+    # LWP reads a reply without a valid HTTP status line (an SSH banner, an SMTP
+    # greeting, a TLS alert, HTML) as an HTTP/0.9 response with code 200 ("Assumed
+    # OK"); only a real HTTP/1.x status line is an answer from a web server.
+    die "Response is not HTTP/1.x\n" unless ($resp->protocol || '') =~ m{^HTTP/1\.[01]$};
     my $length = $resp->header('Content-Length');
     die "Incomplete/invalid response length\n"
         if defined $length && ($length !~ /^\d+$/ || length($resp->content) != $length);
@@ -302,7 +306,10 @@ sub upload {
     if ($@) { print STDERR "[ERROR] Cannot read $path: $@"; $failed++; return }
     if (!defined $data) { $skipped++; return }
     my $filename = $path;
-    $filename =~ s/[\\";\r\n\t\x00]/_/g;
+    # Control characters would make a strict multipart parser reject the whole upload
+    # (HTTP 400, the file is never collected); quotes, backslashes and semicolons end
+    # the parameter value. Only this metadata changes, never the file bytes.
+    $filename =~ s/[\\";\x00-\x1f\x7f]/_/g;
     $filename = encode('UTF-8', decode('UTF-8', $filename, FB_DEFAULT));
     my $boundary = 'thunderstorm-' . $$ . '-' . time . '-' . int(rand(1_000_000_000));
     my $body = "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$filename\"\r\n" .
