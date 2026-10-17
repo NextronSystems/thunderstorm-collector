@@ -159,6 +159,11 @@ namespace ThunderstormCollector {
             X509Chain custom = new X509Chain();
             try {
                 custom.ChainPolicy.ExtraStore.Add(ca);
+                // Servers send their intermediate CAs; without them no chain can reach the root.
+                if (chain != null)
+                    foreach (X509ChainElement element in chain.ChainElements)
+                        if (element.Certificate.Thumbprint != leaf.Thumbprint)
+                            custom.ChainPolicy.ExtraStore.Add(element.Certificate);
                 custom.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
                 custom.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                 custom.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"));

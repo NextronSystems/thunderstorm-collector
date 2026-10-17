@@ -624,6 +624,23 @@ class PowerShellRobustness(ScanRootAssertions):
                                             prefix=prefix), 0, self.output)
         self.assertEqual(len(self.uploads), 1)
 
+    def test_custom_ca_accepts_a_chain_through_an_intermediate(self):
+        # The custom-root validation rebuilt the chain from the leaf with only the supplied
+        # root in the extra store, so a server that sends leaf + intermediate (the normal
+        # private PKI) was rejected with "TLS root differs from supplied CA".
+        pki = self.make_pki(intermediate=True)
+        self.serve_tls(pki["chain"], pki["key"])
+        self.file()
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["root"], "--server", "localhost"),
+                         0, self.output)
+        self.assertEqual(len(self.uploads), 1)
+        self.uploads[:] = []
+        # An unrelated root must still be refused, and so must a wrong host name.
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["other"], "--server", "localhost"),
+                         self.TLS_FAILURE_CODE, self.output)
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["root"]), self.TLS_FAILURE_CODE, self.output)
+        self.assertEqual(self.uploads, [])
+
     def test_profiles_share_the_reviewed_core(self):
         directory = os.path.dirname(SCRIPT)
         with open(os.path.join(directory, "thunderstorm-collector.ps1")) as stream:
