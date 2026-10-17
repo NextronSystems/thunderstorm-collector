@@ -142,7 +142,7 @@ Start with a small collection and inspect server load and results before increas
 
 ### Filesystem Types
 
-Unless `--all-filesystems` is set, the collector does not walk directories on pseudo or network filesystems. Linux recognises them by the statfs magic number and macOS by the filesystem type name (`devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`). Other platforms, including Windows and FreeBSD, do not detect filesystem types; use `--exclude` for such paths.
+Unless `--all-filesystems` is set, the collector does not walk directories on pseudo or network filesystems. Linux recognises them by the statfs magic number and macOS by the filesystem type name (`devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`). Other platforms, including Windows and FreeBSD, do not detect filesystem types; use `--exclude` for such paths. On those platforms the startup summary says so (`Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)`).
 
 ### File Filtering Logic
 
