@@ -143,6 +143,11 @@ def _build_multipart_preamble(boundary, filepath):
 
 
 def read_response(response):
+    # Python 2's httplib (strict=0) reads a reply without an HTTP status line, such as an
+    # SSH banner or HTML sent by a wrong port, as an HTTP/0.9 response with status 200.
+    # Python 3 raises BadStatusLine itself, where version is never 9.
+    if getattr(response, "version", 11) == 9:
+        raise ValueError("response is not HTTP/1.x")
     body = response.read(MAX_RESPONSE + 1)
     if len(body) > MAX_RESPONSE:
         raise ValueError("response exceeds 1 MiB limit")

@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -172,6 +173,99 @@ class PythonRobustness(unittest.TestCase):
         for name in self.filenames:
             self.assertTrue(name is not None)
             self.assertEqual(re.findall(b"[\x00-\x1f\x7f]", name), [], name)
+
+    def load_collector(self, name):
+        try:
+            from importlib.util import module_from_spec, spec_from_file_location
+            spec = spec_from_file_location(name, SCRIPT)
+            module = module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except ImportError:
+            import imp
+            module = imp.load_source(name, SCRIPT)
+        return module
+
+    def test_http09_response_object_is_rejected(self):
+        # Python 2's httplib reports a reply without a status line as HTTP/0.9 (version 9)
+        # with status 200; read_response must not let it count as an answer.
+        module = self.load_collector("collector_http09")
+        response = type("Response", (object,), dict(
+            version=9, status=200, read=lambda self, limit: b"SSH-2.0-OpenSSH_9.6\r\n",
+            getheader=lambda self, name: None))()
+        with self.assertRaises(ValueError):
+            module.read_response(response)
+
+    def raw_listener(self, reply, marker_reply):
+        """Listener that answers marker requests with marker_reply and everything else with
+        reply; both are raw bytes and need not be HTTP. Returns (port, requests, close)."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.2)
+        stop = threading.Event()
+        requests = []
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except (socket.timeout, socket.error):
+                    continue
+                try:
+                    connection.settimeout(3)
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        chunk = connection.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    head = data.split(b"\r\n\r\n", 1)[0]
+                    request_line = head.split(b"\r\n", 1)[0]
+                    requests.append(request_line)
+                    length = re.search(b"(?i)content-length:\\s*(\\d+)", head)
+                    remaining = int(length.group(1)) - len(data.split(b"\r\n\r\n", 1)[1]) if length else 0
+                    while remaining > 0:
+                        chunk = connection.recv(min(65536, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                    connection.sendall(marker_reply if b"/api/collection" in request_line else reply)
+                except (socket.error, ValueError):
+                    pass
+                finally:
+                    connection.close()
+
+        thread = threading.Thread(target=serve)
+        thread.daemon = True
+        thread.start()
+
+        def close():
+            stop.set()
+            thread.join(5)
+            listener.close()
+        return listener.getsockname()[1], requests, close
+
+    def test_reply_without_http_status_line_is_not_success(self):
+        # Python 2's httplib reads such a reply as HTTP/0.9 with status 200.
+        garbage = b"SSH-2.0-OpenSSH_9.6\r\n"
+        not_found = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+        for reply in (garbage, b"220 smtp.example.com ESMTP\r\n", b"<html>blocked</html>",
+                      b"\x15\x03\x01\x00\x02\x02\x46"):
+            self.file()
+            port, requests, close = self.raw_listener(reply, not_found)
+            try:
+                code = self.run_collector("--port", str(port))
+            finally:
+                close()
+            self.assertEqual(code, 1, (reply, self.output))
+            self.assertIn("Failed: 1", self.output)
+            self.assertIn("Submitted: 0", self.output)
+        port, requests, close = self.raw_listener(garbage, garbage)
+        try:
+            self.assertEqual(self.run_collector("--port", str(port)), 2, self.output)
+        finally:
+            close()
+        self.assertFalse(any(b"/api/check" in line for line in requests), requests)
 
     def test_dry_run_does_not_contact_unreachable_service(self):
         self.file()
