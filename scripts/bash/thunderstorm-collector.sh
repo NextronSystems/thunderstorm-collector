@@ -345,6 +345,9 @@ build_query_source() {
 }
 
 urlencode() {
+    # Bracket expressions are locale dependent: under en_US.UTF-8, Bash 3.2 and 5.2 on
+    # macOS match accented and Latin Extended letters as [a-zA-Z] and leave them raw.
+    local LC_ALL=C
     local input="$1"
     local out=""
     local i ch hex_bytes byte

@@ -215,6 +215,19 @@ exit 1
         self.assertEqual(self.markers[-1]["type"], "end")
         self.assertEqual((stats["scan_errors"], stats["submitted"], stats["failed"]), (1, 1, 0))
 
+    def test_source_is_percent_encoded_in_any_locale(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        source = u"Fall-M\u00fcller-\u0141\u00f3d\u017a-\u00e4\u00f6\u00df"
+        for locale in ("C", "en_US.UTF-8", "de_DE.UTF-8", "C.UTF-8"):
+            with self.subTest(locale=locale):
+                self.requests.clear()
+                result = self.run_collector("--source", source, env={"LC_ALL": locale})
+                self.assertEqual(result.returncode, 0, self.output)
+                uploads = [path for path in self.requests if path.startswith("/api/check")]
+                self.assertEqual(len(uploads), 1)
+                self.assertTrue(uploads[0].isascii(), uploads[0])
+                self.assertEqual(parse_qs(urlsplit(uploads[0]).query)["source"], [source])
+
     def test_control_characters_never_reach_the_multipart_header(self):
         # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
         # other than TAB or DEL in a part header, so the file would never be collected.
