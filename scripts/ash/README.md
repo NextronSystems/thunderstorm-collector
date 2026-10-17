@@ -41,8 +41,8 @@ An empty value exits 2 with instructions. `SCAN_DIRS` contains one recursive roo
 per line inside the quotes; spaces within a line belong to that path. Review the
 broad shipped Linux roots before running. The first `--dir` replaces the header
 list; further `--dir` options add roots. Other CLI values override their header
-defaults. `--no-ssl`, `--verify-tls`, `--async`, `--no-dry-run` and `--no-debug`
-disable corresponding header choices.
+defaults. `--no-ssl`, `--verify-tls`, `--no-dry-run` and `--no-debug` disable
+corresponding header choices.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
 files are not collected. The console and enabled file/syslog destinations print
@@ -61,7 +61,7 @@ output. Keep externally captured logs outside the input directories.
 - Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
 - A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
 - Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and CR/LF with underscores.
-- Async `/api/checkAsync` submission by default; `--sync` uses `/api/check`. Async success means accepted, not analysis completed. The collector does not poll async results.
+- Async `/api/checkAsync` submission only; there is no synchronous mode. Async success means accepted, not analysis completed. The collector does not poll async results.
 - Optional begin/end/interrupted `/api/collection` markers. HTTP 404/501 is nonfatal and supplies no scan ID. Other begin failures retry once after two seconds, then abort; end failures produce a nonzero exit.
 - Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
 - Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID and a warning is emitted. This bounds parser work on older awk runtimes.
@@ -157,14 +157,13 @@ collect() {
 
 Use a shell without `set -e` for intentionally failing cases. Keep output and exit codes. Use separate source identifiers when otherwise repeated runs would be mixed in the service.
 
-### 2. Positive Uploads and Sync Mode
+### 2. Positive Uploads
 
 ```sh
 collect --dir "$ROOT/input"
-collect --dir "$ROOT/input" --sync --source manual-ash-sync-yourname
 ```
 
-Each run: exit 0, `scanned=8 submitted=8 skipped=0 failed=0 scan_errors=0`. Verify **eight new uploads per run**, including empty, binary and nested files. Compare received sizes/hashes, not just success messages. Inspect completion of asynchronous analyses in the service; `/api/getAsyncResults?id=<returned-sample-id>` is the native result endpoint. Collector exit 0 alone does not prove completion. If benign results contain no attribution fields, record source/filename verification as NOT TESTED until logs/UI/backend records confirm it.
+Expect exit 0 and `scanned=8 submitted=8 skipped=0 failed=0 scan_errors=0`. Verify **eight new uploads**, including empty, binary and nested files. Compare received sizes/hashes, not just success messages. Inspect completion of asynchronous analyses in the service; `/api/getAsyncResults?id=<returned-sample-id>` is the native result endpoint. Collector exit 0 alone does not prove completion. If benign results contain no attribution fields, record source/filename verification as NOT TESTED until logs/UI/backend records confirm it.
 
 ### 3. TLS Trust
 

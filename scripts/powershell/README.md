@@ -33,8 +33,8 @@ Review the selected paths, then enable uploads explicitly:
 For PowerShell 2, copy and invoke `thunderstorm-collector-ps2.ps1` with the same
 parameters. For HTTPS, add `-UseSSL` and the endpoint's port; `-CACert` supports a
 private CA on .NET 4.5 or later, as detailed below. Dry-run makes no requests and
-does not check payload readability or TLS connectivity. Uploads are asynchronous
-by default; check received files and analysis results on the server. Follow the
+does not check payload readability or TLS connectivity. Uploads are always
+asynchronous; check received files and analysis results on the server. Follow the
 organization's execution policy for downloaded scripts and invoke the collector
 as a script, without dot-sourcing it.
 
@@ -64,7 +64,7 @@ selected roots. The collector does not create its own log file.
 | Selection | Recursive literal paths; no junctions/symlinks; built-in extension allowlist or explicit Extensions / AllExtensions. Known cloud folder names excluded. |
 | Age | Default 30 days; last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
 | Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
-| Upload | Binary-safe multipart file; empty files included. Async default, Sync optional; does not poll analysis results. |
+| Upload | Binary-safe multipart file; empty files included. Async `/api/checkAsync` only; does not poll analysis results. |
 | Collection markers | Optional /api/collection. Only 404/501 disable markers; other begin failures are fatal. Failed end markers cause nonzero exit. |
 | Marker IDs | Only top-level JSON object string IDs are used. Arrays, including single-element arrays, nested-only IDs and non-string IDs are ignored. |
 | Legacy JSON | PS2 needs .NET 3.5 System.Web.Extensions for marker parsing; if absent, markers are explicitly disabled, not parsed with regex. Uploads still work. |
@@ -159,7 +159,6 @@ Confirm the source string exactly where server output exposes it. Empty finding
 arrays are NOT proof of source metadata or byte integrity. Wait for async completion
 in the service before deciding whether scanning succeeded.
 
-Repeat with -Sync and a new source; still five uploads, now via /api/check.
 PS2 without a JSON parser may warn that collection markers are disabled; record
 NOT SUPPORTED rather than declaring the marker test passed.
 

@@ -202,6 +202,18 @@ upload_count() {
     find "$UPLOADS_DIR" -type f 2>/dev/null | wc -l | tr -d ' '
 }
 
+# Uploads are asynchronous: the stub's background worker stores the sample and
+# then writes its audit record, so poll for the record instead of assuming it
+# exists when the collector exits.
+wait_for_audit() {
+    local needle="$1" i
+    for ((i = 0; i < 100; i++)); do
+        grep -qF -- "$needle" "$AUDIT_LOG" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 # Extract stat from collector output: "scanned=4 submitted=3 ..."
 parse_collector_stat() {
     local output="$1" key="$2"
@@ -339,19 +351,20 @@ test_basic_async_upload() {
     fi
 }
 
-# ── 2. Basic upload (sync) ──────────────────────────────────────────────────
+# ── 2. Removed synchronous options are rejected ─────────────────────────────
 
-test_basic_sync_upload() {
-    has_stub_verification || { echo "    (skipped: sync scan too slow on external server)"; return 0; }
-    restart_stub
-    local d; d="$(create_sample_dir basic_sync)"
-    create_file "$d/sample.bin"
+test_removed_sync_options_rejected() {
+    local option out rc
+    for option in --sync --async; do
+        rc=0
+        out="$(bash "$COLLECTOR" \
+            --server 127.0.0.1 --port 8080 --no-log-file \
+            --dir /tmp --dry-run "$option" 2>&1)" || rc=$?
 
-    local out; out="$(run_collector --dir "$d" --sync --source sync-test --max-age 30)"
-    local submitted; submitted="$(parse_collector_stat "$out" submitted)"
-
-    assert_eq "submitted" "1" "$submitted" || return 1
-    assert_eq "upload_count" "1" "$(upload_count)" || return 1
+        assert_eq "$option exit code" "2" "$rc" || return 1
+        assert_contains "$option rejected" "Unknown option: $option" "$out" || return 1
+        assert_not_contains "$option started a run" "Started Thunderstorm Collector" "$out" || return 1
+    done
 }
 
 # ── 3. Dry-run: no uploads ──────────────────────────────────────────────────
@@ -449,8 +462,8 @@ test_source_parameter_received() {
     local d; d="$(create_sample_dir source_test)"
     create_file "$d/s.bin"
 
-    run_collector --dir "$d" --source "my-test-source" --sync --max-age 30 >/dev/null
-    sleep 0.3
+    run_collector --dir "$d" --source "my-test-source" --max-age 30 >/dev/null
+    wait_for_audit "my-test-source" || true
 
     # Check the JSONL audit log for the source
     assert_contains "source in audit log" "my-test-source" "$(cat "$AUDIT_LOG" 2>/dev/null)" || return 1
@@ -467,8 +480,8 @@ test_file_content_integrity() {
     create_file "$d/check.bin" "$content"
     local expected_sha; expected_sha="$(sha256sum "$d/check.bin" | awk '{print $1}')"
 
-    run_collector --dir "$d" --sync --max-age 30 >/dev/null
-    sleep 0.3
+    run_collector --dir "$d" --max-age 30 >/dev/null
+    wait_for_audit "$expected_sha" || true
 
     # Verify the uploaded file has the same hash
     local uploaded_file
@@ -650,8 +663,8 @@ test_source_url_encoding() {
     local d; d="$(create_sample_dir urlenc)"
     create_file "$d/a.bin"
 
-    run_collector --dir "$d" --source "host with spaces" --sync --max-age 30 >/dev/null
-    sleep 0.3
+    run_collector --dir "$d" --source "host with spaces" --max-age 30 >/dev/null
+    wait_for_audit "host with spaces" || true
 
     # The source should arrive at the server (URL-decoded)
     assert_contains "source in audit" "host with spaces" "$(cat "$AUDIT_LOG" 2>/dev/null)" || return 1
@@ -920,10 +933,10 @@ run_test test_invalid_max_age_rejected
 run_test test_invalid_max_size_rejected
 run_test test_missing_server_rejected
 run_test test_unknown_option_rejected
+run_test test_removed_sync_options_rejected
 
 # Functional tests (need stub server)
 run_test test_basic_async_upload
-run_test test_basic_sync_upload
 run_test test_dry_run_no_uploads
 run_test test_max_file_size_filter
 run_test test_max_age_filter

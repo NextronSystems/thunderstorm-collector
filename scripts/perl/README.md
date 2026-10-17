@@ -42,7 +42,7 @@ line. Set `$THUNDERSTORM_SERVER` (hostname/IP without scheme/port/path), optiona
 default root is `/`. Missing server configuration exits 2 with instructions.
 Command-line values override header values; the first `--dir` replaces the whole
 header root list, and further `--dir` options add roots. `--no-tls`, `--verify-tls`,
-`--async`, `--no-dry-run` and `--no-debug` disable corresponding header choices.
+`--no-dry-run` and `--no-debug` disable corresponding header choices.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
 files are intentionally not collected. The console log shows resolved roots and
@@ -60,7 +60,7 @@ this profile. Errors and the startup scope are always reported.
 - Built-in exclusions: /proc, /dev, /sys, /run, /snap, /.snapshots, Linux detected special/network mounts, known cloud folders, /mnt trees, .dat, .npm and .lck paths. These are best effort, not a security boundary.
 - Default age 30 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
 - Default size 2048 KiB; --max-size-kb 1..204800 includes exact limit. Bounded in-memory snapshot precedes network access; multipart construction needs several times the configured file size in RAM. Replaced/changed/unreadable files fail; newly oversized files are skipped. Not a filesystem-wide atomic snapshot.
-- Async /api/checkAsync, --sync uses /api/check. Complete 2xx means accepted, not finished analysis; no polling/resume/deduplication. Lost responses/retries can duplicate uploads.
+- Async /api/checkAsync only; no synchronous mode. Complete 2xx means accepted, not finished analysis; no polling/resume/deduplication. Lost responses/retries can duplicate uploads.
 - Optional markers: 404/501 nonfatal without scan ID; real JSON parsing rather than regex extraction. Only a top-level JSON string is used as the scan ID; numbers, booleans, arrays and objects are ignored. Begin retries once after two seconds, then exits 2; failed end exits 1. SIGINT/SIGTERM sets an interruption flag; network I/O completes or times out before best-effort interrupted marker and exit 1. No further uploads after interruption is observed.
 - --retries 1..10 counts total attempts; 503 integer Retry-After caps at 120 seconds, exponential delays at 60. No automatic redirects or environment-proxy discovery.
 - Upload timeout 30 seconds and marker timeout 10 are LWP idle-I/O limits, not whole-run deadlines. Response limit 1 MiB; aborted or length-incomplete 2xx responses fail. Chunked HTTP/HTTPS responses must include complete chunks, a terminating zero chunk and complete trailers; socket EOF cannot substitute for those delimiters, including on older LWP/Net::HTTP installations.
@@ -132,15 +132,13 @@ collect() {
 }
 ```
 
-### 2. Positive and Sync
+### 2. Positive Upload
 
 ```sh
 collect -d "$ROOT/input"
-SOURCE=manual-perl-sync-yourname
-collect -d "$ROOT/input" --sync
 ```
 
-Each: exit 0, seven accepted files including empty. Verify stored SHA-256/size
+Expect exit 0 and seven accepted files including empty. Verify stored SHA-256/size
 of every payload, wait for async completion, check source if exposed (otherwise
 NOT OBSERVABLE). Optional marker 404/501 is acceptable. Empty-file rejection is
 a real backend failure, not a successful skip. Change SOURCE for subsequent runs.

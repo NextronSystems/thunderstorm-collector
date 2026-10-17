@@ -25,7 +25,7 @@ Record these inputs in the new collector's README:
 | Service | Authorized host, port, HTTP/HTTPS, service version and authentication policy |
 | Roots | Explicit approved local directories; never assume a broad system scan is safe |
 | Selection | Recursion, extensions, size units/limit, age semantics and exclusions |
-| Transport | Async/sync, finite retries, timeouts and response-size limits |
+| Transport | Finite retries, timeouts and response-size limits |
 | Optional features | Collection markers, dry-run, signals, logging, CA configuration |
 | Restrictions | Unsupported filenames, mounts, paths, TLS modes or runtime features |
 | Evidence | Actual runtime tests available and tests requiring human acceptance |
@@ -44,8 +44,8 @@ fails. TLS is optional on an HTTP-only target; if HTTPS is offered, certificate
 and hostname verification must be the default. Unsupported HTTPS must fail
 clearly rather than downgrade to plaintext.
 
-Dry-run, markers, synchronous uploads, custom CAs, interruption handling, syslog,
-extension filters, deduplication, polling and resume are separate capabilities.
+Dry-run, markers, custom CAs, interruption handling, syslog, extension filters,
+deduplication, polling and resume are separate capabilities.
 Decide which to implement. Do not make an optional feature a hidden prerequisite
 for a service or platform that cannot support it.
 
@@ -74,14 +74,17 @@ tool builds matter as much as language syntax.
 
 | Operation | Request | Meaning |
 |---|---|---|
-| Async submission | POST `/api/checkAsync?source=<encoded-source>` | Accepted for asynchronous analysis |
-| Sync submission | POST `/api/check?source=<encoded-source>` | Analysis response returned with the request |
+| Async submission | POST `/api/checkAsync?source=<encoded-source>` | Accepted for asynchronous analysis; the only submission endpoint the reviewed script profiles use |
+| Sync submission | POST `/api/check?source=<encoded-source>` | Analysis response returned with the request; protocol background only, not implemented by the reviewed script profiles |
 | Optional result inspection | GET `/api/getAsyncResults?id=<encoded-job-id>` | Inspect one asynchronous sample job |
 | Optional service inspection | GET `/api/status` | Service counters, not proof of one file's attribution |
 | Optional collection lifecycle | POST `/api/collection` | Begin/end/interrupted markers where supported |
 
-Use the native `/api/...` paths. The older repository mock/API-proxy adapter's
-`/api/v1/...` rewriting is test infrastructure, not the native wire contract.
+The reviewed script profiles submit only to `/api/checkAsync` and have no
+synchronous mode; a new profile follows the same upload core, so it needs no
+sync/async decision. Use the native `/api/...` paths. The older repository
+mock/API-proxy adapter's `/api/v1/...` rewriting is test infrastructure, not the
+native wire contract.
 
 Validate scheme, host and port before network activity. Ports are 1..65535.
 Separate a host/IP parameter from a full URL unless a full-URL interface is
@@ -432,8 +435,8 @@ Target OS and architecture: <...>
 Allowed libraries/external tools and RAM/storage budget: <...>
 Delivery format: <standalone file or declared package>
 Authorized test endpoint/version/authentication policy: <...>
-Capability decisions: <recursion, extensions, size units, mtime policy, async/sync,
-markers, dry-run, TLS/custom CA, signals/logging, supported path encodings>
+Capability decisions: <recursion, extensions, size units, mtime policy, markers,
+dry-run, TLS/custom CA, signals/logging, supported path encodings>
 Accepted restrictions: <...>
 Actual target runtimes available for verification: <...>
 

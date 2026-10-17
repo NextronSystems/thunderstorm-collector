@@ -57,9 +57,8 @@ dd if=/dev/zero bs=1024 count=3072 2>/dev/null | tr '\0' 'A' > "$fixture"
 printf 'THUNDERSTORM_TEST_MATCH_STRING\n' >> "$fixture"
 source="perl-large-${WORK_DIR##*/}"
 echo "Running Perl collector..."
-# Sync makes the audit assertion independent of async worker scheduling.
 perl "$COLLECTOR" -s 127.0.0.1 -p "$STUB_PORT" --dir "$WORK_DIR/samples" \
-    --source "$source" --sync --max-age 0 --max-size-kb 4096 --retries 1 --no-progress 2>&1 | tail -3
+    --source "$source" --max-age 0 --max-size-kb 4096 --retries 1 --no-progress 2>&1 | tail -3
 
 python3 - "$STUB_LOG" "$fixture" "$source" <<'PY'
 import hashlib
@@ -67,6 +66,7 @@ import json
 import os
 import re
 import sys
+import time
 
 log, fixture, source = sys.argv[1:]
 with open(fixture, "rb") as stream:
@@ -74,11 +74,19 @@ with open(fixture, "rb") as stream:
 # Go's multipart parser retains only the basename. Both it and the source are
 # unique to this run; size and hash additionally verify the actual payload.
 filename = os.path.basename(re.sub(r'[\\";\r\n\t\x00]', '_', fixture))
-with open(log, encoding="utf-8") as stream:
-    records = [json.loads(line) for line in stream if line.strip()]
-matches = [entry["subject"] for entry in records
-           if entry.get("subject", {}).get("client_filename") == filename
-           and entry["subject"].get("source") == source]
+# Uploads are asynchronous: the stub's worker writes the audit record after the
+# collector has exited, so wait (bounded) for this run's record to appear.
+deadline = time.monotonic() + float(os.environ.get("STUB_AUDIT_WAIT_SECONDS", "30"))
+while True:
+    with open(log, encoding="utf-8") as stream:
+        # Only newline-terminated lines are complete records.
+        records = [json.loads(line) for line in stream.read().split("\n")[:-1] if line.strip()]
+    matches = [entry["subject"] for entry in records
+               if entry.get("subject", {}).get("client_filename") == filename
+               and entry["subject"].get("source") == source]
+    if matches or time.monotonic() >= deadline:
+        break
+    time.sleep(0.2)
 if len(matches) != 1:
     raise SystemExit("FAIL: expected exactly one upload from this test run")
 subject = matches[0]

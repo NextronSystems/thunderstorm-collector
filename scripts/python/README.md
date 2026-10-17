@@ -39,7 +39,7 @@ For the legacy variant, copy `scripts/python/thunderstorm-collector-py2.py` and
 substitute that filename and a Python 2.7 interpreter. For HTTPS, add `--tls` and
 the endpoint's port; use `--ca-cert /path/to/ca.pem` for a private CA. Python
 before 2.7.9 refuses verified HTTPS. Dry-run makes no requests and does not check
-payload readability or TLS connectivity. Uploads are asynchronous by default;
+payload readability or TLS connectivity. Uploads are always asynchronous;
 check received files and analysis results on the server.
 
 ## Configuration and Startup Output
@@ -51,7 +51,7 @@ filesystem root, subject to exclusions below. Missing server configuration exits
 2 with an instruction; supplying `--server HOST` also satisfies the requirement.
 Always select explicit roots. CLI values override header values. `--dirs`,
 `--dir` and `-d` are aliases: supplying any of them replaces the header root
-list, and repeated options accumulate. `--no-tls`, `--verify-tls`, `--async`,
+list, and repeated options accumulate. `--no-tls`, `--verify-tls`,
 `--no-dry-run` and `--no-debug` disable corresponding enabled header flags.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**. Older/larger
@@ -78,7 +78,7 @@ by the collector itself. Always review a dry-run before collecting real data.
   overhead in RAM. Changed/replaced/unreadable files fail. Files that grow past
   selectors before reading are skipped. No atomic filesystem snapshot or defense
   against privileged races.
-- Async `/api/checkAsync`; `--sync` selects `/api/check`. Complete 2xx means
+- Async `/api/checkAsync` only; no synchronous mode. Complete 2xx means
   accepted, not completed analysis. No polling, resume or deduplication.
 - Optional markers: 404/501 is nonfatal, without scan ID. Begin retries once
   after two seconds then exits 2; end failure exits 1. SIGINT/SIGTERM exits 1
@@ -159,15 +159,13 @@ summary, zero requests. Live: exit 2 at begin,
 zero uploads and connection errors. Port 1 must actually be closed. Use an
 external watchdog for slow networks; idle timeouts are not run deadlines.
 
-### 3. Positive and Sync
+### 3. Positive Upload
 
 ```sh
 collect -d "$ROOT/input"
-SOURCE=manual-python-sync-yourname
-collect -d "$ROOT/input" --sync
 ```
 
-Each: exit 0, seven accepted files including empty. Verify stored SHA-256/size
+Expect exit 0 and seven accepted files including empty. Verify stored SHA-256/size
 of every payload, wait for async completion, check source if exposed (otherwise
 NOT OBSERVABLE). Optional marker 404/501 is acceptable. Empty-file rejection is
 a real backend failure, not a successful skip. Change SOURCE for subsequent runs.

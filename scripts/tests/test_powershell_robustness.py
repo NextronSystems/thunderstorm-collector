@@ -223,8 +223,8 @@ class PowerShellRobustness(ScanRootAssertions):
         index = 0
         while index < len(extra):
             option = extra[index]
-            if option in ("--dry-run", "--sync"):
-                flags.append("DryRun" if option == "--dry-run" else "Sync")
+            if option == "--dry-run":
+                flags.append("DryRun")
                 index += 1
             elif option in ("--tls", "--insecure"):
                 flags.append("UseSSL" if option == "--tls" else "Insecure")
@@ -403,10 +403,29 @@ class PowerShellRobustness(ScanRootAssertions):
         self.assertEqual(self.run_collector("--retries", "2"), 1, self.output)
         self.assertEqual(sum("/api/check" in path for path in self.paths), 2)
 
-    def test_sync_endpoint(self):
+    def test_uploads_use_only_the_async_endpoint(self):
         self.file()
-        self.assertEqual(self.run_collector("--sync"), 0, self.output)
-        self.assertTrue(any(path.startswith("/api/check?") for path in self.paths))
+        self.assertEqual(self.run_collector(), 0, self.output)
+        uploads = [path for path in self.paths if not path.startswith("/api/collection")]
+        self.assertEqual(len(uploads), 1, self.paths)
+        self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
+
+    def test_removed_sync_parameter_is_rejected(self):
+        # PowerShell's own binder rejects unknown parameters before any script code runs. Use
+        # -File so the exit status shows it; the -Command wrapper of the other tests exits 0
+        # here because no native command ever sets $LASTEXITCODE.
+        self.file()
+        self.assertTrue(os.path.isfile(SCRIPT), "collector script is missing: " + SCRIPT)
+        process = subprocess.Popen(
+            [RUNTIME, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT,
+             "-ThunderstormServer", "127.0.0.1", "-ThunderstormPort", str(self.server.server_port),
+             "-Folder", self.samples, "-AllExtensions", "-Sync"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.root)
+        output = communicate_collector(process).decode("utf-8", "replace")
+        self.assertNotEqual(process.returncode, 0, output)
+        self.assertIn("Sync", output)
+        self.assertEqual(self.paths, [])
+        self.assertEqual(self.uploads, [])
 
     def test_configuration_bounds_before_network(self):
         for flag, value in [("--port", "0"), ("--port", "65536"), ("--retries", "0"),

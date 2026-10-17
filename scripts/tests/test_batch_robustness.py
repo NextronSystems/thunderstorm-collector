@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -40,6 +41,7 @@ print(json.dumps({"args": sys.argv[1:], "env": dict(os.environ),
             env = dict(os.environ, PROJECT_ROOT=str(repo), TEST_DATA_DIR=str(fixture), MOCK_PORT="19993",
                        MKTEMP_CMD="fixture_mktemp", CP_CMD="cp", RM_CMD="rm", CMD_CMD=str(command),
                        ADAPTER_COPY=str(copy), PATH=str(root) + os.pathsep + os.environ["PATH"])
+            env.pop("SYNC", None)  # only a SYNC exported by the adapter itself may fail this test
             adapter = repo / "tests/test-collectors.d/bat"
             body = 'set -e\nfixture_mktemp() { : > "$ADAPTER_COPY"; printf "%s\\n" "$ADAPTER_COPY"; }\n'
             body += 'to_native_path() { printf "%s\\n" "$1"; }\n'
@@ -53,11 +55,17 @@ print(json.dumps({"args": sys.argv[1:], "env": dict(os.environ),
             expected = dict(THUNDERSTORM_SERVER="127.0.0.1", THUNDERSTORM_PORT="19993",
                             COLLECT_DIRS=str(fixture), MAX_AGE="365", COLLECT_MAX_SIZE="3000000",
                             RELEVANT_EXTENSIONS=".txt;.log;.ps1;.tmp", CURL_PATH=str(curl),
-                            URL_SCHEME="http", DRY_RUN="0", SYNC="0", UPLOAD_ATTEMPTS="1")
+                            URL_SCHEME="http", DRY_RUN="0", UPLOAD_ATTEMPTS="1")
             for key, value in expected.items():
                 self.assertEqual(captured["env"][key], value, key)
+            self.assertNotIn("SYNC", captured["env"])
             self.assertEqual(captured["sha256"], hashlib.sha256(Path(SCRIPT).read_bytes()).hexdigest())
             self.assertFalse(copy.exists())
+
+    def test_collector_uses_only_the_async_endpoint(self):
+        source = Path(SCRIPT).read_text()
+        self.assertEqual(sorted(set(re.findall(r"/api/check\w*", source))), ["/api/checkAsync"])
+        self.assertNotRegex(source, r"\bSYNC\b")
 
     def test_adapter_rejects_unsupported_cli_arguments(self):
         adapter = Path(__file__).resolve().parents[2] / "tests/test-collectors.d/bat/build_command.sh"
@@ -76,7 +84,7 @@ class BatchRobustness(shared.PowerShellRobustness):
         self.environment.pop("CURL_CA_BUNDLE", None)
         self.environment.update({"THUNDERSTORM_SERVER": "127.0.0.1", "THUNDERSTORM_PORT": str(self.server.server_port),
                                  "MAX_AGE": "0", "UPLOAD_ATTEMPTS": "1", "SOURCE": "tests", "URL_SCHEME": "http",
-                                 "DRY_RUN": "0", "SYNC": "0", "RELEVANT_EXTENSIONS": "*",
+                                 "DRY_RUN": "0", "RELEVANT_EXTENSIONS": "*",
                                  "COLLECT_MAX_SIZE": "2097152", "COLLECT_DIRS": ";".join(kwargs.get("roots", [self.samples])),
                                  "CURL_PATH": shutil.which("curl.exe") or "C:\\missing-curl.exe"})
         temporary = os.path.join(self.root, "temporary")
@@ -88,8 +96,8 @@ class BatchRobustness(shared.PowerShellRobustness):
         index = 0
         while index < len(extra):
             option = extra[index]
-            if option in ("--dry-run", "--sync"):
-                self.environment["DRY_RUN" if option == "--dry-run" else "SYNC"] = "1"
+            if option == "--dry-run":
+                self.environment["DRY_RUN"] = "1"
                 index += 1
             elif option == "--tls":
                 self.environment["URL_SCHEME"] = "https"
@@ -100,6 +108,7 @@ class BatchRobustness(shared.PowerShellRobustness):
                     value = str(int(value) * 1048576)
                 self.environment[names[option]] = value
                 index += 2
+        self.environment.update(kwargs.get("env", {}))
         return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/v:off", "/c", SCRIPT]
 
     def run_collector(self, *extra, **kwargs):
@@ -131,7 +140,7 @@ class BatchRobustness(shared.PowerShellRobustness):
         configured.write_text(source)
         environment = dict(os.environ)
         for name in ("THUNDERSTORM_SERVER", "THUNDERSTORM_PORT", "COLLECT_DIRS", "SOURCE",
-                     "MAX_AGE", "COLLECT_MAX_SIZE", "RELEVANT_EXTENSIONS", "DRY_RUN", "SYNC",
+                     "MAX_AGE", "COLLECT_MAX_SIZE", "RELEVANT_EXTENSIONS", "DRY_RUN",
                      "URL_SCHEME", "CURL_CA_BUNDLE", "UPLOAD_ATTEMPTS", "CURL_PATH"):
             environment.pop(name, None)
         temporary = Path(self.root) / "header-temporary"
@@ -202,6 +211,15 @@ class BatchRobustness(shared.PowerShellRobustness):
 
     def test_profiles_share_the_reviewed_core(self):
         self.skipTest("PowerShell-only drift guard")
+
+    def test_removed_sync_parameter_is_rejected(self):
+        # Batch has no command-line parameters to reject; a SYNC variable left in the
+        # environment is simply not read, so uploads must still use the async endpoint.
+        self.file()
+        self.assertEqual(self.run_collector(env={"SYNC": "1"}), 0, self.output)
+        uploads = [path for path in self.paths if not path.startswith("/api/collection")]
+        self.assertEqual(len(uploads), 1, self.paths)
+        self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
 
     def test_failed_end_marker_is_failure(self):
         self.skipTest("Batch deliberately has no collection markers")

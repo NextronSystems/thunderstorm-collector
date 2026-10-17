@@ -8,7 +8,7 @@
 #  2.  Interrupted marker — SIGINT sends interrupted marker before exit
 #  3.  Dry-run mode — no uploads, no server contact (bash/ash/python/perl)
 #  4.  Source identifier — --source sets source field in collection markers
-#  5.  Sync mode — --sync uses /api/check instead of /api/checkAsync
+#  5.  Async-only uploads — the removed --sync/--async options are rejected
 #  6.  Multiple scan directories — scanning multiple dirs in one run
 #  7.  503 back-pressure — server returns 503, collector retries with Retry-After
 #  8.  Progress reporting — --progress flag doesn't crash, produces output
@@ -626,39 +626,35 @@ print(s)
     rm -rf "$fixtures"
 }
 
-# ── 5. Sync mode ───────────────────────────────────────────────────────────
-test_sync_mode() {
+# ── 5. Removed synchronous options ─────────────────────────────────────────
+test_removed_sync_option() {
     local collector="$1"
+    local options=(--sync --async)
 
-    # PS collectors don't support --sync flag
+    # PS has no --async; its removed switch is -Sync, rejected by the parameter binder
     case "$collector" in
-        ps3|ps2)
-            skip "$collector/sync-mode: not supported (PS always uses checkAsync)"
-            return
-            ;;
+        ps3|ps2) options=(-Sync) ;;
     esac
 
     clear_log
 
     local fixtures; fixtures="$(mktemp -d /tmp/oper-test-XXXXXX)"
-    echo "$MALICIOUS_CONTENT" > "$fixtures/sync-${collector}.exe"
+    echo "$MALICIOUS_CONTENT" > "$fixtures/removed-sync-${collector}.exe"
 
-    case "$collector" in
-        bash)   run_bash "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-        ash)    run_ash "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-        python) run_python "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-        perl)   run_perl "$fixtures" --max-age 30 --sync >/dev/null 2>&1 || true ;;
-    esac
-    sync_stub
+    local option rc
+    for option in "${options[@]}"; do
+        rc=0
+        run_collector "$collector" "$fixtures" --max-age 30 "$option" >/dev/null 2>&1 || rc=$?
+        sync_stub
 
-    # In sync mode, the stub logs the scan immediately (no async queue)
-    local entry; entry="$(query_log "sync-${collector}")"
-    if [ -n "$entry" ]; then
-        local score; score="$(echo "$entry" | head -1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('score',0))" 2>/dev/null)"
-        pass "$collector/sync-mode: file scanned synchronously (score=$score)"
-    else
-        fail "$collector/sync-mode: file not found in log"
-    fi
+        if [ "$rc" -eq 0 ]; then
+            fail "$collector/removed-sync-option: $option was accepted"
+        elif [ -n "$(query_log "removed-sync-${collector}")" ]; then
+            fail "$collector/removed-sync-option: $option was rejected but a file was uploaded"
+        else
+            pass "$collector/removed-sync-option: $option rejected (exit $rc), nothing uploaded"
+        fi
+    done
 
     rm -rf "$fixtures"
 }
@@ -1003,7 +999,7 @@ for collector in "${COLLECTORS[@]}"; do
     test_interrupted_marker "$collector"
     test_dry_run "$collector"
     test_source_identifier "$collector"
-    test_sync_mode "$collector"
+    test_removed_sync_option "$collector"
     test_multiple_dirs "$collector"
     test_503_backpressure "$collector"
     test_progress_reporting "$collector"

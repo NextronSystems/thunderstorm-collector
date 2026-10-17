@@ -35,7 +35,6 @@ my $MAX_SIZE_KB = 2048;      # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact 
 # No extension allowlist. Links, special/network FS, cloud paths and internal
 # exclusions (including /mnt, .dat, .npm and .lck paths) still apply.
 
-my $SYNC = 0;                # 0 = async submission; 1 = wait for analysis (--sync / --async).
 my $RETRIES = 3;             # TOTAL upload attempts including the first, 1..10.
 my $DRY_RUN = 0;             # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
 my $DEBUG = 0;               # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
@@ -115,7 +114,6 @@ my $size = $MAX_SIZE_KB;
 my $retries = $RETRIES;
 my $tls = $USE_TLS;
 my $insecure = $INSECURE;
-my $sync = $SYNC;
 my $dry = $DRY_RUN;
 my $debug = $DEBUG;
 my $help = 0;
@@ -125,8 +123,7 @@ GetOptions(
     'dir|d=s' => \@dirs, 'server|s=s' => \$server, 'port|p=i' => \$port,
     'source|so=s' => \$source, 'ssl|tls' => \$tls, 'insecure|k' => \$insecure,
     'no-tls|no-ssl' => sub { $tls = 0 }, 'verify-tls' => sub { $insecure = 0 },
-    'ca-cert=s' => \$ca, 'sync' => \$sync, 'dry-run' => \$dry,
-    'async' => sub { $sync = 0 }, 'no-dry-run' => sub { $dry = 0 },
+    'ca-cert=s' => \$ca, 'dry-run' => \$dry, 'no-dry-run' => sub { $dry = 0 },
     'max-age=i' => \$age, 'max-size-kb=i' => \$size, 'retries=i' => \$retries,
     'progress' => sub { $progress = 1 }, 'no-progress' => sub { $progress = 0 },
     'debug' => \$debug, 'no-debug' => sub { $debug = 0 }, 'help|h' => \$help
@@ -134,8 +131,8 @@ GetOptions(
 if ($help) {
     print "Usage: perl thunderstorm-collector.pl --server HOST --port 8080 --dir PATH\n",
           "Repeat --dir; --max-age 0 disables age filtering; --max-size-kb uses KiB.\n",
-          "--source TEXT --ssl [--ca-cert FILE|--insecure] --sync --dry-run --retries 1..10\n",
-          "Override enabled header flags: --no-tls --verify-tls --async --no-dry-run --no-debug\n";
+          "--source TEXT --ssl [--ca-cert FILE|--insecure] --dry-run --retries 1..10\n",
+          "Override enabled header flags: --no-tls --verify-tls --no-dry-run --no-debug\n";
     exit 0;
 }
 sub config_error { print STDERR "[ERROR] $_[0]\n"; exit 2 }
@@ -307,7 +304,7 @@ sub upload {
     my $boundary = 'thunderstorm-' . $$ . '-' . time . '-' . int(rand(1_000_000_000));
     my $body = "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$filename\"\r\n" .
                "Content-Type: application/octet-stream\r\n\r\n" . $data . "\r\n--$boundary--\r\n";
-    my $endpoint = $base . ($sync ? '/api/check' : '/api/checkAsync') . '?source=' . url_encode($source);
+    my $endpoint = $base . '/api/checkAsync?source=' . url_encode($source);
     $endpoint .= '&scan_id=' . url_encode($scan_id) if length $scan_id;
     for my $attempt (1 .. $retries) {
         last if $interrupted;

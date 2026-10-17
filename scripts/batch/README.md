@@ -41,7 +41,7 @@ set "DRY_RUN=0"
 For HTTPS, set `URL_SCHEME=https`, choose the endpoint's port and, if needed,
 set `CURL_CA_BUNDLE` to a PEM CA file. Dry-run makes no requests and does not check
 curl availability, payload readability or TLS connectivity. Uploads are
-asynchronous by default; check received files and analysis results on the server.
+always asynchronous; check received files and analysis results on the server.
 
 ## Configuration and Startup Output
 
@@ -71,7 +71,7 @@ output; the collector does not create a separate log itself.
 | Why curl 8.4+ | Earlier versions cannot bound unknown-length response downloads with max-filesize; see the official curl manual. Verify the binary supports the actual legacy Windows OS. |
 | Traversal | Recursive, literal filenames, skips reparse-point/junction entries and known cloud directory names. Not a filesystem sandbox. |
 | Filtering | MAX_AGE uses last modification time, days; default 30, 0 disables. COLLECT_MAX_SIZE is BYTES, inclusive, 1..209715200; default 2097152 (2 MiB). Extension list default .exe;.dll;.ps1;.bat;.txt; * includes all extensions. |
-| Upload | Binary/empty-file safe snapshots, one multipart file; async default, SYNC=1 optional. Source UTF-8 percent-encoded. |
+| Upload | Binary/empty-file safe snapshots, one multipart file; async `/api/checkAsync` only. Source UTF-8 percent-encoded. |
 | Deliberately absent | Collection markers/scan_id, interrupted markers, result polling, deduplication, resume, custom insecure TLS mode, syslog, parallelism. |
 | TLS | curl certificate/hostname verification stays enabled; CURL_CA_BUNDLE is passed explicitly as --cacert, including Schannel builds. No machine trust changes. |
 | Retries | UPLOAD_ATTEMPTS 1..10 TOTAL attempts, default 3; 503 Retry-After integer capped at 120 seconds. Each curl attempt has connect 10s / total 30s limits plus 40s process watchdog. |
@@ -135,7 +135,6 @@ set "COLLECT_MAX_SIZE=2097152"
 set "UPLOAD_ATTEMPTS=1"
 set "SOURCE=manual-batch-unique-tester-date"
 set "DRY_RUN=0"
-set "SYNC=0"
 ```
 
 Substitute your real service and a TRUSTED absolute curl path. Do not upload the
@@ -175,7 +174,6 @@ Independently compare sizes and SHA256 against service-side stored samples.
 Use certutil -hashfile with SHA256 where available or an approved hash utility.
 Confirm source exactly in service audit/findings if exposed; empty finding arrays
 do not establish source correctness. Wait for async analysis to finish separately.
-Repeat with SYNC=1 and a new source, then restore SYNC=0.
 
 ## 3. Unreachable and Missing Dependencies
 

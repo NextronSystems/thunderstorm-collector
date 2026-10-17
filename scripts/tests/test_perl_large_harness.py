@@ -51,7 +51,13 @@ subject = {"client_filename": fixture.name, "source": source, "size": len(payloa
 if mode == "bad-hash": subject["hashes"]["sha256"] = "wrong"
 if mode == "bad-size": subject["size"] = 0
 if mode == "old-source": subject["source"] = "old-run"
-if mode != "no-upload":
+if mode == "late-upload":
+    import subprocess
+    subprocess.Popen([sys.executable, "-c",
+                      "import sys, time; time.sleep(0.5); open(sys.argv[1], 'a').write(sys.argv[2])",
+                      log, json.dumps({"subject": subject}) + "\\n"], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+elif mode != "no-upload":
     with open(log, "a") as stream:
         stream.write(json.dumps({"subject": subject}) + "\\n")
 sys.exit(7 if mode == "fail-with-upload" else 0)
@@ -66,7 +72,7 @@ sys.exit(7 if mode == "fail-with-upload" else 0)
     def run_helper(self, **extra):
         env = dict(os.environ, PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
                    TMPDIR=str(self.root), STUB_BIN_PATH=str(self.stub), STUB_PORT="19993",
-                   HARNESS_STATE=str(self.state))
+                   STUB_AUDIT_WAIT_SECONDS="1", HARNESS_STATE=str(self.state))
         env.pop("STUB_LOG", None)
         env.update(extra)
         result = subprocess.run(["bash", str(self.helper)], env=env, capture_output=True, text=True, timeout=15)
@@ -79,6 +85,11 @@ sys.exit(7 if mode == "fail-with-upload" else 0)
 
     def test_current_matching_payload_passes_and_cleans_up(self):
         result = self.run_helper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("exact expected size and SHA-256", result.stdout)
+
+    def test_upload_recorded_after_the_collector_exits_is_accepted(self):
+        result = self.run_helper(FAKE_COLLECTOR="late-upload", STUB_AUDIT_WAIT_SECONDS="10")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("exact expected size and SHA-256", result.stdout)
 
