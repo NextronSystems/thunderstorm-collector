@@ -514,8 +514,10 @@ upload_with_curl() {
     set -- -sS -X POST --connect-timeout 10 --max-time 60 -o "$_uc_resp" -D "$_uc_hdr" -w '%{http_code}'
     [ "$INSECURE" -eq 1 ] && set -- "$@" -k
     [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
+    # Fix the part type: curl would otherwise guess it from the file name (text/plain
+    # for .txt, image/jpeg for .jpg, no Content-Type header for unknown extensions).
     set -- "$@" "$_uc_endpoint" \
-        -F "file=@-;filename=\"${_uc_safe_name}\""
+        -F "file=@-;type=application/octet-stream;filename=\"${_uc_safe_name}\""
 
     # Use -w to capture HTTP status code; do NOT use --fail so we can inspect 503
     _uc_http_code="$(run_http curl --disable --noproxy '*' --globoff "$@" < "$_uc_filepath" 2>"${_uc_resp}.err")"
