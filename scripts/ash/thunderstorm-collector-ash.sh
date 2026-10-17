@@ -56,6 +56,7 @@ SYSLOG_FACILITY="user"       # Used only when LOG_TO_SYSLOG=1.
 UPLOAD_TOOL=""
 WORK_DIR=""
 LOG_PATH=""
+CA_DIR=""         # empty directory that makes --ca-cert the only trust anchor
 SCAN_DIRS_SET=0   # 1 once the user has overridden via --dir
 
 FILES_SCANNED=0
@@ -517,7 +518,7 @@ upload_with_curl() {
     # Build TLS arguments safely to avoid word-splitting on paths with spaces
     set -- -sS -X POST --connect-timeout 10 --max-time 60 -o "$_uc_resp" -D "$_uc_hdr" -w '%{http_code}'
     [ "$INSECURE" -eq 1 ] && set -- "$@" -k
-    [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
+    [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT" --capath "$CA_DIR"
     # Fix the part type: curl would otherwise guess it from the file name (text/plain
     # for .txt, image/jpeg for .jpg, no Content-Type header for unknown extensions).
     set -- "$@" "$_uc_endpoint" \
@@ -613,7 +614,7 @@ upload_with_wget() {
     # Build TLS arguments safely to avoid word-splitting on paths with spaces
     set -- -O "$_uw_resp" -S --tries=1 --max-redirect=0 --connect-timeout=10 --read-timeout=60
     [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
-    [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT"
+    [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT" "--ca-directory=$CA_DIR"
     set -- "$@" --header="Content-Type: multipart/form-data; boundary=${_uw_boundary}" \
         --post-file="$_uw_body" \
         "$_uw_endpoint"
@@ -853,7 +854,7 @@ collection_marker() {
     if [ "$UPLOAD_TOOL" = curl ]; then
         set -- -sS -o "$_cm_resp" -D "$_cm_hdr" -w '%{http_code}' -H "Content-Type: application/json" -d "$_cm_body" --connect-timeout 5 --max-time 10
         [ "$INSECURE" -eq 1 ] && set -- "$@" -k
-        [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT"
+        [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT" --capath "$CA_DIR"
         set -- "$@" "$_cm_url"
         _cm_http_code="$(run_http curl --disable --noproxy '*' --globoff "$@" 2>/dev/null)"
         _cm_curl_rc=$?
@@ -868,7 +869,7 @@ collection_marker() {
     elif [ "$UPLOAD_TOOL" = wget ]; then
         set -- -O "$_cm_resp" -S --tries=1 --max-redirect=0 --header "Content-Type: application/json" --post-data "$_cm_body" --timeout=10
         [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
-        [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT"
+        [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT" "--ca-directory=$CA_DIR"
         set -- "$@" "$_cm_url"
         run_http wget --no-config --no-proxy "$@" 2>"$_cm_hdr"
         _cm_wget_rc=$?
@@ -1134,6 +1135,11 @@ main() {
     [ "$USE_SSL"    -eq 1 ] && _scheme="https"
     if [ -n "$CA_CERT" ]; then
         [ -f "$CA_CERT" ] || die "CA certificate file not found: '$CA_CERT'"
+        # With only a CA file, curl keeps its built-in CA directory and GnuTLS wget its
+        # system trust, so the private CA would be trusted in addition to every system
+        # CA. An empty directory makes the configured CA the only trust anchor.
+        CA_DIR="$(mktemp -d "$WORK_DIR/empty-ca.XXXXXX")" ||
+            die "Cannot create a CA directory in the private temporary directory"
     fi
 
     _query_source="$(build_query_source "$SOURCE_NAME")"
