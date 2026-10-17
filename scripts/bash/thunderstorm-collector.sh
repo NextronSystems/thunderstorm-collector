@@ -588,7 +588,9 @@ upload_with_curl() {
     : > "$header_file" || return 91
 
     # Read through stdin so curl never interprets delimiters in the local path.
-    local form_arg="file=@-;filename=\"${safe_filename}\""
+    # Fix the part type: curl would otherwise guess it from the file name (text/plain
+    # for .txt, image/jpeg for .jpg, no Content-Type header for unknown extensions).
+    local form_arg="file=@-;type=application/octet-stream;filename=\"${safe_filename}\""
 
     run_http curl --disable --noproxy '*' --globoff -sS --show-error -X POST "${CURL_EXTRA_OPTS[@]}" \
         --connect-timeout 10 --max-time 300 \

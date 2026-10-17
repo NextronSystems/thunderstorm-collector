@@ -33,6 +33,7 @@ class BashRobustnessTests(unittest.TestCase):
         self.samples.mkdir()
         self.requests = []
         self.uploads = []
+        self.part_types = []
         self.upload_statuses = []
         self.marker_status = 200
         self.end_status = 200
@@ -64,8 +65,12 @@ class BashRobustnessTests(unittest.TestCase):
                         headers = ("Content-Type: " + self.headers["Content-Type"] +
                                    "\r\nMIME-Version: 1.0\r\n\r\n").encode()
                         message = BytesParser(policy=email.policy.default).parsebytes(headers + data)
+                        parts = list(message.iter_parts())
                         test.uploads.extend((part.get_filename(), part.get_payload(decode=True))
-                                            for part in message.iter_parts())
+                                            for part in parts)
+                        # None records a part that carries no Content-Type header at all.
+                        test.part_types.extend(None if part["Content-Type"] is None else str(part["Content-Type"])
+                                               for part in parts)
                 self.send_response(status)
                 if test.redirect:
                     self.send_header("Location", "/unapproved-sink")
@@ -132,6 +137,26 @@ class BashRobustnessTests(unittest.TestCase):
         result = self.run_collector()
         self.assertEqual(result.returncode, 0, self.output)
         self.assert_payloads([("payload:" + name).encode() for name in names])
+
+    def test_file_part_is_always_octet_stream(self):
+        # curl guesses a part type from the file name unless one is given (text/plain
+        # for .txt, image/jpeg for .jpg, no header for unknown extensions).
+        names = ["notes.txt", "picture.jpg", "page.html", "document.docx", "unknown.nfo", "noextension"]
+        for name in names:
+            (self.samples / name).write_bytes(("payload:" + name).encode())
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        for transport, env in transports:
+            with self.subTest(transport=transport):
+                self.uploads.clear()
+                self.part_types.clear()
+                result = self.run_collector(env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertEqual(len(self.uploads), len(names), self.output)
+                self.assertEqual(self.part_types, ["application/octet-stream"] * len(names))
 
     def test_newline_root_does_not_scan_its_sibling(self):
         selected = self.root / "selected\n"
