@@ -444,6 +444,54 @@ class PythonRobustness(unittest.TestCase):
                 process.kill()
                 process.communicate()
 
+    def test_slow_but_steady_upload_is_not_cut_off_by_the_socket_timeout(self):
+        # Since Python 3.5 sendall() gives the socket timeout to the WHOLE buffer, so a sample
+        # that needs longer than the timeout to send failed although the server was reading.
+        module = self.load_collector("collector_slow_upload")
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        received = []
+
+        def serve():
+            connection, _ = listener.accept()
+            connection.settimeout(20)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += connection.recv(65536)
+            head, body = data.split(b"\r\n\r\n", 1)
+            length = int(re.search(b"(?i)content-length:\\s*(\\d+)", head).group(1))
+            while len(body) < length:
+                time.sleep(0.05)  # about 1 MiB/s: steady, never idle for long
+                body += connection.recv(65536)
+            received.append(len(body))
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            connection.close()
+
+        thread = threading.Thread(target=serve)
+        thread.daemon = True
+        thread.start()
+
+        class ShortTimeout(module.Collector):
+            def connection(self, timeout):
+                return module.Collector.connection(self, 1.5)
+
+        size = 6 * 1024 * 1024
+        path = self.file("big.bin", b"x" * size)
+        args = type("Args", (object,), dict(
+            tls=False, insecure=False, ca_cert=None, dry_run=False, sync=False, retries=1,
+            server="127.0.0.1", port=listener.getsockname()[1], source="slow",
+            max_size_kb=204800, max_age=0, progress=False))()
+        collector = ShortTimeout(args)
+        started = time.time()
+        collector.upload(path, os.lstat(path))
+        elapsed = time.time() - started
+        listener.close()
+        thread.join(5)
+        self.assertEqual((collector.submitted, collector.failed), (1, 0), elapsed)
+        self.assertTrue(elapsed > 1.5, "the upload did not outlast the socket timeout: %.1f s" % elapsed)
+        self.assertTrue(received and received[0] > size)
+
     def test_legacy_tls_fails_closed_without_verification_api(self):
         try:
             from importlib.util import module_from_spec, spec_from_file_location

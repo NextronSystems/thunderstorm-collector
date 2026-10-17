@@ -57,6 +57,7 @@ PYTHON_MAJOR = 2
 MIN_VERSION = (2, 7)
 VERSION = "0.2"
 MAX_RESPONSE = 1024 * 1024
+SEND_CHUNK = 64 * 1024
 hard_skips = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots"]
 skip_elements = [r"^/mnt(?:/|$)", r"\.dat$", r"\.npm", r"\.vmdk$",
                  r"\.vswp$", r"\.nvram$", r"\.vmsd$", r"\.lck$"]
@@ -309,7 +310,11 @@ class Collector(object):
                     connection.putheader(key, value)
                 connection.endheaders()
                 connection.send(preamble)
-                connection.send(data)
+                # Since Python 3.5, sendall() applies the socket timeout to the whole buffer, so
+                # one send of a large sample would give up after 30 seconds even while the server
+                # keeps reading. Chunks keep the documented idle-I/O semantics of the timeout.
+                for offset in range(0, len(data), SEND_CHUNK):
+                    connection.send(data[offset:offset + SEND_CHUNK])
                 connection.send(epilogue)
                 response = connection.getresponse()
                 read_response(response)
