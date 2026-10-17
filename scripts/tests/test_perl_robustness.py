@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import ssl
 import subprocess
 import sys
@@ -47,6 +48,7 @@ class PerlRobustness(unittest.TestCase):
         self.samples = os.path.join(self.root, "samples")
         os.mkdir(self.samples)
         self.uploads = []
+        self.filenames = []
         self.markers = []
         self.paths = []
         self.upload_statuses = []
@@ -81,6 +83,9 @@ class PerlRobustness(unittest.TestCase):
                         test.release.wait(8)
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    header_block = data.split(b"\r\n\r\n", 1)[0]
+                    declared = re.search(b'filename="([^"]*)"', header_block)
+                    test.filenames.append(declared.group(1) if declared else None)
                     mime = ("Content-Type: " + self.headers["Content-Type"] +
                             "\r\nMIME-Version: 1.0\r\n\r\n").encode("ascii") + data
                     parser = BytesParser()
@@ -168,6 +173,24 @@ class PerlRobustness(unittest.TestCase):
         self.file()
         self.assertEqual(self.run_collector("--dry-run", "--port", "1"), 0, self.output)
         self.assertEqual(self.paths, [])
+
+    @unittest.skipIf(MAJOR == 2, "Perl tests need a Python 3 host for bytes file names")
+    def test_control_characters_never_reach_the_multipart_header(self):
+        # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
+        # other than TAB or DEL in a part header, so the file would never be collected.
+        controls = [b"\x01", b"\x08", b"\x0b", b"\x0c", b"\x1b", b"\x1f", b"\x7f", b"\t", b"\r", b"\n"]
+        for index, control in enumerate(controls):
+            self.file(os.fsdecode(b"ctl%d" % index + control + b"name.exe"), b"payload%d" % index)
+        nested = os.path.join(self.samples, os.fsdecode(b"dir\x1b[2K\x01"))
+        os.mkdir(nested)
+        with open(os.path.join(nested, "inside.txt"), "wb") as stream:
+            stream.write(b"nested")
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual(sorted(self.uploads), sorted([b"payload%d" % i for i in range(len(controls))] + [b"nested"]))
+        self.assertEqual(len(self.filenames), len(controls) + 1)
+        for name in self.filenames:
+            self.assertIsNotNone(name)
+            self.assertIsNone(re.search(b"[\x00-\x1f\x7f]", name), name)
 
     def test_legacy_source_alias(self):
         self.file()
@@ -374,6 +397,88 @@ class PerlRobustness(unittest.TestCase):
         self.partial = True
         self.assertEqual(self.run_collector(), 1, self.output)
         self.assertIn("Submitted: 0", self.output)
+
+    def raw_server(self, upload_reply, marker_reply=b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"):
+        """Listener that answers marker requests with marker_reply (by default HTTP 404:
+        markers unsupported) and every other request with upload_reply. Both are raw
+        bytes and need not be HTTP."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.2)
+        stop = threading.Event()
+        requests = []
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except (socket.timeout, OSError):
+                    continue
+                try:
+                    connection.settimeout(3)
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        chunk = connection.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    head = data.split(b"\r\n\r\n", 1)[0]
+                    requests.append(head.split(b"\r\n", 1)[0].decode("latin-1"))
+                    length = re.search(br"(?i)content-length:\s*(\d+)", head)
+                    remaining = int(length.group(1)) - len(data.split(b"\r\n\r\n", 1)[1]) if length else 0
+                    while remaining > 0:
+                        chunk = connection.recv(min(65536, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                    if b"/api/collection" in head.split(b"\r\n", 1)[0]:
+                        connection.sendall(marker_reply)
+                    else:
+                        connection.sendall(upload_reply)
+                except (socket.error, OSError):
+                    pass
+                finally:
+                    connection.close()
+
+        thread = threading.Thread(target=serve)
+        thread.daemon = True
+        thread.start()
+
+        def close():
+            stop.set()
+            thread.join(5)
+            listener.close()
+        return listener.getsockname()[1], requests, close
+
+    def test_reply_without_http_status_line_is_not_success(self):
+        # LWP reads such a reply as HTTP/0.9 with code 200 ("Assumed OK").
+        replies = [b"SSH-2.0-OpenSSH_9.6\r\n", b"220 smtp.example.com ESMTP\r\n",
+                   b"<html>blocked</html>", b"\x15\x03\x01\x00\x02\x02\x46",
+                   b"HTTP/1.1 2000 OK\r\nContent-Length: 0\r\n\r\n"]
+        self.file()
+        for reply in replies:
+            port, requests, close = self.raw_server(reply)
+            try:
+                code = self.run_collector("--port", str(port))
+            finally:
+                close()
+            self.assertEqual(code, 1, (reply, self.output))
+            self.assertIn("Failed: 1", self.output)
+            self.assertIn("Submitted: 0", self.output)
+            self.assertTrue(any("/api/checkAsync" in line for line in requests), requests)
+
+    def test_reply_without_http_status_line_fails_the_begin_marker(self):
+        garbage = b"SSH-2.0-OpenSSH_9.6\r\n"
+        port, requests, close = self.raw_server(garbage, marker_reply=garbage)
+        try:
+            self.file()
+            code = self.run_collector("--port", str(port))
+        finally:
+            close()
+        self.assertEqual(code, 2, self.output)
+        self.assertIn("Collection begin", self.output)
+        self.assertFalse(any("/api/checkAsync" in line for line in requests), requests)
 
     def test_incomplete_begin_is_fatal(self):
         self.file()
