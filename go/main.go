@@ -220,4 +220,8 @@ func main() {
 	collector.StartWorkers()
 	collector.Collect()
 	collector.Stop()
+	if errorCount := collector.Statistics.ErrorCount(); errorCount > 0 {
+		logger.Printf("Collection finished with %d error(s), exiting with status 1", errorCount)
+		os.Exit(1)
+	}
 }

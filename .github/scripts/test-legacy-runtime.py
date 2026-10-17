@@ -65,7 +65,8 @@ try:
         for mode, count, successes, errors in [("success", 1, 1, 0), ("recover", 2, 1, 0), ("busy", 4, 0, 1), ("reject", 1, 0, 1)]:
             requests.clear()
             run = subprocess.run(command, capture_output=True, text=True, timeout=15)
-            assert run.returncode == 0, run.stdout + run.stderr
+            # A run in which an upload failed ends with status 1; a run without errors ends with 0.
+            assert run.returncode == (1 if errors else 0), (mode, run.returncode, run.stdout + run.stderr)
             assert len(requests) == count, (mode, requests, run.stdout)
             assert "Successfully uploaded: " + str(successes) in run.stdout, run.stdout
             assert "Read/transmission errors: " + str(errors) in run.stdout, run.stdout
