@@ -270,7 +270,7 @@ function Send-Marker([string]$kind) {
     if ($DryRun -or -not $script:markersEnabled) { return $true }
     $fields = '"type":"' + (Escape-Json $kind) + '","source":"' + (Escape-Json $Source) +
         '","hostname":"' + (Escape-Json ([Environment]::MachineName)) + '","collector":"' +
-        $collectorId + '","timestamp":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") + '"'
+        $collectorId + '","timestamp":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture) + '"'
     if ($scanId) { $fields += ',"scan_id":"' + (Escape-Json $scanId) + '"' }
     if ($kind -ne "begin") {
         $fields += ',"stats":{'

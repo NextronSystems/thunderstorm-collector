@@ -237,7 +237,7 @@ class PowerShellRobustness(ScanRootAssertions):
                 index += 2
         def literal(value):
             return "'" + str(value).replace("'", "''") + "'"
-        expression = "& " + literal(SCRIPT)
+        expression = kwargs.get("prefix", "") + "& " + literal(SCRIPT)
         for key, value in options.items():
             expression += " -" + key + " " + literal(value)
         expression += " -Folder @(" + ",".join(literal(root) for root in kwargs.get("roots", [self.samples])) + ")"
@@ -264,6 +264,23 @@ class PowerShellRobustness(ScanRootAssertions):
                 expected = source.encode("utf-8") if MAJOR == 2 else source
                 self.assertEqual(query["source"], [expected])
                 self.assertEqual(query["scan_id"], ["scan + & /"])
+
+    def test_marker_timestamps_ignore_the_host_culture(self):
+        # ToString("yyyy-MM-ddTHH:mm:ssZ") follows CurrentCulture: Thai (Buddhist year 2569),
+        # Arabic (Hijri) and Persian calendars, and the "." time separator of da-DK and fi-FI,
+        # gave a timestamp such as 2569-10-17T12:37:13Z or 2026-10-17T12.37.14Z.
+        self.file()
+        year = time.gmtime().tm_year
+        for culture in ("th-TH", "ar-SA", "fa-IR", "da-DK", "fi-FI"):
+            with self.subTest(culture=culture):
+                self.markers[:] = []
+                prefix = ("try { [Threading.Thread]::CurrentThread.CurrentCulture = "
+                          "[Globalization.CultureInfo]::GetCultureInfo('" + culture + "') } catch { }; ")
+                self.assertEqual(self.run_collector(prefix=prefix), 0, self.output)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+                for marker in self.markers:
+                    self.assertRegex(marker["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+                    self.assertIn(int(marker["timestamp"][:4]), (year - 1, year, year + 1), marker["timestamp"])
 
     def test_dry_run_does_not_contact_unreachable_service(self):
         self.file()
