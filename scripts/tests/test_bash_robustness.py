@@ -158,6 +158,26 @@ class BashRobustnessTests(unittest.TestCase):
                 self.assertEqual(len(self.uploads), len(names), self.output)
                 self.assertEqual(self.part_types, ["application/octet-stream"] * len(names))
 
+    def test_cloud_filter_matches_directories_not_regular_file_names(self):
+        # The file name is attacker-controlled: a sample called "mega" must be collected.
+        names = ["mega", "Dropbox", ".dropbox", "SyncThing", "OneDrive", "Nextcloud",
+                 "tresorit", "MEGAsync", "OneDrive-Setup.exe", "onedrive-update.exe",
+                 "Nextcloud-3.0.AppImage", "OneDrive -x.bin", "Google Drive", "iCloud Drive",
+                 "Google Drive notes.txt", "CloudStorage", "normal.txt"]
+        for name in names:
+            (self.samples / name).write_bytes(name.encode())
+        for name in ["Dropbox", "OneDrive - Company", "OneDrive-Corp", "Nextcloud-alice",
+                     "Library/CloudStorage"]:
+            folder = self.samples / "cloud" / name
+            folder.mkdir(parents=True)
+            (folder / "skip.txt").write_bytes(b"excluded")
+        folder = self.samples / "Google Drive notes"
+        folder.mkdir()
+        (folder / "keep.txt").write_bytes(b"ordinary-folder")
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([name.encode() for name in names] + [b"ordinary-folder"])
+
     def test_newline_root_does_not_scan_its_sibling(self):
         selected = self.root / "selected\n"
         selected.mkdir()

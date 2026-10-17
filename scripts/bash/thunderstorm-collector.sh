@@ -105,6 +105,10 @@ SPECIAL_FS_TYPES="proc procfs sysfs devtmpfs devpts cgroup cgroup2 pstore bpf tr
 CLOUD_DIR_NAMES="OneDrive Dropbox .dropbox GoogleDrive iCloudDrive Nextcloud ownCloud MEGA MEGAsync Tresorit SyncThing"
 CLOUD_DIR_NAMES_SPACED="Google Drive|iCloud Drive"
 CLOUD_DIR_PATTERNS="OneDrive -|OneDrive-|Nextcloud-"
+# Lowercase copies for the case-insensitive per-file comparison in is_cloud_path.
+CLOUD_DIR_NAMES_LC="$(printf '%s' "$CLOUD_DIR_NAMES" | tr '[:upper:]' '[:lower:]')"
+CLOUD_DIR_NAMES_SPACED_LC="$(printf '%s' "$CLOUD_DIR_NAMES_SPACED" | tr '[:upper:]' '[:lower:]')"
+CLOUD_DIR_PATTERNS_LC="$(printf '%s' "$CLOUD_DIR_PATTERNS" | tr '[:upper:]' '[:lower:]')"
 
 # get_excluded_mounts: parse /proc/mounts and return mount points for
 # network and special filesystem types (NUL-delimited, like find -print0).
@@ -127,37 +131,36 @@ get_excluded_mounts() {
     done < "$mounts"
 }
 
-# is_cloud_path: check if a path contains a known cloud storage folder name.
-# Returns 0 (true) if it matches, 1 (false) otherwise.
+# is_cloud_path: check the directory components of a FILE path against the known
+# cloud storage folder names, never the file's own name: a regular file called
+# "mega", "syncthing" or "OneDrive-Setup.exe" is an ordinary sample. The path is
+# lowercased once and compared with the pre-lowercased names, so the check costs one
+# process per file. Returns 0 (true) if it matches, 1 (false) otherwise.
 is_cloud_path() {
-    local path_lower
-    path_lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    local name name_lower
-    for name in $CLOUD_DIR_NAMES; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    local path_lower name
+    path_lower="$(printf '%s/' "${1%/*}" | tr '[:upper:]' '[:lower:]')"
+    for name in $CLOUD_DIR_NAMES_LC; do
         case "$path_lower" in
-            *"/$name_lower"/*|*"/$name_lower") return 0 ;;
+            *"/$name"/*) return 0 ;;
         esac
     done
     local old_ifs
     old_ifs="$IFS"
     IFS='|'
-    for name in $CLOUD_DIR_NAMES_SPACED; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    for name in $CLOUD_DIR_NAMES_SPACED_LC; do
         case "$path_lower" in
-            *"/$name_lower"/*|*"/$name_lower") IFS="$old_ifs"; return 0 ;;
+            *"/$name"/*) IFS="$old_ifs"; return 0 ;;
         esac
     done
-    for name in $CLOUD_DIR_PATTERNS; do
-        name_lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    for name in $CLOUD_DIR_PATTERNS_LC; do
         case "$path_lower" in
-            *"/$name_lower"*) IFS="$old_ifs"; return 0 ;;
+            *"/$name"*) IFS="$old_ifs"; return 0 ;;
         esac
     done
     IFS="$old_ifs"
     # macOS: ~/Library/CloudStorage
     case "$path_lower" in
-        */library/cloudstorage/*|*/library/cloudstorage) return 0 ;;
+        */library/cloudstorage/*) return 0 ;;
     esac
     return 1
 }
