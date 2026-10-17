@@ -1094,8 +1094,14 @@ main() {
         WGET_EXTRA_OPTS+=("--no-check-certificate")
     fi
     if [ -n "$CA_CERT" ]; then
-        CURL_EXTRA_OPTS+=("--cacert" "$CA_CERT")
-        WGET_EXTRA_OPTS+=("--ca-certificate=$CA_CERT")
+        # With only a CA file, curl keeps its built-in CA directory and GnuTLS wget its
+        # system trust, so the private CA would be trusted in addition to every system
+        # CA. An empty directory makes the configured CA the only trust anchor.
+        local ca_dir
+        ca_dir="$(mktemp -d "$WORK_DIR/empty-ca.XXXXXX")" ||
+            die "Cannot create a CA directory in the private temporary directory"
+        CURL_EXTRA_OPTS+=("--cacert" "$CA_CERT" "--capath" "$ca_dir")
+        WGET_EXTRA_OPTS+=("--ca-certificate=$CA_CERT" "--ca-directory=$ca_dir")
     fi
 
     query_source="$(build_query_source "$SOURCE_NAME")"

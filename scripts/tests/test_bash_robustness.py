@@ -189,6 +189,85 @@ class BashRobustnessTests(unittest.TestCase):
                     self.assertIsNotNone(name)
                     self.assertIsNone(re.search(b"[\x00-\x1f\x7f]", name), name)
 
+    def recording_tool(self, name):
+        return '''#!/bin/sh
+: > "$ARGS_FILE"
+check_directory() {
+    if [ -d "$1" ] && [ -z "$(find "$1" -mindepth 1 | head -1)" ]; then
+        echo CAPATH_IS_AN_EMPTY_DIRECTORY >> "$ARGS_FILE"
+    else
+        echo CAPATH_IS_NOT_AN_EMPTY_DIRECTORY >> "$ARGS_FILE"
+    fi
+}
+previous=""
+for argument do
+    printf 'ARG %s\\n' "$argument" >> "$ARGS_FILE"
+    [ "$previous" = --capath ] && check_directory "$argument"
+    case "$argument" in
+        --ca-directory=*) check_directory "${argument#--ca-directory=}" ;;
+    esac
+    previous="$argument"
+done
+exit 7
+'''
+
+    def test_ca_cert_replaces_system_trust_for_curl_and_wget(self):
+        # curl keeps its built-in CA directory and GnuTLS wget its system trust when only a
+        # CA file is passed; the empty directory makes --ca-cert the only trust anchor.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        cert = self.root / "ca.pem"
+        cert.write_text("not a real certificate; the recording tool never connects\n")
+        for name, expected in (("curl", ["ARG --cacert", "ARG " + str(cert), "ARG --capath"]),
+                               ("wget", ["ARG --ca-certificate=" + str(cert)])):
+            with self.subTest(transport=name):
+                shutil.rmtree(self.root / "tools", ignore_errors=True)
+                path = self.tool_path(**{name: self.recording_tool(name)})
+                args = self.root / (name + ".args")
+                result = self.run_collector("--ssl", "--ca-cert", str(cert),
+                                            env={"PATH": path, "ARGS_FILE": str(args)})
+                self.assertEqual(result.returncode, 2, self.output)
+                recorded = args.read_text().splitlines()
+                for line in expected:
+                    self.assertIn(line, recorded)
+                self.assertIn("CAPATH_IS_AN_EMPTY_DIRECTORY", recorded)
+                self.assertNotIn("CAPATH_IS_NOT_AN_EMPTY_DIRECTORY", recorded)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl required for local TLS fixture")
+    def test_ca_cert_trusts_the_configured_ca_and_rejects_an_unrelated_one(self):
+        # Guards the empty CA directory against TLS backends that mishandle it.
+        def run(*command):
+            subprocess.run(command, check=True, capture_output=True, cwd=self.root)
+        run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key",
+            "-out", "ca.pem", "-days", "1", "-subj", "/CN=Test Root CA")
+        run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "other.key",
+            "-out", "other.pem", "-days", "1", "-subj", "/CN=Unrelated CA")
+        run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", "leaf.key",
+            "-out", "leaf.csr", "-subj", "/CN=localhost")
+        (self.root / "leaf.cnf").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+                                            "extendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n")
+        run("openssl", "x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+            "-CAcreateserial", "-out", "leaf.pem", "-days", "1", "-extfile", "leaf.cnf")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.root / "leaf.pem", self.root / "leaf.key")
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        (self.samples / "real.txt").write_bytes(b"readable")
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        for name, env in transports:
+            with self.subTest(transport=name):
+                self.uploads.clear()
+                result = self.run_collector("--ssl", "--server", "localhost", "--ca-cert",
+                                            str(self.root / "other.pem"), env=env)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertEqual(self.uploads, [])
+                result = self.run_collector("--ssl", "--server", "localhost", "--ca-cert",
+                                            str(self.root / "ca.pem"), env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assert_payloads([b"readable"])
+
     def test_cloud_filter_matches_directories_not_regular_file_names(self):
         # The file name is attacker-controlled: a sample called "mega" must be collected.
         names = ["mega", "Dropbox", ".dropbox", "SyncThing", "OneDrive", "Nextcloud",
