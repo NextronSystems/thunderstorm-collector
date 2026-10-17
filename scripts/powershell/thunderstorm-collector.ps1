@@ -86,14 +86,39 @@ namespace ThunderstormCollector {
         private static bool insecure;
         private static string tlsError = "";
         private static ConsoleCancelEventHandler handler;
+        private static object savedGlobalCallback, savedLegacyPolicy;
+        private static bool tlsStateSaved;
+        // Default verification must not depend on ambient process state. An accept-all callback
+        // or legacy CertificatePolicy installed by a profile or a wrapper script (the common
+        // "ignore certificate errors" snippet) would silently switch certificate and hostname
+        // checks off for every HTTPS request. Reflection keeps old CLRs compiling.
+        private static void SetGlobalTlsState(ref object callback, ref object policy, bool clear) {
+            PropertyInfo callbackProperty = typeof(ServicePointManager).GetProperty("ServerCertificateValidationCallback");
+            PropertyInfo policyProperty = typeof(ServicePointManager).GetProperty("CertificatePolicy");
+            try {
+                if (clear) {
+                    if (callbackProperty != null) { callback = callbackProperty.GetValue(null, null); callbackProperty.SetValue(null, null, null); }
+                    if (policyProperty != null) { policy = policyProperty.GetValue(null, null); policyProperty.SetValue(null, null, null); }
+                } else {
+                    if (callbackProperty != null) callbackProperty.SetValue(null, callback, null);
+                    if (policyProperty != null) policyProperty.SetValue(null, policy, null);
+                }
+            } catch (Exception) { }
+        }
         public static void Start() {
             Interrupted = false;
             handler = new ConsoleCancelEventHandler(Cancel);
             Console.CancelKeyPress += handler;
+            SetGlobalTlsState(ref savedGlobalCallback, ref savedLegacyPolicy, true);
+            tlsStateSaved = true;
         }
         public static void Stop() {
             if (handler != null) Console.CancelKeyPress -= handler;
             handler = null;
+            if (tlsStateSaved) SetGlobalTlsState(ref savedGlobalCallback, ref savedLegacyPolicy, false);
+            tlsStateSaved = false;
+            savedGlobalCallback = null;
+            savedLegacyPolicy = null;
             if (ca != null) ca.Reset();
             ca = null;
             insecure = false;
