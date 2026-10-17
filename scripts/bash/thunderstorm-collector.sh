@@ -371,12 +371,13 @@ urlencode() {
 
 sanitize_filename_for_multipart() {
     local input="$1"
-    # Keep multipart header/form attribute values simple and safe.
-    input="${input//\"/_}"
-    input="${input//;/_}"
-    input="${input//\\/_}"
-    input="${input//$'\r'/_}"
-    input="${input//$'\n'/_}"
+    # Keep multipart header/form attribute values simple and safe: quotes, backslashes
+    # and semicolons end the parameter value, and every control character (CR, LF, TAB,
+    # ESC, DEL, ...) makes a strict multipart parser reject the whole request, so the
+    # file would never be collected. Only this metadata changes, never the file bytes.
+    # (\134 is the backslash; no newline survives the replacement, so the command
+    # substitution cannot strip anything.)
+    input="$(printf '%s' "$input" | LC_ALL=C tr '"\134;\001-\037\177' '_')"
     [ -z "$input" ] && input="sample.bin"
     printf "%s" "$input"
 }
