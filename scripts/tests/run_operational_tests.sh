@@ -8,7 +8,7 @@
 #  2.  Interrupted marker — SIGINT sends interrupted marker before exit
 #  3.  Dry-run mode — no uploads, no server contact (bash/ash/python/perl)
 #  4.  Source identifier — --source sets source field in collection markers
-#  5.  Async-only uploads — the removed --sync/--async options are rejected
+#  5.  Async-only uploads — the removed --sync option is rejected, --async stays accepted
 #  6.  Multiple scan directories — scanning multiple dirs in one run
 #  7.  503 back-pressure — server returns 503, collector retries with Retry-After
 #  8.  Progress reporting — --progress flag doesn't crash, produces output
@@ -626,14 +626,14 @@ print(s)
     rm -rf "$fixtures"
 }
 
-# ── 5. Removed synchronous options ─────────────────────────────────────────
+# ── 5. Removed --sync option, still-accepted --async ───────────────────────
 test_removed_sync_option() {
     local collector="$1"
-    local options=(--sync --async)
+    local option=--sync
 
     # PS has no --async; its removed switch is -Sync, rejected by the parameter binder
     case "$collector" in
-        ps3|ps2) options=(-Sync) ;;
+        ps3|ps2) option=-Sync ;;
     esac
 
     clear_log
@@ -641,20 +641,38 @@ test_removed_sync_option() {
     local fixtures; fixtures="$(mktemp -d /tmp/oper-test-XXXXXX)"
     echo "$MALICIOUS_CONTENT" > "$fixtures/removed-sync-${collector}.exe"
 
-    local option rc
-    for option in "${options[@]}"; do
-        rc=0
-        run_collector "$collector" "$fixtures" --max-age 30 "$option" >/dev/null 2>&1 || rc=$?
-        sync_stub
+    local rc=0
+    run_collector "$collector" "$fixtures" --max-age 30 "$option" >/dev/null 2>&1 || rc=$?
+    sync_stub
 
-        if [ "$rc" -eq 0 ]; then
-            fail "$collector/removed-sync-option: $option was accepted"
-        elif [ -n "$(query_log "removed-sync-${collector}")" ]; then
-            fail "$collector/removed-sync-option: $option was rejected but a file was uploaded"
-        else
-            pass "$collector/removed-sync-option: $option rejected (exit $rc), nothing uploaded"
-        fi
-    done
+    if [ "$rc" -eq 0 ]; then
+        fail "$collector/removed-sync-option: $option was accepted"
+    elif [ -n "$(query_log "removed-sync-${collector}")" ]; then
+        fail "$collector/removed-sync-option: $option was rejected but a file was uploaded"
+    else
+        pass "$collector/removed-sync-option: $option rejected (exit $rc), nothing uploaded"
+    fi
+
+    # Existing cron jobs may still pass --async; asynchronous is the only mode now
+    case "$collector" in
+        ps3|ps2)
+            skip "$collector/async-option: PS never had an async switch"
+            ;;
+        *)
+            echo "$MALICIOUS_CONTENT" > "$fixtures/async-flag-${collector}.exe"
+            rc=0
+            run_collector "$collector" "$fixtures" --max-age 30 --async >/dev/null 2>&1 || rc=$?
+            sync_stub
+
+            if [ "$rc" -ne 0 ]; then
+                fail "$collector/async-option: --async was rejected (exit $rc)"
+            elif [ -n "$(query_log "async-flag-${collector}")" ]; then
+                pass "$collector/async-option: --async accepted, file uploaded"
+            else
+                fail "$collector/async-option: --async accepted but file not found in log"
+            fi
+            ;;
+    esac
 
     rm -rf "$fixtures"
 }

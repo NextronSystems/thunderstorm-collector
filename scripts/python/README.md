@@ -78,7 +78,8 @@ by the collector itself. Always review a dry-run before collecting real data.
   overhead in RAM. Changed/replaced/unreadable files fail. Files that grow past
   selectors before reading are skipped. No atomic filesystem snapshot or defense
   against privileged races.
-- Async `/api/checkAsync` only; no synchronous mode. Complete 2xx means
+- Async `/api/checkAsync` only; no synchronous mode, and `--async` is accepted
+  and ignored so existing command lines keep working. Complete 2xx means
   accepted, not completed analysis. No polling, resume or deduplication.
 - Optional markers: 404/501 is nonfatal, without scan ID. Begin retries once
   after two seconds then exits 2; end failure exits 1. SIGINT/SIGTERM exits 1

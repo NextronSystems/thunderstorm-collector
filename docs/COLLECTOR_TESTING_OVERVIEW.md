@@ -82,12 +82,13 @@ The Windows workflow uses [verify_uploads.py](../scripts/tests/verify_uploads.py
 to wait for stored samples and compare their SHA-256 hashes.
 
 The script collectors are asynchronous-only. Each family's regression tests
-assert that uploads go only to `/api/checkAsync` and that a removed
-synchronous option is rejected like any other unknown option (for PowerShell,
-by the parameter binder). Batch has no command-line options: its POSIX adapter
-tests check that the source contains no other endpoint, and its Windows-only
-run checks that a stale `SYNC` environment variable does not change the
-endpoint.
+assert that uploads go only to `/api/checkAsync` and that the removed
+`--sync` option (PowerShell: `-Sync`) is rejected like any other unknown
+option (for PowerShell, by the parameter binder). The Bash, ash, Python and
+Perl tests also check that `--async` is still accepted, so existing cron jobs
+keep working. Batch has no command-line options: its POSIX adapter tests check
+that the source contains no other endpoint, and its Windows-only run checks
+that a stale `SYNC` environment variable does not change the endpoint.
 
 ## What Runs Automatically
 
@@ -125,7 +126,7 @@ all other focused suites present in a combined checkout.
 | Entry point | Role and automation boundary |
 |---|---|
 | [run_detection_tests.sh](../scripts/tests/run_detection_tests.sh) | Additional detection, path, filtering, and failure scenarios. Requires a suitable YARA-enabled stub and rules. Not executed as a suite by the script workflow; it receives a syntax check. |
-| [run_operational_tests.sh](../scripts/tests/run_operational_tests.sh) | Additional marker, interruption, source, removed-option rejection, multi-root, retry, progress, and fallback scenarios. Has its own stub/rule discovery and setup. Syntax-checked, not executed as a suite by that workflow. |
+| [run_operational_tests.sh](../scripts/tests/run_operational_tests.sh) | Additional marker, interruption, source, `--sync` rejection and `--async` acceptance, multi-root, retry, progress, and fallback scenarios. Has its own stub/rule discovery and setup. Syntax-checked, not executed as a suite by that workflow. |
 | [run_filter_tests.sh](../scripts/tests/run_filter_tests.sh) | Additional age, size, and extension checks. Requires an already-running stub, its audit log, and prepared fixtures. Syntax-checked, not executed as a suite by that workflow. |
 | [Collector Tests workflow](../.github/workflows/test-collectors.yml) | Runs `tests/test-collectors.sh all` against the separate mock/proxy setup, including the Go collector and older script adapters. Its Ubuntu run cannot establish native Batch execution. The harness requires Bash 4.3+ and GNU-compatible utilities. |
 | [ShellCheck workflow](../.github/workflows/shellcheck.yml) | Checks shell files under `tests/`; it does not automatically lint every collector under `scripts/`. |

@@ -406,6 +406,8 @@ def main():
     parser.add_argument("--max-age", type=int, default=MAX_AGE, help="Days; 0 disables age filtering")
     parser.add_argument("--max-size-kb", type=int, default=MAX_SIZE_KB, help="KiB; maximum 204800")
     parser.add_argument("--retries", type=int, default=RETRIES, help="Total attempts, including the first")
+    parser.add_argument("--async", dest="async_compat", action="store_true",
+                        help="Accepted for compatibility; uploads are always asynchronous")
     parser.add_argument("--dry-run", action="store_true", default=DRY_RUN)
     parser.add_argument("--no-dry-run", dest="dry_run", action="store_false")
     parser.add_argument("--debug", action="store_true", default=DEBUG)

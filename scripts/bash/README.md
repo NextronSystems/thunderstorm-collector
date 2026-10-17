@@ -54,7 +54,8 @@ console output. Keep externally captured logs outside the input directories.
   `--max-age 0` disables filtering; other values use `find -mtime -N`.
 - Default size limit: 2048 KiB. `--max-size-kb N` includes files up to `N * 1024`
   bytes, including empty files. Oversize files count as skipped.
-- HTTP/HTTPS, asynchronous `/api/checkAsync` only; there is no synchronous mode.
+- HTTP/HTTPS, asynchronous `/api/checkAsync` only; there is no synchronous mode,
+  and `--async` is accepted and ignored so existing command lines keep working.
   An accepted asynchronous upload does not mean analysis has finished.
 - TLS verification is enabled. `--ca-cert FILE` selects HTTPS and a trusted CA
   bundle. `--insecure` deliberately disables verification; do not use it as a

@@ -61,7 +61,7 @@ output. Keep externally captured logs outside the input directories.
 - Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
 - A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
 - Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and CR/LF with underscores.
-- Async `/api/checkAsync` submission only; there is no synchronous mode. Async success means accepted, not analysis completed. The collector does not poll async results.
+- Async `/api/checkAsync` submission only; there is no synchronous mode, and `--async` is accepted and ignored so existing command lines keep working. Async success means accepted, not analysis completed. The collector does not poll async results.
 - Optional begin/end/interrupted `/api/collection` markers. HTTP 404/501 is nonfatal and supplies no scan ID. Other begin failures retry once after two seconds, then abort; end failures produce a nonzero exit.
 - Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
 - Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID and a warning is emitted. This bounds parser work on older awk runtimes.

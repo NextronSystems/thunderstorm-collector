@@ -293,6 +293,7 @@ Options:
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
+  --async                    Accepted for compatibility; uploads are always asynchronous
   --retries <num>            Normal attempts per file, 1..10 (default: 3)
   --dry-run                  Do not upload or contact the server; only show what would be submitted
   --progress                 Force progress reporting
@@ -962,6 +963,9 @@ parse_args() {
                 CA_CERT="$2"
                 USE_SSL=1
                 shift
+                ;;
+            --async)
+                # Accepted for existing command lines such as cron jobs; uploads are always asynchronous.
                 ;;
             --retries)
                 [ -n "${2:-}" ] || die "Missing value for $arg"

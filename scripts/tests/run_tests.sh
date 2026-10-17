@@ -351,20 +351,33 @@ test_basic_async_upload() {
     fi
 }
 
-# ── 2. Removed synchronous options are rejected ─────────────────────────────
+# ── 2. --sync is rejected, --async stays accepted ───────────────────────────
 
-test_removed_sync_options_rejected() {
-    local option out rc
-    for option in --sync --async; do
-        rc=0
-        out="$(bash "$COLLECTOR" \
-            --server 127.0.0.1 --port 8080 --no-log-file \
-            --dir /tmp --dry-run "$option" 2>&1)" || rc=$?
+test_removed_sync_option_rejected() {
+    local out rc=0
+    out="$(bash "$COLLECTOR" \
+        --server 127.0.0.1 --port 8080 --no-log-file \
+        --dir /tmp --dry-run --sync 2>&1)" || rc=$?
 
-        assert_eq "$option exit code" "2" "$rc" || return 1
-        assert_contains "$option rejected" "Unknown option: $option" "$out" || return 1
-        assert_not_contains "$option started a run" "Started Thunderstorm Collector" "$out" || return 1
-    done
+    assert_eq "--sync exit code" "2" "$rc" || return 1
+    assert_contains "--sync rejected" "Unknown option: --sync" "$out" || return 1
+    assert_not_contains "--sync started a run" "Started Thunderstorm Collector" "$out" || return 1
+}
+
+test_async_option_accepted() {
+    # Existing cron jobs may still pass --async; asynchronous is the only mode now.
+    restart_stub
+    local d; d="$(create_sample_dir async_flag)"
+    create_file "$d/a.bin"
+
+    local out rc=0
+    out="$(run_collector --dir "$d" --async --source async-flag --max-age 30)" || rc=$?
+    local submitted; submitted="$(parse_collector_stat "$out" submitted)"
+
+    assert_eq "--async exit code" "0" "$rc" || return 1
+    assert_eq "submitted" "1" "$submitted" || return 1
+    wait_for_audit "async-flag" || true
+    assert_contains "upload reached the stub" "async-flag" "$(cat "$AUDIT_LOG" 2>/dev/null)" || return 1
 }
 
 # ── 3. Dry-run: no uploads ──────────────────────────────────────────────────
@@ -933,10 +946,11 @@ run_test test_invalid_max_age_rejected
 run_test test_invalid_max_size_rejected
 run_test test_missing_server_rejected
 run_test test_unknown_option_rejected
-run_test test_removed_sync_options_rejected
+run_test test_removed_sync_option_rejected
 
 # Functional tests (need stub server)
 run_test test_basic_async_upload
+run_test test_async_option_accepted
 run_test test_dry_run_no_uploads
 run_test test_max_file_size_filter
 run_test test_max_age_filter

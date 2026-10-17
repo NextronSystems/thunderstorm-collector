@@ -119,11 +119,13 @@ my $debug = $DEBUG;
 my $help = 0;
 my $progress = -t STDERR ? 1 : 0;
 Configure(qw(no_auto_abbrev no_ignore_case));
+# --async is accepted and ignored so existing cron jobs keep working; uploads are always asynchronous.
 GetOptions(
     'dir|d=s' => \@dirs, 'server|s=s' => \$server, 'port|p=i' => \$port,
     'source|so=s' => \$source, 'ssl|tls' => \$tls, 'insecure|k' => \$insecure,
     'no-tls|no-ssl' => sub { $tls = 0 }, 'verify-tls' => sub { $insecure = 0 },
     'ca-cert=s' => \$ca, 'dry-run' => \$dry, 'no-dry-run' => sub { $dry = 0 },
+    'async' => sub { },
     'max-age=i' => \$age, 'max-size-kb=i' => \$size, 'retries=i' => \$retries,
     'progress' => sub { $progress = 1 }, 'no-progress' => sub { $progress = 0 },
     'debug' => \$debug, 'no-debug' => sub { $debug = 0 }, 'help|h' => \$help
@@ -132,7 +134,8 @@ if ($help) {
     print "Usage: perl thunderstorm-collector.pl --server HOST --port 8080 --dir PATH\n",
           "Repeat --dir; --max-age 0 disables age filtering; --max-size-kb uses KiB.\n",
           "--source TEXT --ssl [--ca-cert FILE|--insecure] --dry-run --retries 1..10\n",
-          "Override enabled header flags: --no-tls --verify-tls --no-dry-run --no-debug\n";
+          "Override enabled header flags: --no-tls --verify-tls --no-dry-run --no-debug\n",
+          "--async is accepted for compatibility; uploads are always asynchronous.\n";
     exit 0;
 }
 sub config_error { print STDERR "[ERROR] $_[0]\n"; exit 2 }
