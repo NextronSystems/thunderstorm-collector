@@ -322,8 +322,12 @@ build_query_source() {
 }
 
 sanitize_filename_for_multipart() {
-    # No ${var//pat/rep} in ash — use sed + tr
-    printf '%s' "$1" | sed 's/["\\;]/_/g' | tr '\r\n' '__'
+    # No ${var//pat/rep} in ash, so use tr. Quotes, backslashes and semicolons end the
+    # parameter value, and every control character (CR, LF, TAB, ESC, DEL, ...) makes a
+    # strict multipart parser reject the whole request, so the file would never be
+    # collected. Only this metadata changes, never the file bytes. (\134 is the
+    # backslash; the replacement removes every newline, so nothing is stripped later.)
+    printf '%s' "$1" | LC_ALL=C tr '"\134;\001-\037\177' '_'
 }
 
 file_size_kb() {

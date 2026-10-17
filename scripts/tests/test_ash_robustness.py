@@ -34,6 +34,7 @@ class AshRobustnessTests(unittest.TestCase):
         self.samples.mkdir()
         self.requests = []
         self.uploads = []
+        self.filenames = []
         self.part_types = []
         self.markers = []
         self.upload_statuses = []
@@ -69,6 +70,9 @@ class AshRobustnessTests(unittest.TestCase):
                 else:
                     response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    header_block = data.split(b"\r\n\r\n", 1)[0]
+                    declared = re.search(b'filename="([^"]*)"', header_block)
+                    test.filenames.append(declared.group(1) if declared else None)
                     headers = ("Content-Type: " + self.headers["Content-Type"] +
                                "\r\nMIME-Version: 1.0\r\n\r\n").encode()
                     message = BytesParser(policy=email.policy.default).parsebytes(headers + data)
@@ -191,6 +195,37 @@ class AshRobustnessTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, self.output)
                 self.assertEqual(len(self.uploads), len(names), self.output)
                 self.assertEqual(self.part_types, ["application/octet-stream"] * len(names))
+
+    def test_control_characters_never_reach_the_multipart_header(self):
+        # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
+        # other than TAB or DEL in a part header, so the file would never be collected.
+        # (A literal newline in a path is unsupported by this collector.)
+        controls = [b"\x01", b"\x08", b"\x0b", b"\x0c", b"\x1b", b"\x1f", b"\x7f", b"\t", b"\r"]
+        for index, control in enumerate(controls):
+            (self.samples / os.fsdecode(b"ctl%d" % index + control + b"name.exe")).write_bytes(b"payload%d" % index)
+        nested = self.samples / os.fsdecode(b"dir\x1b[2K\x01")
+        nested.mkdir()
+        (nested / "inside.txt").write_bytes(b"nested")
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            transports.append(("wget", None))
+        if shutil.which("nc") and shutil.which("timeout"):
+            transports.append(("nc", None))
+        expected = [b"payload%d" % i for i in range(len(controls))] + [b"nested"]
+        for transport, env in transports:
+            with self.subTest(transport=transport):
+                if transport != "curl":
+                    shutil.rmtree(self.root / "tools", ignore_errors=True)
+                    env = {"PATH": self.real_tool_path(transport)}
+                self.uploads.clear()
+                self.filenames.clear()
+                result = self.run_collector(env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assert_payloads(expected)
+                self.assertEqual(len(self.filenames), len(expected))
+                for name in self.filenames:
+                    self.assertIsNotNone(name)
+                    self.assertIsNone(re.search(b"[\x00-\x1f\x7f]", name), name)
 
     def test_special_filenames_and_source_preserve_data(self):
         names = ["normal.txt", "semi;colon.txt", "comma,name.txt", 'double"quote.txt',
