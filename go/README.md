@@ -12,6 +12,8 @@ Run your executable with `--help` to see every available option and the effectiv
 
 The **Go collector** reads YAML. By default it looks for `config.yml` in the current working directory. Use `-t`/`--template` to select a configuration explicitly: a missing explicit file is an error, while an absent implicit `config.yml` falls back to built-in defaults. Those defaults include the filesystem root and no extension or magic-header filter.
 
+At startup the collector logs which configuration file it loaded, with its absolute path, or that it found none and uses the built-in defaults. A summary of the settings that decide what the run collects (scan roots, size and age limits, filters, upload mode and destination) follows. Both appear with `--dry-run` and in the `--logfile`. Because `config.yml` is read from the working directory rather than from the executable's directory, check these lines when the collector starts from cron, a service, or by absolute path.
+
 Command-line values override YAML values. The server can be set once as `thunderstorm-server: HOST` in the existing `config.yml`; from that directory, the executable then needs no flags for a normal collection. With the shipped configuration, only `-s HOST` is needed if the server is not stored in YAML. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
 
 For example, save this preview-first configuration as `my-config.yml`, replacing the input path and server:

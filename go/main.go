@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -207,6 +206,7 @@ func main() {
 		output = os.Stdout
 	}
 	logger := log.New(output, "", log.Ldate|log.Ltime)
+	logStartupSummary(logger, configSource, collectorConfig)
 	collector := NewCollector(collectorConfig, logger)
 	if !config.DryRun {
 		if err := collector.CheckThunderstormUp(); err != nil {
@@ -216,12 +216,6 @@ func main() {
 		}
 	} else {
 		logger.Print("DRY-RUN mode: Files will be collected but not sent to Thunderstorm")
-	}
-	if config.Debug {
-		if len(collectorConfig.FileExtensions) > 0 {
-			logger.Println("Collecting the following extensions:", strings.Join(collectorConfig.FileExtensions, ", "))
-		}
-		logger.Println("Collecting files younger than", collectorConfig.ThresholdTime.Format("02.01.2006 15:04:05"))
 	}
 	collector.StartWorkers()
 	collector.Collect()
