@@ -393,10 +393,28 @@ class PerlRobustness(unittest.TestCase):
         self.assertEqual(self.run_collector("--retries", "2"), 1, self.output)
         self.assertEqual(sum("/api/check" in path for path in self.paths), 2)
 
-    def test_sync_endpoint(self):
+    def test_uploads_use_only_the_async_endpoint(self):
         self.file()
-        self.assertEqual(self.run_collector("--sync"), 0, self.output)
-        self.assertTrue(any(path.startswith("/api/check?") for path in self.paths))
+        self.assertEqual(self.run_collector(), 0, self.output)
+        uploads = [path for path in self.paths if not path.startswith("/api/collection")]
+        self.assertEqual(len(uploads), 1, self.paths)
+        self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
+
+    def test_async_option_is_still_accepted(self):
+        # Existing cron jobs may still pass --async; asynchronous is the only mode now.
+        self.file()
+        self.assertEqual(self.run_collector("--async"), 0, self.output)
+        uploads = [path for path in self.paths if not path.startswith("/api/collection")]
+        self.assertEqual(len(uploads), 1, self.paths)
+        self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
+        self.assertEqual(len(self.uploads), 1)
+
+    def test_removed_sync_option_is_an_unknown_option(self):
+        self.file()
+        self.assertEqual(self.run_collector("--sync"), 2, self.output)
+        self.assertIn("Unknown option: sync", self.output)
+        self.assertEqual(self.paths, [])
+        self.assertEqual(self.uploads, [])
 
     def test_environment_proxy_is_not_implicitly_used(self):
         self.file()

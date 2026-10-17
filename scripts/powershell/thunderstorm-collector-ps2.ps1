@@ -32,7 +32,6 @@ param(
     [string]$CACert = "",
     [Alias("k")][switch]$Insecure = $false, # Keep false; explicit TLS testing only.
     [switch]$DryRun = $false,             # True = preview only; False = real uploads.
-    [switch]$Sync = $false,               # False = async submission; True = wait for analysis.
     # TOTAL upload attempts including the first, 1..10.
     [int]$Retries = 3,
     [Alias("D")][switch]$Debugging = $false, # Additional marker diagnostics.
@@ -379,7 +378,6 @@ try {
     if ($UseSSL) { $scheme = "https" }
     $baseUrl = $scheme + "://" + $ThunderstormServer + ":" + $ThunderstormPort
     $endpoint = "/api/checkAsync"
-    if ($Sync) { $endpoint = "/api/check" }
     $limit = [long]$MaxSize * 1048576
     $cutoff = [DateTime]::MinValue
     if ($MaxAge -gt 0) { $cutoff = $startTime.AddDays(-$MaxAge) }

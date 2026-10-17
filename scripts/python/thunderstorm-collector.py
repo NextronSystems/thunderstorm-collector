@@ -36,7 +36,6 @@ MAX_SIZE_KB = 2048       # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact limi
 # No extension allowlist. Links, special/network FS, cloud paths and internal
 # exclusion patterns (e.g. .dat/.npm/VM files) still apply.
 
-SYNC = False            # False = async submission; True = wait for analysis (--sync / --async).
 RETRIES = 3             # TOTAL upload attempts including the first, 1..10.
 DRY_RUN = False         # True = preview only; False = uploads (--dry-run / --no-dry-run).
 DEBUG = False           # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
@@ -288,8 +287,7 @@ class Collector(object):
         boundary = uuid.uuid4().hex
         preamble = _build_multipart_preamble(boundary, path)
         epilogue = b"\r\n--" + _bytes(boundary) + b"--\r\n"
-        endpoint = "/api/check" if self.args.sync else "/api/checkAsync"
-        endpoint += "?source=" + quote(_bytes(self.args.source), safe="")
+        endpoint = "/api/checkAsync?source=" + quote(_bytes(self.args.source), safe="")
         if self.scan_id:
             endpoint += "&scan_id=" + quote(_bytes(self.scan_id), safe="")
         headers = {"Content-Type": "multipart/form-data; boundary=" + boundary,
@@ -408,8 +406,8 @@ def main():
     parser.add_argument("--max-age", type=int, default=MAX_AGE, help="Days; 0 disables age filtering")
     parser.add_argument("--max-size-kb", type=int, default=MAX_SIZE_KB, help="KiB; maximum 204800")
     parser.add_argument("--retries", type=int, default=RETRIES, help="Total attempts, including the first")
-    parser.add_argument("--sync", action="store_true", default=SYNC)
-    parser.add_argument("--async", dest="sync", action="store_false")
+    parser.add_argument("--async", dest="async_compat", action="store_true",
+                        help="Accepted for compatibility; uploads are always asynchronous")
     parser.add_argument("--dry-run", action="store_true", default=DRY_RUN)
     parser.add_argument("--no-dry-run", dest="dry_run", action="store_false")
     parser.add_argument("--debug", action="store_true", default=DEBUG)

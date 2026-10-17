@@ -68,7 +68,7 @@ skip conditions.
 
 | Collector | Main tests | Representative coverage |
 |---|---|---|
-| Bash | [Integration suite](../scripts/tests/run_tests.sh), [robustness tests](../scripts/tests/test_bash_robustness.py) | Async/sync uploads, binary and unusual filenames, exact size and age filters, missing/unreadable roots, dry-run, curl/GNU wget, partial responses, redirects, marker JSON limits, workspace/log exclusion, mount-path decoding, platform defaults, and Retry-After parsing. |
+| Bash | [Integration suite](../scripts/tests/run_tests.sh), [robustness tests](../scripts/tests/test_bash_robustness.py) | Async uploads, binary and unusual filenames, exact size and age filters, missing/unreadable roots, dry-run, curl/GNU wget, partial responses, redirects, marker JSON limits, workspace/log exclusion, mount-path decoding, platform defaults, and Retry-After parsing. |
 | POSIX sh / ASH | [Compatibility checks](../scripts/tests/run_ash_regression_tests.sh), [robustness tests](../scripts/tests/test_ash_robustness.py) | dash/BusyBox-shell execution, curl/GNU wget/netcat behavior, rejection of unsafe fallbacks, newline-path refusal, cloud-directory matching, bounded diagnostics, batched and legacy traversal, retry limits, interruption, and cleanup. |
 | Python 3 and 2 | [Small regression checks](../scripts/tests/run_python_regression_tests.sh), [robustness tests](../scripts/tests/test_python_robustness.py) | Payloads and source encoding, filtering, symlinks/FIFOs, missing/unreadable paths, changed-file snapshots, retries, incomplete responses, interruption, no-network dry-run reporting, and drift between the two standalone implementations. Includes simulated absence of legacy TLS verification APIs. |
 | Perl | [Robustness tests](../scripts/tests/test_perl_robustness.py), [large-file integration](../scripts/tests/test_perl_large.sh), [large-file harness controls](../scripts/tests/test_perl_large_harness.py) | LWP behavior, complete chunked HTTP/HTTPS framing, retries, marker handling, source alias compatibility, directory replacement, interruption during begin/upload, and a current-run large payload verified by size and SHA-256. Negative controls reject stale records and hidden collector failures. |
@@ -80,6 +80,15 @@ source identifiers, supported collection markers, text/binary payload hashes,
 empty files, nested paths, special names, upload counts, and dry-run behavior.
 The Windows workflow uses [verify_uploads.py](../scripts/tests/verify_uploads.py)
 to wait for stored samples and compare their SHA-256 hashes.
+
+The script collectors are asynchronous-only. Each family's regression tests
+assert that uploads go only to `/api/checkAsync` and that the removed
+`--sync` option (PowerShell: `-Sync`) is rejected like any other unknown
+option (for PowerShell, by the parameter binder). The Bash, ash, Python and
+Perl tests also check that `--async` is still accepted, so existing cron jobs
+keep working. Batch has no command-line options: its POSIX adapter tests check
+that the source contains no other endpoint, and its Windows-only run checks
+that a stale `SYNC` environment variable does not change the endpoint.
 
 ## What Runs Automatically
 
@@ -117,7 +126,7 @@ all other focused suites present in a combined checkout.
 | Entry point | Role and automation boundary |
 |---|---|
 | [run_detection_tests.sh](../scripts/tests/run_detection_tests.sh) | Additional detection, path, filtering, and failure scenarios. Requires a suitable YARA-enabled stub and rules. Not executed as a suite by the script workflow; it receives a syntax check. |
-| [run_operational_tests.sh](../scripts/tests/run_operational_tests.sh) | Additional marker, interruption, source, sync, multi-root, retry, progress, and fallback scenarios. Has its own stub/rule discovery and setup. Syntax-checked, not executed as a suite by that workflow. |
+| [run_operational_tests.sh](../scripts/tests/run_operational_tests.sh) | Additional marker, interruption, source, `--sync` rejection and `--async` acceptance, multi-root, retry, progress, and fallback scenarios. Has its own stub/rule discovery and setup. Syntax-checked, not executed as a suite by that workflow. |
 | [run_filter_tests.sh](../scripts/tests/run_filter_tests.sh) | Additional age, size, and extension checks. Requires an already-running stub, its audit log, and prepared fixtures. Syntax-checked, not executed as a suite by that workflow. |
 | [Collector Tests workflow](../.github/workflows/test-collectors.yml) | Runs `tests/test-collectors.sh all` against the separate mock/proxy setup, including the Go collector and older script adapters. Its Ubuntu run cannot establish native Batch execution. The harness requires Bash 4.3+ and GNU-compatible utilities. |
 | [ShellCheck workflow](../.github/workflows/shellcheck.yml) | Checks shell files under `tests/`; it does not automatically lint every collector under `scripts/`. |
@@ -239,9 +248,10 @@ STUB_BIN_PATH="$STUB_BIN" bash scripts/tests/test_perl_large.sh
 
 The Bash suite checks its own scenarios. The Perl helper starts its own stub on
 a temporary port and uploads a generated file just over 3 MiB; it checks the
-collector exit and a unique current-run audit record with matching size/hash.
-It does not reuse an existing service or old audit log. These are separate runs,
-not additional options to the shared e2e suite.
+collector exit and a unique current-run audit record with matching size/hash,
+waiting up to 30 seconds (`STUB_AUDIT_WAIT_SECONDS`) for the stub's asynchronous
+worker to write it. It does not reuse an existing service or old audit log.
+These are separate runs, not additional options to the shared e2e suite.
 
 ## Release Assets and Real THOR Acceptance
 
@@ -274,7 +284,7 @@ Use only small, generated fixtures and explicit approved directories. Do not
 scan broad default roots, production files, or license directories for acceptance.
 Keep licenses and private keys outside Git and outside the upload fixtures.
 
-At minimum, check positive async/sync uploads, payload integrity, supported
+At minimum, check positive async uploads, payload integrity, supported
 filters, no-network dry-run, an unreachable endpoint, missing/unreadable or
 locked files, link behavior, and TLS where supported. Confirm source and
 filename attribution in backend evidence when available. Use isolated synthetic

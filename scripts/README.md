@@ -66,7 +66,7 @@ For normal collection, `--dirs` is optional: on ESXi/Unix, omitting it uses `/` 
 
 For HTTPS, add `--tls` and the appropriate port. Use `--ca-cert /path/to/ca.pem` for a private CA while retaining certificate and hostname verification. Old SSL libraries can still limit interoperability even when the Python version meets the minimum.
 
-Uploads are asynchronous by default; check received samples and analysis results on the server. The [Python guide](python/README.md) is the reference for synchronous mode, retries, exit codes, exclusions, and manual acceptance checks.
+Uploads are always asynchronous; check received samples and analysis results on the server. The [Python guide](python/README.md) is the reference for retries, exit codes, exclusions, and manual acceptance checks.
 
 ## Manual Acceptance Testing
 

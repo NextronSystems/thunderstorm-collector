@@ -16,5 +16,5 @@ collector_setup() {
     export COLLECT_DIRS CURL_PATH
     export MAX_AGE=365 COLLECT_MAX_SIZE=3000000 UPLOAD_ATTEMPTS=1
     export RELEVANT_EXTENSIONS='.txt;.log;.ps1;.tmp'
-    export URL_SCHEME=http SOURCE=legacy-batch-test DRY_RUN=0 SYNC=0
+    export URL_SCHEME=http SOURCE=legacy-batch-test DRY_RUN=0
 }

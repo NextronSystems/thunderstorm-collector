@@ -56,7 +56,6 @@ THUNDERSTORM_PORT=8080
 USE_SSL=0
 INSECURE=0
 CA_CERT=""
-ASYNC_MODE=1
 SOURCE_NAME="netscaler-example"
 
 SCAN_FOLDERS=('/netscaler' '/netscaler.local' '/var' '/nsconfig' '/tmp' '/etc')

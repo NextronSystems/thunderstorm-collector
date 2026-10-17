@@ -567,8 +567,9 @@ test_filename_ioc() {
 
     # Second: submit the same file directly with filename="/tmp/x" via curl
     # This is what matters — the full path must trigger the rule
-    curl -s -X POST "${STUB_URL}/api/check?source=filename-ioc-$collector" \
+    curl -s -X POST "${STUB_URL}/api/checkAsync?source=filename-ioc-$collector" \
         -F "file=@${ioc_dir}/testfile;filename=/tmp/x" >/dev/null 2>&1
+    sync_stub
 
     local entry; entry="$(query_log "/tmp/x")"
     if [ -z "$entry" ]; then

@@ -37,7 +37,6 @@ DEFAULT_MACOS_SCAN_FOLDERS=('/Users' '/tmp' '/var' '/usr')
 MAX_AGE=30                   # Days since last modification; 0 = no age filter (find -mtime).
 MAX_FILE_SIZE_KB=2048         # KiB (1024 bytes); 2048 = 2 MiB. Exact limit included; >0 required.
 
-ASYNC_MODE=1                 # 1 = submit without waiting for analysis; 0 = synchronous (--sync).
 RETRIES=3                    # Total normal upload attempts, 1..10; HTTP 503 has a separate budget.
 DRY_RUN=0                    # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
 DEBUG=0                      # 1 = additional diagnostics (--debug / --no-debug).
@@ -294,7 +293,7 @@ Options:
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
-  --sync                     Use /api/check (default: /api/checkAsync)
+  --async                    Accepted for compatibility; uploads are always asynchronous
   --retries <num>            Normal attempts per file, 1..10 (default: 3)
   --dry-run                  Do not upload or contact the server; only show what would be submitted
   --progress                 Force progress reporting
@@ -307,7 +306,7 @@ Options:
   -h, --help                 Show this help text
 
 Header settings can be overridden with options. Disable enabled header flags with:
-  --no-ssl  --verify-tls  --async  --no-dry-run  --no-debug
+  --no-ssl  --verify-tls  --no-dry-run  --no-debug
 Server is required: set THUNDERSTORM_SERVER in USER CONFIGURATION or use --server.
 
 Examples:
@@ -965,10 +964,9 @@ parse_args() {
                 USE_SSL=1
                 shift
                 ;;
-            --sync)
-                ASYNC_MODE=0
+            --async)
+                # Accepted for existing command lines such as cron jobs; uploads are always asynchronous.
                 ;;
-            --async) ASYNC_MODE=1 ;;
             --retries)
                 [ -n "${2:-}" ] || die "Missing value for $arg"
                 RETRIES="$2"
@@ -1056,7 +1054,6 @@ validate_config() {
 
 main() {
     local scheme="http"
-    local endpoint_name="check"
     local query_source=""
     local api_endpoint=""
     local base_url=""
@@ -1094,15 +1091,12 @@ main() {
         CURL_EXTRA_OPTS+=("--cacert" "$CA_CERT")
         WGET_EXTRA_OPTS+=("--ca-certificate=$CA_CERT")
     fi
-    if [ "$ASYNC_MODE" -eq 1 ]; then
-        endpoint_name="checkAsync"
-    fi
 
     query_source="$(build_query_source "$SOURCE_NAME")"
     base_url="${scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
     # Strip any trailing slash from base_url
     base_url="${base_url%/}"
-    api_endpoint="${base_url}/api/${endpoint_name}${query_source}"
+    api_endpoint="${base_url}/api/checkAsync${query_source}"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         detect_upload_tool || true

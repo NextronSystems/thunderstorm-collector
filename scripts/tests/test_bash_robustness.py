@@ -365,6 +365,32 @@ class BashRobustnessTests(unittest.TestCase):
         self.assertEqual(sum("/api/check" in path for path in self.requests), 5)
         self.assert_payloads([])
 
+    def test_uploads_use_only_the_async_endpoint(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 0, self.output)
+        uploads = [path for path in self.requests if not path.startswith("/api/collection")]
+        self.assertEqual(len(uploads), 1, self.requests)
+        self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
+
+    def test_async_option_is_still_accepted(self):
+        # Existing cron jobs may still pass --async; asynchronous is the only mode now.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        result = self.run_collector("--async")
+        self.assertEqual(result.returncode, 0, self.output)
+        uploads = [path for path in self.requests if not path.startswith("/api/collection")]
+        self.assertEqual(len(uploads), 1, self.requests)
+        self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
+        self.assert_payloads([b"readable"])
+
+    def test_removed_sync_option_is_an_unknown_option(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        result = self.run_collector("--sync")
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("Unknown option: --sync", self.output)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.uploads, [])
+
     def test_failed_upload_does_not_prevent_other_files(self):
         (self.samples / "one.txt").write_bytes(b"one")
         (self.samples / "two.txt").write_bytes(b"two")

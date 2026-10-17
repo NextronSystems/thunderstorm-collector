@@ -26,7 +26,6 @@ var MAX_AGE = 30;            // Days since last modification, 0..36500; 0 disabl
 var COLLECT_MAX_SIZE = 2097152; // BYTES, 1..209715200; 2097152 = 2048 KiB = 2 MiB, inclusive.
 var RELEVANT_EXTENSIONS = ".exe;.dll;.ps1;.bat;.txt"; // Literal suffixes; "*" = all extensions.
 
-var SYNC = 0;               // 0 = async submission; 1 = wait for analysis.
 var UPLOAD_ATTEMPTS = 3;     // TOTAL upload attempts including the first, 1..10.
 var DRY_RUN = 0;            // 1 = preview, no HTTP requests; 0 = real uploads.
 var CURL_PATH = "";         // Empty = discover curl.exe; otherwise trusted path to curl 8.4+.
@@ -220,7 +219,6 @@ try {
     var maxAge = number("MAX_AGE", MAX_AGE, 0, 36500);
     var attempts = number("UPLOAD_ATTEMPTS", UPLOAD_ATTEMPTS, 1, 10);
     var dryRun = flag("DRY_RUN", DRY_RUN);
-    var sync = flag("SYNC", SYNC);
     var caBundle = scheme === "https" ? setting("CURL_CA_BUNDLE", CURL_CA_BUNDLE) : "";
     if (caBundle && !dryRun) {
         caBundle = fso.GetAbsolutePathName(caBundle);
@@ -229,7 +227,7 @@ try {
     }
     var cutoff = new Date().getTime() - maxAge * 86400000;
     var source = setting("SOURCE", SOURCE || shell.ExpandEnvironmentStrings("%COMPUTERNAME%"));
-    var url = scheme + "://" + server + ":" + port + (sync ? "/api/check" : "/api/checkAsync") +
+    var url = scheme + "://" + server + ":" + port + "/api/checkAsync" +
         "?source=" + encodeURIComponent(source);
     var selected = setting("RELEVANT_EXTENSIONS", RELEVANT_EXTENSIONS).split(";");
     var allExtensions = selected.length === 1 && selected[0] === "*", extensions = {};

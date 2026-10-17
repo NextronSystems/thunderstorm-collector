@@ -40,7 +40,6 @@ MAX_AGE=30                   # Days since last modification; 0 = no age filter (
 MAX_FILE_SIZE_KB=2048         # KiB (1024 bytes), 1..1048576; 2048 = 2 MiB, inclusive.
 # Links, special/network filesystems and cloud directories remain excluded.
 
-ASYNC_MODE=1                 # 1 = submit without waiting for analysis; 0 = synchronous (--sync).
 RETRIES=3                    # TOTAL upload attempts including the first, 1..10.
 DRY_RUN=0                    # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
 DEBUG=0                      # 1 = additional diagnostics (--debug / --no-debug).
@@ -241,7 +240,7 @@ Options:
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
   --ca-cert <path>           Path to custom CA certificate bundle for TLS
-  --sync                     Use /api/check (default: /api/checkAsync)
+  --async                    Accepted for compatibility; uploads are always asynchronous
   --retries <num>            Total attempts per file, 1..10 (default: 3)
   --dry-run                  Do not upload, only show what would be submitted
   --debug                    Enable debug log messages
@@ -261,7 +260,7 @@ Notes:
   For systems with bash available, prefer thunderstorm-collector.sh.
 
 Header settings can be overridden with options. Disable enabled header flags with:
-  --no-ssl  --verify-tls  --async  --no-dry-run  --no-debug
+  --no-ssl  --verify-tls  --no-dry-run  --no-debug
 Server is required: set THUNDERSTORM_SERVER in USER CONFIGURATION or use --server.
 
 Examples:
@@ -991,10 +990,9 @@ parse_args() {
                 CA_CERT="$2"
                 shift
                 ;;
-            --sync)
-                ASYNC_MODE=0
+            --async)
+                # Accepted for existing command lines such as cron jobs; uploads are always asynchronous.
                 ;;
-            --async) ASYNC_MODE=1 ;;
             --retries)
                 [ -n "$2" ] || die "Missing value for $_pa_arg"
                 RETRIES="$2"
@@ -1090,7 +1088,6 @@ validate_config() {
 
 main() {
     _scheme="http"
-    _endpoint_name="check"
     _query_source=""
     _api_endpoint=""
     _base_url=""
@@ -1132,11 +1129,10 @@ main() {
     if [ -n "$CA_CERT" ]; then
         [ -f "$CA_CERT" ] || die "CA certificate file not found: '$CA_CERT'"
     fi
-    [ "$ASYNC_MODE" -eq 1 ] && _endpoint_name="checkAsync"
 
     _query_source="$(build_query_source "$SOURCE_NAME")"
     _base_url="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
-    _api_endpoint="${_base_url}/api/${_endpoint_name}${_query_source}"
+    _api_endpoint="${_base_url}/api/checkAsync${_query_source}"
     log_msg debug "Base URL: $_base_url"
     log_msg debug "API endpoint: $_api_endpoint"
 

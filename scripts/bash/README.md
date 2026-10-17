@@ -30,8 +30,8 @@ an empty server stops with exit 2 and an instruction explaining how to set it.
 Use `SCAN_FOLDERS=("/var/www" "/home/alice")` for explicit roots. Header roots
 are respected; an empty array selects the platform defaults listed below.
 Command-line options override header values, and the first `--dir` replaces the
-whole root list. `--no-ssl`, `--verify-tls`, `--async`, `--no-dry-run` and
-`--no-debug` can turn off corresponding header choices.
+whole root list. `--no-ssl`, `--verify-tls`, `--no-dry-run` and `--no-debug`
+can turn off corresponding header choices.
 
 The shipped limits are **30 days since modification** and **2048 KiB (2 MiB)**.
 Older/larger files are intentionally not collected; use `--max-age 0` for all ages.
@@ -54,7 +54,8 @@ console output. Keep externally captured logs outside the input directories.
   `--max-age 0` disables filtering; other values use `find -mtime -N`.
 - Default size limit: 2048 KiB. `--max-size-kb N` includes files up to `N * 1024`
   bytes, including empty files. Oversize files count as skipped.
-- HTTP/HTTPS, asynchronous `/api/checkAsync` by default, `--sync` for `/api/check`.
+- HTTP/HTTPS, asynchronous `/api/checkAsync` only; there is no synchronous mode,
+  and `--async` is accepted and ignored so existing command lines keep working.
   An accepted asynchronous upload does not mean analysis has finished.
 - TLS verification is enabled. `--ca-cert FILE` selects HTTPS and a trusted CA
   bundle. `--insecure` deliberately disables verification; do not use it as a
