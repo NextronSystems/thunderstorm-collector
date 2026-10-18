@@ -219,7 +219,7 @@ try {
     var server = setting("THUNDERSTORM_SERVER", THUNDERSTORM_SERVER);
     if (!server) throw new Error("Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or as an environment variable.");
     var port = number("THUNDERSTORM_PORT", THUNDERSTORM_PORT, 1, 65535);
-    if (!/^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$/.test(server)) throw new Error("Invalid THUNDERSTORM_SERVER.");
+    if (!/^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:.]+\])$/.test(server)) throw new Error("Invalid THUNDERSTORM_SERVER.");
     var scheme = setting("URL_SCHEME", URL_SCHEME).toLowerCase();
     if (scheme !== "http" && scheme !== "https") throw new Error("URL_SCHEME must be http or https.");
     var maxSize = number("COLLECT_MAX_SIZE", COLLECT_MAX_SIZE, 1, 209715200);
