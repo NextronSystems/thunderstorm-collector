@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/3058c55d-a903-4732-b824-a9cd3a24c88d
+
 ![Thunderstorm Collector](images/thunderstorm-collector-logo.png)
 
 # THOR Thunderstorm Collector
@@ -14,7 +18,7 @@ This repository provides a compiled Go collector, standalone script collectors, 
 
 Why some systems cannot run a security agent, and how collectors bring their files to THOR Thunderstorm (a 93-second animation, no sound; the findings in it are illustrative):
 
-<!-- VIDEO: replace this comment with the upload link, a bare https://github.com/user-attachments/assets/<id> line on its own. -->
+https://github.com/user-attachments/assets/eb23f1e6-a6b0-4367-a5e1-fa2e93e4b331
 
 ## Choose a Collector
 
