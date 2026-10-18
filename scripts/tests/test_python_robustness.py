@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,7 @@ class PythonRobustness(unittest.TestCase):
         self.samples = os.path.join(self.root, "samples")
         os.mkdir(self.samples)
         self.uploads = []
+        self.filenames = []
         self.markers = []
         self.paths = []
         self.upload_statuses = []
@@ -53,6 +55,7 @@ class PythonRobustness(unittest.TestCase):
         self.partial = False
         self.partial_marker = False
         self.marker_body = {"scan_id": "scan + & /"}
+        self.marker_raw = None
         self.pause = False
         self.started = threading.Event()
         self.release = threading.Event()
@@ -69,10 +72,12 @@ class PythonRobustness(unittest.TestCase):
                     marker = json.loads(data.decode("utf-8"))
                     test.markers.append(marker)
                     status = test.begin_status if marker["type"] == "begin" else test.end_status
-                    body = json.dumps(test.marker_body).encode("utf-8")
+                    body = json.dumps(test.marker_body).encode("utf-8") if test.marker_raw is None else test.marker_raw
                     partial = test.partial_marker
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    declared = re.search(b'filename="([^"]*)"', data.split(b"\r\n\r\n", 1)[0])
+                    test.filenames.append(declared.group(1) if declared else None)
                     mime = ("Content-Type: " + self.headers["Content-Type"] +
                             "\r\nMIME-Version: 1.0\r\n\r\n").encode("ascii") + data
                     parser = BytesParser()
@@ -151,6 +156,137 @@ class PythonRobustness(unittest.TestCase):
                 self.assertEqual(query["source"], [expected])
                 self.assertEqual(query["scan_id"], ["scan + & /"])
 
+    def test_control_characters_never_reach_the_multipart_header(self):
+        # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
+        # other than TAB or DEL in a part header, so the file would never be collected.
+        controls = [b"\x01", b"\x08", b"\x0b", b"\x0c", b"\x1b", b"\x1f", b"\x7f", b"\t", b"\r", b"\n"]
+        for index, control in enumerate(controls):
+            name = b"ctl" + str(index).encode("ascii") + control + b"name.exe"
+            self.file(name if MAJOR == 2 else os.fsdecode(name), b"payload" + str(index).encode("ascii"))
+        nested = os.path.join(self.samples, "dir\x1b[2K\x01")
+        os.mkdir(nested)
+        with open(os.path.join(nested, "inside.txt"), "wb") as stream:
+            stream.write(b"nested")
+        self.assertEqual(self.run_collector(), 0, self.output)
+        expected = [b"payload" + str(i).encode("ascii") for i in range(len(controls))] + [b"nested"]
+        self.assertEqual(sorted(self.uploads), sorted(expected))
+        self.assertEqual(len(self.filenames), len(expected))
+        for name in self.filenames:
+            self.assertTrue(name is not None)
+            self.assertEqual(re.findall(b"[\x00-\x1f\x7f]", name), [], name)
+
+    def load_collector(self, name):
+        try:
+            from importlib.util import module_from_spec, spec_from_file_location
+            spec = spec_from_file_location(name, SCRIPT)
+            module = module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except ImportError:
+            import imp
+            module = imp.load_source(name, SCRIPT)
+        return module
+
+    def test_http09_response_object_is_rejected(self):
+        # Python 2's httplib reports a reply without a status line as HTTP/0.9 (version 9)
+        # with status 200; read_response must not let it count as an answer.
+        module = self.load_collector("collector_http09")
+        response = type("Response", (object,), dict(
+            version=9, status=200, read=lambda self, limit: b"SSH-2.0-OpenSSH_9.6\r\n",
+            getheader=lambda self, name: None))()
+        with self.assertRaises(ValueError):
+            module.read_response(response)
+
+    def raw_listener(self, reply, marker_reply):
+        """Listener that answers marker requests with marker_reply and everything else with
+        reply; both are raw bytes and need not be HTTP. Returns (port, requests, close)."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.2)
+        stop = threading.Event()
+        requests = []
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except (socket.timeout, socket.error):
+                    continue
+                try:
+                    connection.settimeout(3)
+                    data = b""
+                    while b"\r\n\r\n" not in data:
+                        chunk = connection.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    head = data.split(b"\r\n\r\n", 1)[0]
+                    request_line = head.split(b"\r\n", 1)[0]
+                    requests.append(request_line)
+                    length = re.search(b"(?i)content-length:\\s*(\\d+)", head)
+                    remaining = int(length.group(1)) - len(data.split(b"\r\n\r\n", 1)[1]) if length else 0
+                    while remaining > 0:
+                        chunk = connection.recv(min(65536, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                    connection.sendall(marker_reply if b"/api/collection" in request_line else reply)
+                except (socket.error, ValueError):
+                    pass
+                finally:
+                    connection.close()
+
+        thread = threading.Thread(target=serve)
+        thread.daemon = True
+        thread.start()
+
+        def close():
+            stop.set()
+            thread.join(5)
+            listener.close()
+        return listener.getsockname()[1], requests, close
+
+    def test_reply_without_http_status_line_is_not_success(self):
+        # Python 2's httplib reads such a reply as HTTP/0.9 with status 200.
+        garbage = b"SSH-2.0-OpenSSH_9.6\r\n"
+        not_found = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+        for reply in (garbage, b"220 smtp.example.com ESMTP\r\n", b"<html>blocked</html>",
+                      b"\x15\x03\x01\x00\x02\x02\x46"):
+            self.file()
+            port, requests, close = self.raw_listener(reply, not_found)
+            try:
+                code = self.run_collector("--port", str(port))
+            finally:
+                close()
+            self.assertEqual(code, 1, (reply, self.output))
+            self.assertIn("Failed: 1", self.output)
+            self.assertIn("Submitted: 0", self.output)
+        port, requests, close = self.raw_listener(garbage, garbage)
+        try:
+            self.assertEqual(self.run_collector("--port", str(port)), 2, self.output)
+        finally:
+            close()
+        self.assertFalse(any(b"/api/check" in line for line in requests), requests)
+
+    def test_non_ascii_paths_do_not_abort_logging(self):
+        # On Python 2, "{}".format(_text(path)) mixed a byte-string template with a non-ASCII
+        # unicode argument: UnicodeEncodeError (a ValueError), caught by main() as a startup
+        # failure: exit 2, no summary, no end marker.
+        self.file(u"unicode-\u00e4.bin")
+        self.assertEqual(self.run_collector("--dry-run"), 0, self.output)
+        self.assertIn("Would submit: 1", self.output)
+        self.upload_statuses = [500]
+        self.assertEqual(self.run_collector(), 1, self.output)
+        self.assertIn("Failed: 1", self.output)
+        self.assertIn("HTTP 500", self.output)  # the failure was logged, and was not fatal
+        directory = os.path.join(self.root, u"m\u00fcller-root")
+        os.mkdir(directory)
+        with open(os.path.join(directory, "inside.bin"), "wb") as stream:
+            stream.write(b"inside")
+        del self.uploads[:]
+        self.assertEqual(self.run_collector(roots=[directory]), 0, self.output)
+        self.assertEqual(self.uploads, [b"inside"])
+
     def test_dry_run_does_not_contact_unreachable_service(self):
         self.file()
         self.assertEqual(self.run_collector("--dry-run", "--port", "1"), 0, self.output)
@@ -193,6 +329,38 @@ class PythonRobustness(unittest.TestCase):
             stream.write(b"other")
         self.assertEqual(self.run_collector(roots=[self.samples, other]), 0, self.output)
         self.assertEqual(len(self.uploads), 2)
+
+    def test_deep_directory_tree_does_not_abort_the_walk(self):
+        # os.walk recurses once per level before Python 3.12 and on Python 2, so a tree deeper
+        # than the recursion limit raised RecursionError and ended the whole run. The limit is
+        # lowered here instead of building a thousand levels, which macOS cannot hold.
+        module = self.load_collector("collector_deep_walk")
+        depth = 150
+        directory = self.samples
+        for _ in range(depth):
+            directory = os.path.join(directory, "d")
+            os.mkdir(directory)
+        for name in ("deepest.bin", "second.bin"):
+            with open(os.path.join(directory, name), "wb") as stream:
+                stream.write(b"deep")
+        self.file("top.bin")
+        args = type("Args", (object,), dict(
+            tls=False, insecure=False, ca_cert=None, dry_run=True, sync=False, retries=1,
+            server="127.0.0.1", port=1, source="deep", max_size_kb=2048, max_age=0, progress=False))()
+        collector = module.Collector(args)
+        for pattern in module.skip_elements:
+            re.compile(pattern)  # warm the cache: a first compile inside the walk needs extra depth
+        limit = sys.getrecursionlimit()
+        # Leave 60 frames above the current depth: far fewer than the 150 levels a recursive walk
+        # needs, far more than the iterative one plus a first regular expression compile (Python 2
+        # needs about 25 frames for that). The depth is measured by recursing until the
+        # interpreter objects, because on Python 2 C-level calls count too and a stack length does not.
+        sys.setrecursionlimit(limit - self.free_frames() + 60)
+        try:
+            collector.walk(self.samples)
+        finally:
+            sys.setrecursionlimit(limit)
+        self.assertEqual((collector.would_submit, collector.scan_errors, collector.failed), (3, 0, 0))
 
     def test_symlinks_and_fifo_not_uploaded(self):
         path = self.file()
@@ -243,6 +411,36 @@ class PythonRobustness(unittest.TestCase):
         self.file()
         self.marker_body = []
         self.assertEqual(self.run_collector(), 0, self.output)
+
+    @staticmethod
+    def free_frames():
+        """Number of Python frames that still fit under the current recursion limit."""
+        count = [0]
+
+        def dive():
+            count[0] += 1
+            dive()
+        try:
+            dive()
+        except RuntimeError:  # RecursionError is a RuntimeError
+            pass
+        return count[0]
+
+    def test_hostile_marker_json_does_not_crash_the_collector(self):
+        # Nesting deeper than the recursion limit made json.loads raise RecursionError
+        # (a RuntimeError), which was not caught: traceback, exit 1, no end marker.
+        self.file()
+        bodies = [b"[" * 30000 + b"]" * 30000,                       # under the size cap, too deep
+                  b"[" * 100000 + b"]" * 100000,                     # over the size cap
+                  b'{"scan_id":"' + b"x" * 100000 + b'"}']           # valid but oversized
+        for body in bodies:
+            self.marker_raw = body
+            del self.paths[:]
+            del self.uploads[:]
+            self.assertEqual(self.run_collector(), 0, self.output)
+            self.assertNotIn("Traceback", self.output)
+            self.assertEqual(len(self.uploads), 1)
+            self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
 
     def test_non_string_scan_id_is_not_used(self):
         self.file()
@@ -327,6 +525,61 @@ class PythonRobustness(unittest.TestCase):
             if process.poll() is None:
                 process.kill()
                 process.communicate()
+
+    def test_slow_but_steady_upload_is_not_cut_off_by_the_socket_timeout(self):
+        # Since Python 3.5 sendall() gives the socket timeout to the WHOLE buffer, so a sample
+        # that needs longer than the timeout to send failed although the server was reading.
+        # The kernel buffers part of the body (about 2 MiB on Linux loopback) and the server still
+        # has to drain that tail after the last send, so the server is fast enough for the tail to
+        # take well under the timeout (0.5 s) while the whole transfer takes about 5 s.
+        module = self.load_collector("collector_slow_upload")
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        received = []
+
+        def serve():
+            connection, _ = listener.accept()
+            connection.settimeout(20)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += connection.recv(65536)
+            head, body = data.split(b"\r\n\r\n", 1)
+            length = int(re.search(b"(?i)content-length:\\s*(\\d+)", head).group(1))
+            rate = 4.0 * 1024 * 1024  # bytes per second (a float: Python 2 divides integers down): steady, never idle for long
+            while len(body) < length:
+                piece = connection.recv(65536)
+                if not piece:
+                    break
+                body += piece
+                time.sleep(len(piece) / rate)
+            received.append(len(body))
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            connection.close()
+
+        thread = threading.Thread(target=serve)
+        thread.daemon = True
+        thread.start()
+
+        class ShortTimeout(module.Collector):
+            def connection(self, timeout):
+                return module.Collector.connection(self, 2.5)
+
+        size = 20 * 1024 * 1024
+        path = self.file("big.bin", b"x" * size)
+        args = type("Args", (object,), dict(
+            tls=False, insecure=False, ca_cert=None, dry_run=False, sync=False, retries=1,
+            server="127.0.0.1", port=listener.getsockname()[1], source="slow",
+            max_size_kb=204800, max_age=0, progress=False))()
+        collector = ShortTimeout(args)
+        started = time.time()
+        collector.upload(path, os.lstat(path))
+        elapsed = time.time() - started
+        listener.close()
+        thread.join(5)
+        self.assertEqual((collector.submitted, collector.failed), (1, 0), elapsed)
+        self.assertTrue(elapsed > 2.5, "the upload did not outlast the socket timeout: %.1f s" % elapsed)
+        self.assertTrue(received and received[0] > size)
 
     def test_legacy_tls_fails_closed_without_verification_api(self):
         try:

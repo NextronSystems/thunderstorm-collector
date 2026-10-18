@@ -64,7 +64,8 @@ by the collector itself. Always review a dry-run before collecting real data.
 
 ## Capability Profile
 
-- Recursive regular files; symlink entries/special files are skipped. Explicit
+- Recursive regular files, walked iteratively so even a pathologically deep tree
+  cannot hit the recursion limit; symlink entries/special files are skipped. Explicit
   roots resolve physically. All extensions except built-in exclusions: `/mnt`
   trees, `.dat`, `.npm`, and VM artifacts ending in `.vmdk`, `.vswp`, `.nvram`,
   `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts are best-effort
@@ -73,7 +74,10 @@ by the collector itself. Always review a dry-run before collecting real data.
   Positive values compare mtime to run start minus N times 86400 seconds.
 - Size defaults to 2048 KiB; `--max-size-kb 1..204800`, exact limit included.
   Binary/empty/Unicode/newline files work. Unsafe multipart filename characters
-  are sanitized, not payload bytes. Metadata may not survive the backend verbatim.
+  (quotes, semicolons and every control character, including TAB, CR, LF, ESC and
+  DEL) are replaced by underscores, not payload bytes; a strict multipart parser
+  rejects control characters in a part header and the file would never be collected.
+  Metadata may not survive the backend verbatim.
 - Bounded in-memory snapshots before network access; allow selected size plus
   overhead in RAM. Changed/replaced/unreadable files fail. Files that grow past
   selectors before reading are skipped. No atomic filesystem snapshot or defense
@@ -81,14 +85,18 @@ by the collector itself. Always review a dry-run before collecting real data.
 - Async `/api/checkAsync` only; no synchronous mode, and `--async` is accepted
   and ignored so existing command lines keep working. Complete 2xx means
   accepted, not completed analysis. No polling, resume or deduplication.
-- Optional markers: 404/501 is nonfatal, without scan ID. Begin retries once
+- Optional markers: 404/501 is nonfatal, without scan ID. A begin response is only
+  parsed up to 64 KiB; anything larger or malformed gives no scan ID, never a crash. Begin retries once
   after two seconds then exits 2; end failure exits 1. SIGINT/SIGTERM exits 1
   with a best-effort interrupted marker for a live started collection.
 - `--retries 1..10` counts total attempts, including first. 503 Retry-After
   integer seconds clamp to 0..120; other exponential delays cap at 60 seconds.
   Lost responses/retries can duplicate samples.
 - Socket idle-I/O timeouts: uploads 30 seconds, markers 10. **Not whole-attempt
-  or run deadlines**. Responses over 1 MiB or incomplete responses fail.
+  or run deadlines**: the sample is sent in 64 KiB chunks, so a slow but steady
+  link is not cut off after 30 seconds. Responses over 1 MiB, incomplete responses
+  and replies without an HTTP/1.x status line (an SSH banner from a wrong port, for
+  example) fail.
 - TLS verifies CA/hostname; custom CA via `--tls --ca-cert FILE`, explicit bypass
   via `--tls --insecure`. Python before 2.7.9 refuses verified HTTPS rather than
   silently disabling verification. Old SSL protocol support can still limit it.
