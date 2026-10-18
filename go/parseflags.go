@@ -114,3 +114,14 @@ func ReadTemplateFile(defaultFilename string, config interface{}) error {
 	configSource.Loaded = true
 	return nil
 }
+
+// unexpectedArguments returns the non-option arguments that follow the program
+// name. ParseConfig hands os.Args to the flag set, so the program name is the
+// first non-option argument.
+func unexpectedArguments(flags *flag.FlagSet) []string {
+	args := flags.Args()
+	if len(args) == 0 {
+		return nil
+	}
+	return args[1:]
+}
