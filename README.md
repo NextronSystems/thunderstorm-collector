@@ -1,7 +1,3 @@
-
-
-https://github.com/user-attachments/assets/3058c55d-a903-4732-b824-a9cd3a24c88d
-
 ![Thunderstorm Collector](images/thunderstorm-collector-logo.png)
 
 # THOR Thunderstorm Collector
