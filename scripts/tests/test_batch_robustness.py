@@ -236,6 +236,15 @@ class BatchRobustness(shared.PowerShellRobustness):
     def test_incomplete_begin_is_fatal(self):
         self.skipTest("Batch deliberately has no collection markers")
 
+    def test_marker_timestamps_ignore_the_host_culture(self):
+        self.skipTest("Batch deliberately has no collection markers, so it has no marker timestamps")
+
+    def test_ambient_certificate_callback_cannot_disable_default_verification(self):
+        self.skipTest("PowerShell-only: Batch hands TLS to curl and does not use .NET certificate validation")
+
+    def test_custom_ca_accepts_a_chain_through_an_intermediate(self):
+        self.skipTest("PowerShell-only: the chain check is PowerShell's own; curl with Schannel validates the CA itself")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
