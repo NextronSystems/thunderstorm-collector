@@ -143,7 +143,7 @@ config_error('Unknown positional arguments') if @ARGV;
 config_error('Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST.')
     unless defined $server && length $server;
 config_error('Server must be a DNS/IPv4 name or bracketed IPv6 address')
-    unless defined $server && $server =~ /^(?:[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$/;
+    unless defined $server && $server =~ /^(?:[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:.]+\])$/;
 config_error('port 1..65535, age 0..36500, size 1..204800 KiB, retries 1..10 required')
     unless $port >= 1 && $port <= 65535 && $age >= 0 && $age <= 36500 &&
            $size >= 1 && $size <= 204800 && $retries >= 1 && $retries <= 10;

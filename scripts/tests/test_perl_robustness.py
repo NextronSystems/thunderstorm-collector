@@ -611,6 +611,18 @@ class PerlRobustness(unittest.TestCase):
         self.assertIn("USER CONFIGURATION", output)
         self.assertEqual(self.paths, [])
 
+    def test_bracketed_ipv6_server_may_end_in_an_ipv4_address(self):
+        # Dry-run contacts nothing, so only the --server validation decides the exit status.
+        self.file()
+        for server in ["[::1]", "[::ffff:127.0.0.1]", "[64:ff9b::192.0.2.33]"]:
+            self.assertEqual(self.run_collector("--server", server, "--dry-run"), 0, server + "\n" + self.output)
+        for server in ["http://[::ffff:127.0.0.1]", "user:secret@[::ffff:127.0.0.1]",
+                       "[::ffff:127.0.0.1]:8080", "[::ffff:127.0.0.1]/path", "[::ffff:127.0.0.1] ",
+                       "::ffff:127.0.0.1"]:
+            self.assertEqual(self.run_collector("--server", server, "--dry-run"), 2, server + "\n" + self.output)
+            self.assertIn("Server must be a DNS/IPv4 name or bracketed IPv6 address", self.output)
+        self.assertEqual(self.paths, [])
+
     def test_header_configuration_defaults_and_cli_precedence(self):
         for name, size, days in [("fresh.txt", 1, 0), ("twenty-days.txt", 1, 20),
                                  ("forty-days.txt", 1, 40), ("exact.txt", 2097152, 0),
