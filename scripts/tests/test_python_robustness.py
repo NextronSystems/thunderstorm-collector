@@ -334,9 +334,8 @@ class PythonRobustness(unittest.TestCase):
         # os.walk recurses once per level before Python 3.12 and on Python 2, so a tree deeper
         # than the recursion limit raised RecursionError and ended the whole run. The limit is
         # lowered here instead of building a thousand levels, which macOS cannot hold.
-        import inspect
         module = self.load_collector("collector_deep_walk")
-        depth = 60
+        depth = 150
         directory = self.samples
         for _ in range(depth):
             directory = os.path.join(directory, "d")
@@ -349,8 +348,14 @@ class PythonRobustness(unittest.TestCase):
             tls=False, insecure=False, ca_cert=None, dry_run=True, sync=False, retries=1,
             server="127.0.0.1", port=1, source="deep", max_size_kb=2048, max_age=0, progress=False))()
         collector = module.Collector(args)
+        for pattern in module.skip_elements:
+            re.compile(pattern)  # warm the cache: a first compile inside the walk needs extra depth
         limit = sys.getrecursionlimit()
-        sys.setrecursionlimit(len(inspect.stack()) + 25)
+        # Leave 60 frames above the current depth: far fewer than the 150 levels a recursive walk
+        # needs, far more than the iterative one plus a first regular expression compile (Python 2
+        # needs about 25 frames for that). The depth is measured by recursing until the
+        # interpreter objects, because on Python 2 C-level calls count too and a stack length does not.
+        sys.setrecursionlimit(limit - self.free_frames() + 60)
         try:
             collector.walk(self.samples)
         finally:
@@ -406,6 +411,20 @@ class PythonRobustness(unittest.TestCase):
         self.file()
         self.marker_body = []
         self.assertEqual(self.run_collector(), 0, self.output)
+
+    @staticmethod
+    def free_frames():
+        """Number of Python frames that still fit under the current recursion limit."""
+        count = [0]
+
+        def dive():
+            count[0] += 1
+            dive()
+        try:
+            dive()
+        except RuntimeError:  # RecursionError is a RuntimeError
+            pass
+        return count[0]
 
     def test_hostile_marker_json_does_not_crash_the_collector(self):
         # Nesting deeper than the recursion limit made json.loads raise RecursionError
