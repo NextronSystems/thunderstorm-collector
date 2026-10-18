@@ -353,6 +353,12 @@ class Collector(object):
         while stack:
             directory = stack.pop()
             try:
+                # A queued directory may have waited through many uploads. os.walk checked for
+                # a link right before descending, so do the same: one swapped for a symlink in
+                # the meantime would be listed through the link, outside the selected root.
+                if not stat.S_ISDIR(os.lstat(directory).st_mode):
+                    log("[SKIP] No longer a directory: {}".format(directory))
+                    continue
                 names = os.listdir(directory)
             except (IOError, OSError) as error:
                 self.traversal_error(error)

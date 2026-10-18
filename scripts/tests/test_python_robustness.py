@@ -362,6 +362,33 @@ class PythonRobustness(unittest.TestCase):
             sys.setrecursionlimit(limit)
         self.assertEqual((collector.would_submit, collector.scan_errors, collector.failed), (3, 0, 0))
 
+    def test_directory_swapped_for_a_symlink_while_queued_is_not_followed(self):
+        # A directory waits on the walk's stack while the files before it are uploaded. os.walk
+        # looked for a link right before descending into it; the explicit stack has to as well,
+        # or the listing follows a link planted in the meantime out of the selected root.
+        module = self.load_collector("collector_queued_link")
+        outside = os.path.join(self.root, "outside")
+        os.mkdir(outside)
+        with open(os.path.join(outside, "secret.bin"), "wb") as stream:
+            stream.write(b"outside the selected root")
+        for name in ("a", "b"):
+            os.mkdir(os.path.join(self.samples, name))
+            self.file(os.path.join(name, "one.bin"))
+        args = type("Args", (object,), dict(
+            tls=False, insecure=False, ca_cert=None, dry_run=True, sync=False, retries=1,
+            server="127.0.0.1", port=1, source="queued", max_size_kb=2048, max_age=0, progress=False))()
+        collector = module.Collector(args)
+        seen = []
+        for path, metadata, error in collector.entries(self.samples):
+            seen.append(path)
+            if len(seen) == 1:
+                # One directory is being read, the other one is still queued: swap it.
+                swapped = os.path.join(self.samples, "b" if os.path.basename(os.path.dirname(path)) == "a" else "a")
+                shutil.rmtree(swapped)
+                os.symlink(outside, swapped)
+        self.assertEqual(len(seen), 1, seen)
+        self.assertEqual((collector.scan_errors, collector.failed), (0, 0))
+
     def test_symlinks_and_fifo_not_uploaded(self):
         path = self.file()
         os.symlink(path, self.samples + "/link")

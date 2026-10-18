@@ -65,8 +65,10 @@ by the collector itself. Always review a dry-run before collecting real data.
 ## Capability Profile
 
 - Recursive regular files, walked iteratively so even a pathologically deep tree
-  cannot hit the recursion limit; symlink entries/special files are skipped. Explicit
-  roots resolve physically. All extensions except built-in exclusions: `/mnt`
+  cannot hit the recursion limit; symlink entries/special files are skipped, and a
+  directory is checked again right before it is listed, so one replaced by a symlink
+  in the meantime is skipped too (`[SKIP] No longer a directory`). Explicit roots
+  resolve physically. All extensions except built-in exclusions: `/mnt`
   trees, `.dat`, `.npm`, and VM artifacts ending in `.vmdk`, `.vswp`, `.nvram`,
   `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts are best-effort
   exclusions, not a security boundary. Explicit excluded roots remain excluded.
