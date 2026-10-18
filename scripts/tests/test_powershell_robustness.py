@@ -237,7 +237,7 @@ class PowerShellRobustness(ScanRootAssertions):
                 index += 2
         def literal(value):
             return "'" + str(value).replace("'", "''") + "'"
-        expression = "& " + literal(SCRIPT)
+        expression = kwargs.get("prefix", "") + "& " + literal(SCRIPT)
         for key, value in options.items():
             expression += " -" + key + " " + literal(value)
         expression += " -Folder @(" + ",".join(literal(root) for root in kwargs.get("roots", [self.samples])) + ")"
@@ -264,6 +264,23 @@ class PowerShellRobustness(ScanRootAssertions):
                 expected = source.encode("utf-8") if MAJOR == 2 else source
                 self.assertEqual(query["source"], [expected])
                 self.assertEqual(query["scan_id"], ["scan + & /"])
+
+    def test_marker_timestamps_ignore_the_host_culture(self):
+        # ToString("yyyy-MM-ddTHH:mm:ssZ") follows CurrentCulture: Thai (Buddhist year 2569),
+        # Arabic (Hijri) and Persian calendars, and the "." time separator of da-DK and fi-FI,
+        # gave a timestamp such as 2569-10-17T12:37:13Z or 2026-10-17T12.37.14Z.
+        self.file()
+        year = time.gmtime().tm_year
+        for culture in ("th-TH", "ar-SA", "fa-IR", "da-DK", "fi-FI"):
+            with self.subTest(culture=culture):
+                self.markers[:] = []
+                prefix = ("try { [Threading.Thread]::CurrentThread.CurrentCulture = "
+                          "[Globalization.CultureInfo]::GetCultureInfo('" + culture + "') } catch { }; ")
+                self.assertEqual(self.run_collector(prefix=prefix), 0, self.output)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+                for marker in self.markers:
+                    self.assertRegex(marker["timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+                    self.assertIn(int(marker["timestamp"][:4]), (year - 1, year, year + 1), marker["timestamp"])
 
     def test_dry_run_does_not_contact_unreachable_service(self):
         self.file()
@@ -531,6 +548,97 @@ class PowerShellRobustness(ScanRootAssertions):
         self.uploads[:] = []
         # The CA is correct, but the certificate deliberately has no IP SAN.
         self.assertEqual(self.run_collector("--tls", "--ca-cert", ca), self.TLS_FAILURE_CODE, self.output)
+        self.assertEqual(self.uploads, [])
+
+    def make_pki(self, intermediate=False):
+        """Create root CA (and optionally an intermediate), an unrelated root and a leaf for
+        localhost with openssl; return a dict of file paths."""
+        openssl = shutil.which("openssl")
+        if not openssl:
+            self.skipTest("requires OpenSSL on the test host to generate ephemeral TLS fixtures")
+        path = lambda name: os.path.join(self.root, name)
+
+        def run(*command):
+            result = subprocess.run((openssl,) + command, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout)
+
+        run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=TestRoot",
+            "-keyout", path("root.key"), "-out", path("root.pem"),
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=UnrelatedRoot",
+            "-keyout", path("other.key"), "-out", path("other.pem"),
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+        issuer, issuer_key = path("root.pem"), path("root.key")
+        chain = []
+        if intermediate:
+            with open(path("inter.cnf"), "w") as stream:
+                stream.write("basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n")
+            run("req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=TestIntermediate",
+                "-keyout", path("inter.key"), "-out", path("inter.csr"))
+            run("x509", "-req", "-in", path("inter.csr"), "-CA", issuer, "-CAkey", issuer_key, "-CAcreateserial",
+                "-days", "1", "-out", path("inter.pem"), "-extfile", path("inter.cnf"))
+            issuer, issuer_key = path("inter.pem"), path("inter.key")
+            chain = [path("inter.pem")]
+        with open(path("leaf.cnf"), "w") as stream:
+            stream.write("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+                         "extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n")
+        run("req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+            "-keyout", path("leaf.key"), "-out", path("leaf.csr"))
+        run("x509", "-req", "-in", path("leaf.csr"), "-CA", issuer, "-CAkey", issuer_key, "-CAcreateserial",
+            "-days", "1", "-out", path("leaf.pem"), "-extfile", path("leaf.cnf"))
+        with open(path("chain.pem"), "w") as stream:
+            for name in [path("leaf.pem")] + chain:
+                with open(name) as certificate:
+                    stream.write(certificate.read())
+        return {"root": path("root.pem"), "other": path("other.pem"),
+                "chain": path("chain.pem"), "key": path("leaf.key")}
+
+    def serve_tls(self, chain, key):
+        self.server.shutdown()
+        self.thread.join(5)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(chain, key)
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def test_ambient_certificate_callback_cannot_disable_default_verification(self):
+        # A process-wide accept-all callback (typical in profiles and wrapper scripts) was
+        # honoured by the collector's default HTTPS mode: an untrusted server got the samples.
+        pki = self.make_pki()
+        self.serve_tls(pki["chain"], pki["key"])
+        self.file()
+        prefix = ("Add-Type -TypeDefinition 'using System.Net.Security; "
+                  "using System.Security.Cryptography.X509Certificates; public static class AcceptAll { "
+                  "public static bool Yes(object s, X509Certificate c, X509Chain h, SslPolicyErrors e) "
+                  "{ return true; } }'; "
+                  "[Net.ServicePointManager]::ServerCertificateValidationCallback = "
+                  "[Delegate]::CreateDelegate([Net.Security.RemoteCertificateValidationCallback], "
+                  "[AcceptAll].GetMethod('Yes')); ")
+        self.assertEqual(self.run_collector("--tls", "--server", "localhost", prefix=prefix),
+                         self.TLS_FAILURE_CODE, self.output)
+        self.assertEqual(self.uploads, [])
+        # The ambient callback is still in place for the rest of the session afterwards.
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["root"], "--server", "localhost",
+                                            prefix=prefix), 0, self.output)
+        self.assertEqual(len(self.uploads), 1)
+
+    def test_custom_ca_accepts_a_chain_through_an_intermediate(self):
+        # The custom-root validation rebuilt the chain from the leaf with only the supplied
+        # root in the extra store, so a server that sends leaf + intermediate (the normal
+        # private PKI) was rejected with "TLS root differs from supplied CA".
+        pki = self.make_pki(intermediate=True)
+        self.serve_tls(pki["chain"], pki["key"])
+        self.file()
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["root"], "--server", "localhost"),
+                         0, self.output)
+        self.assertEqual(len(self.uploads), 1)
+        self.uploads[:] = []
+        # An unrelated root must still be refused, and so must a wrong host name.
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["other"], "--server", "localhost"),
+                         self.TLS_FAILURE_CODE, self.output)
+        self.assertEqual(self.run_collector("--tls", "--ca-cert", pki["root"]), self.TLS_FAILURE_CODE, self.output)
         self.assertEqual(self.uploads, [])
 
     def test_profiles_share_the_reviewed_core(self):

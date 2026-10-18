@@ -86,14 +86,39 @@ namespace ThunderstormCollector {
         private static bool insecure;
         private static string tlsError = "";
         private static ConsoleCancelEventHandler handler;
+        private static object savedGlobalCallback, savedLegacyPolicy;
+        private static bool tlsStateSaved;
+        // Default verification must not depend on ambient process state. An accept-all callback
+        // or legacy CertificatePolicy installed by a profile or a wrapper script (the common
+        // "ignore certificate errors" snippet) would silently switch certificate and hostname
+        // checks off for every HTTPS request. Reflection keeps old CLRs compiling.
+        private static void SetGlobalTlsState(ref object callback, ref object policy, bool clear) {
+            PropertyInfo callbackProperty = typeof(ServicePointManager).GetProperty("ServerCertificateValidationCallback");
+            PropertyInfo policyProperty = typeof(ServicePointManager).GetProperty("CertificatePolicy");
+            try {
+                if (clear) {
+                    if (callbackProperty != null) { callback = callbackProperty.GetValue(null, null); callbackProperty.SetValue(null, null, null); }
+                    if (policyProperty != null) { policy = policyProperty.GetValue(null, null); policyProperty.SetValue(null, null, null); }
+                } else {
+                    if (callbackProperty != null) callbackProperty.SetValue(null, callback, null);
+                    if (policyProperty != null) policyProperty.SetValue(null, policy, null);
+                }
+            } catch (Exception) { }
+        }
         public static void Start() {
             Interrupted = false;
             handler = new ConsoleCancelEventHandler(Cancel);
             Console.CancelKeyPress += handler;
+            SetGlobalTlsState(ref savedGlobalCallback, ref savedLegacyPolicy, true);
+            tlsStateSaved = true;
         }
         public static void Stop() {
             if (handler != null) Console.CancelKeyPress -= handler;
             handler = null;
+            if (tlsStateSaved) SetGlobalTlsState(ref savedGlobalCallback, ref savedLegacyPolicy, false);
+            tlsStateSaved = false;
+            savedGlobalCallback = null;
+            savedLegacyPolicy = null;
             if (ca != null) ca.Reset();
             ca = null;
             insecure = false;
@@ -134,6 +159,11 @@ namespace ThunderstormCollector {
             X509Chain custom = new X509Chain();
             try {
                 custom.ChainPolicy.ExtraStore.Add(ca);
+                // Servers send their intermediate CAs; without them no chain can reach the root.
+                if (chain != null)
+                    foreach (X509ChainElement element in chain.ChainElements)
+                        if (element.Certificate.Thumbprint != leaf.Thumbprint)
+                            custom.ChainPolicy.ExtraStore.Add(element.Certificate);
                 custom.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
                 custom.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                 custom.ChainPolicy.ApplicationPolicy.Add(new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"));
@@ -270,7 +300,7 @@ function Send-Marker([string]$kind) {
     if ($DryRun -or -not $script:markersEnabled) { return $true }
     $fields = '"type":"' + (Escape-Json $kind) + '","source":"' + (Escape-Json $Source) +
         '","hostname":"' + (Escape-Json ([Environment]::MachineName)) + '","collector":"' +
-        $collectorId + '","timestamp":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") + '"'
+        $collectorId + '","timestamp":"' + [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture) + '"'
     if ($scanId) { $fields += ',"scan_id":"' + (Escape-Json $scanId) + '"' }
     if ($kind -ne "begin") {
         $fields += ',"stats":{'
@@ -404,6 +434,9 @@ try {
     Write-Host "[INFO] Scan roots (recursive; exclusions apply):"
     foreach ($root in $roots) { Write-Host "[INFO]   Scan root: $root" }
     Write-Host "[INFO] Limits: max-age=$MaxAge days (0=disabled); max-size=$MaxSize MiB; dry-run=$DryRun"
+    if ([IntPtr]::Size -eq 4 -and $env:PROCESSOR_ARCHITEW6432) {
+        Write-Host "[WARN] 32-bit PowerShell on 64-bit Windows: file-system redirection shows %windir%\SysWOW64 as %windir%\System32, so the real System32 is not collected. Use 64-bit PowerShell (%windir%\SysNative\WindowsPowerShell\v1.0\powershell.exe from a 32-bit host) to scan it."
+    }
     if ($AllExtensions) { Write-Host "[INFO] Extensions: all" }
     else { Write-Host ("[INFO] Extensions: " + ($extensionSet -join ", ")) }
     $script:jsonParser = $null
