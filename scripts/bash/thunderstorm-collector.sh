@@ -1039,9 +1039,10 @@ parse_args() {
 # A host name or address only: no scheme, credentials, port or path. curl would
 # send user:password@ as Basic authentication and the URL is logged, so a secret
 # in this field would end up in the log file, syslog and the process list.
+# A bracketed IPv6 literal may end in a dotted IPv4 address ([::ffff:192.0.2.1]).
 is_valid_server() {
     local LC_ALL=C
-    local pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$'
+    local pattern='^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:.]+\])$'
     [[ "$1" =~ $pattern ]]
 }
 

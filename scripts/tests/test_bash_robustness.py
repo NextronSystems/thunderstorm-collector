@@ -199,7 +199,8 @@ exit 1
 
     def test_valid_server_forms_pass_validation(self):
         (self.samples / "real.txt").write_bytes(b"readable")
-        for good in ["localhost", "127.0.0.1", "thunderstorm.example-1.org", "[::1]"]:
+        for good in ["localhost", "127.0.0.1", "thunderstorm.example-1.org", "[::1]",
+                     "[::ffff:127.0.0.1]", "[64:ff9b::192.0.2.33]"]:
             with self.subTest(server=good):
                 result = self.run_collector("--server", good, "--dry-run")
                 self.assertEqual(result.returncode, 0, self.output)
