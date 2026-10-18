@@ -10,6 +10,12 @@ No collector installation or permanently running endpoint agent is required. Col
 
 This repository provides a compiled Go collector, standalone script collectors, and assessment guides with collection configurations. Available filters, dependencies, and capabilities vary by collector.
 
+## See How It Works
+
+Why some systems cannot run a security agent, and how collectors bring their files to THOR Thunderstorm (a 93-second animation, no sound; the findings in it are illustrative):
+
+<!-- VIDEO: replace this comment with the upload link, a bare https://github.com/user-attachments/assets/<id> line on its own. -->
+
 ## Choose a Collector
 
 | Starting point | When to use it | Documentation |
