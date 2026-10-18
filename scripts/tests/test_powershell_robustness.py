@@ -31,6 +31,13 @@ MAJOR = sys.version_info[0]
 RUNTIME = os.environ.get("POWERSHELL_RUNTIME", "powershell.exe" if os.name == "nt" else "pwsh")
 SCRIPT = os.path.abspath(os.environ.get("POWERSHELL_COLLECTOR") or os.path.join(
     os.path.dirname(__file__), "..", "powershell", "thunderstorm-collector.ps1"))
+# Bracketed IPv6 literals are valid servers, also those that end in a dotted IPv4 address
+# (IPv4-mapped, NAT64). A scheme, credentials, a port, a path, whitespace or a bare IPv6
+# address must stay rejected. The Batch suite reuses both lists for its static pattern check.
+IPV6_SERVERS = ["[::1]", "[::ffff:127.0.0.1]", "[64:ff9b::192.0.2.33]"]
+MALFORMED_SERVERS = ["http://[::ffff:127.0.0.1]", "user:secret@[::ffff:127.0.0.1]",
+                     "[::ffff:127.0.0.1]:8080", "[::ffff:127.0.0.1]/path", "[::ffff:127.0.0.1] ",
+                     "::ffff:127.0.0.1"]
 
 
 def communicate_collector(process, timeout=45):
@@ -450,6 +457,16 @@ class PowerShellRobustness(ScanRootAssertions):
                             ("--max-size-kb", "0"), ("--max-size-kb", "201"),
                             ("--server", "http://localhost")]:
             self.assertEqual(self.run_collector(flag, value), 2, self.output)
+        self.assertEqual(self.paths, [])
+
+    def test_bracketed_ipv6_server_may_end_in_an_ipv4_address(self):
+        # Dry-run contacts nothing, so only the server validation decides the exit status.
+        self.file()
+        for server in IPV6_SERVERS:
+            self.assertEqual(self.run_collector("--server", server, "--dry-run"), 0, server + "\n" + self.output)
+        for server in MALFORMED_SERVERS:
+            self.assertEqual(self.run_collector("--server", server, "--dry-run"), 2, server + "\n" + self.output)
+            self.assertIn("[ERROR] Invalid", self.output)
         self.assertEqual(self.paths, [])
 
     def test_unreachable_service_is_fatal(self):

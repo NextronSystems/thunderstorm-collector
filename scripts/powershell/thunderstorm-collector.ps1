@@ -388,7 +388,7 @@ try {
     if (-not $ThunderstormServer) {
         throw "Thunderstorm server is not configured. Set ThunderstormServer in USER CONFIGURATION or pass -ThunderstormServer HOST."
     }
-    if ($ThunderstormServer -notmatch '^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:]+\])$' -or
+    if ($ThunderstormServer -notmatch '^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:.]+\])$' -or
         $ThunderstormPort -lt 1 -or $ThunderstormPort -gt 65535 -or $MaxAge -lt 0 -or $MaxAge -gt 36500 -or
         $MaxSize -lt 1 -or $MaxSize -gt 200 -or $Retries -lt 1 -or $Retries -gt 10) {
         throw "Invalid server/port, MaxAge (0..36500), MaxSize (1..200 MiB) or Retries (1..10 total attempts)."
