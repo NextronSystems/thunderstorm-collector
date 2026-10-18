@@ -1,8 +1,12 @@
-// +build aix android dragonfly linux darwin
+// +build aix android dragonfly linux
 
 package main
 
 import "syscall"
+
+// filesystemTypesDetected tells the startup summary whether SkipFilesystem can recognise
+// pseudo and network filesystems on this platform.
+var filesystemTypesDetected = true
 
 const (
 	ADFS_SUPER_MAGIC      = 0xadf5

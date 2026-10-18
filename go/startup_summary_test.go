@@ -46,7 +46,7 @@ func TestStartupSummaryWithoutFilters(t *testing.T) {
 		"  - Extensions: all file types",
 		"  - Magic headers: none",
 		"  - Exclude globs: none",
-		"  - Filesystems: network and pseudo filesystems are skipped (--all-filesystems includes them)",
+		defaultFilesystemsLine(),
 		"  - Upload mode: asynchronous",
 		"  - Threads: 1",
 		"  - Destination: http://thunderstorm.example:8080",
@@ -79,7 +79,7 @@ func TestStartupSummaryWithAllSettings(t *testing.T) {
 		"  - Extensions: 3 (.exe, .dll, .ps1)",
 		"  - Magic headers: 2 (a file matching an extension or a magic header is selected)",
 		"  - Exclude globs: 2 ('**/node_modules/**', '/proc')",
-		"  - Filesystems: network and pseudo filesystems are skipped (--all-filesystems includes them)",
+		defaultFilesystemsLine(),
 		"  - Upload mode: synchronous",
 		"  - Threads: 4",
 		"  - Destination: https://thunderstorm.example:443",
@@ -595,4 +595,46 @@ func TestReadTemplateFileRecordsConfigSource(t *testing.T) {
 			t.Errorf("Unexpected source: %+v", source)
 		}
 	})
+}
+
+// defaultFilesystemsLine is the Filesystems line of a run without --all-filesystems on the platform running the tests.
+func defaultFilesystemsLine() string {
+	if filesystemTypesDetected {
+		return "  - Filesystems: network and pseudo filesystems are skipped (--all-filesystems includes them)"
+	}
+	return "  - Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)"
+}
+
+func TestStartupSummaryDoesNotClaimFilesystemSkippingWithoutDetection(t *testing.T) {
+	previous := filesystemTypesDetected
+	defer func() { filesystemTypesDetected = previous }()
+
+	filesystemTypesDetected = false
+	want := "  - Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)"
+	if got := summaryLine(buildStartupSummary(summaryTestConfig()), "  - Filesystems:"); got != want {
+		t.Errorf("platform without filesystem detection: got %q, want %q", got, want)
+	}
+
+	filesystemTypesDetected = true
+	want = "  - Filesystems: network and pseudo filesystems are skipped (--all-filesystems includes them)"
+	if got := summaryLine(buildStartupSummary(summaryTestConfig()), "  - Filesystems:"); got != want {
+		t.Errorf("platform with filesystem detection: got %q, want %q", got, want)
+	}
+
+	cc := summaryTestConfig()
+	cc.AllFilesystems = true
+	filesystemTypesDetected = false
+	want = "  - Filesystems: all filesystem types are scanned (--all-filesystems)"
+	if got := summaryLine(buildStartupSummary(cc), "  - Filesystems:"); got != want {
+		t.Errorf("--all-filesystems must win on every platform: got %q, want %q", got, want)
+	}
+}
+
+func summaryLine(lines []string, prefix string) string {
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }
