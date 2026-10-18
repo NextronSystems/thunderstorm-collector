@@ -510,6 +510,9 @@ class PythonRobustness(unittest.TestCase):
     def test_slow_but_steady_upload_is_not_cut_off_by_the_socket_timeout(self):
         # Since Python 3.5 sendall() gives the socket timeout to the WHOLE buffer, so a sample
         # that needs longer than the timeout to send failed although the server was reading.
+        # The kernel buffers part of the body (about 2 MiB on Linux loopback) and the server still
+        # has to drain that tail after the last send, so the server is fast enough for the tail to
+        # take well under the timeout (0.5 s) while the whole transfer takes about 5 s.
         module = self.load_collector("collector_slow_upload")
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -524,9 +527,13 @@ class PythonRobustness(unittest.TestCase):
                 data += connection.recv(65536)
             head, body = data.split(b"\r\n\r\n", 1)
             length = int(re.search(b"(?i)content-length:\\s*(\\d+)", head).group(1))
+            rate = 4.0 * 1024 * 1024  # bytes per second (a float: Python 2 divides integers down): steady, never idle for long
             while len(body) < length:
-                time.sleep(0.05)  # about 1 MiB/s: steady, never idle for long
-                body += connection.recv(65536)
+                piece = connection.recv(65536)
+                if not piece:
+                    break
+                body += piece
+                time.sleep(len(piece) / rate)
             received.append(len(body))
             connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
             connection.close()
@@ -537,9 +544,9 @@ class PythonRobustness(unittest.TestCase):
 
         class ShortTimeout(module.Collector):
             def connection(self, timeout):
-                return module.Collector.connection(self, 1.5)
+                return module.Collector.connection(self, 2.5)
 
-        size = 6 * 1024 * 1024
+        size = 20 * 1024 * 1024
         path = self.file("big.bin", b"x" * size)
         args = type("Args", (object,), dict(
             tls=False, insecure=False, ca_cert=None, dry_run=False, sync=False, retries=1,
@@ -552,7 +559,7 @@ class PythonRobustness(unittest.TestCase):
         listener.close()
         thread.join(5)
         self.assertEqual((collector.submitted, collector.failed), (1, 0), elapsed)
-        self.assertTrue(elapsed > 1.5, "the upload did not outlast the socket timeout: %.1f s" % elapsed)
+        self.assertTrue(elapsed > 2.5, "the upload did not outlast the socket timeout: %.1f s" % elapsed)
         self.assertTrue(received and received[0] > size)
 
     def test_legacy_tls_fails_closed_without_verification_api(self):
