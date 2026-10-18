@@ -191,16 +191,23 @@ function walk(root) {
         try {
             var directory = fso.GetFolder(path);
             if ((directory.Attributes & 1024) !== 0) { stats.skipped++; continue; }
+            // FSO reads properties from the live file system, so an entry that vanished after
+            // the directory was listed throws. Handle each entry on its own: one transient
+            // error must not abandon the rest of the directory or go uncounted.
             var folders = new Enumerator(directory.SubFolders);
             for (; !folders.atEnd(); folders.moveNext()) {
-                var child = folders.item();
-                if ((child.Attributes & 1024) === 0 && !excluded(child.Path)) stack.push(child.Path);
+                try {
+                    var child = folders.item();
+                    if ((child.Attributes & 1024) === 0 && !excluded(child.Path)) stack.push(child.Path);
+                } catch (error) { stats.scan_errors++; log("[ERROR] Cannot inspect a subdirectory of " + path + ": " + error.message); }
             }
             var files = new Enumerator(directory.Files);
             for (; !files.atEnd(); files.moveNext()) {
-                var file = files.item();
-                if ((file.Attributes & 1024) !== 0) { stats.skipped++; continue; }
-                upload(file);
+                try {
+                    var file = files.item();
+                    if ((file.Attributes & 1024) !== 0) { stats.skipped++; continue; }
+                    upload(file);
+                } catch (error) { stats.failed++; log("[ERROR] Cannot examine a file in " + path + ": " + error.message); }
             }
         } catch (error) { stats.scan_errors++; log("[ERROR] Cannot traverse " + path + ": " + error.message); }
     }
@@ -250,6 +257,8 @@ try {
     for (var i = 0; i < roots.length; i++) log("[INFO]   Scan root: " + roots[i]);
     log("[INFO] Limits: max-age=" + maxAge + " days (0=disabled); max-size=" + maxSize + " bytes; dry-run=" + dryRun);
     log("[INFO] Extensions: " + (allExtensions ? "all" : selected.join(";")));
+    if (environment("PROCESSOR_ARCHITEW6432"))
+        log("[WARN] 32-bit process on 64-bit Windows: file-system redirection shows %SystemRoot%\\SysWOW64 as %SystemRoot%\\System32, so the real System32 is not collected. Start the script from a 64-bit command prompt (%SystemRoot%\\SysNative\\cmd.exe from a 32-bit host) to scan it.");
     if (!dryRun) { var curl = resolveCurl(); createWorkspace(); }
     for (var i = 0; i < roots.length; i++) walk(roots[i]);
     if (stats.failed || stats.scan_errors) exitCode = 1;
