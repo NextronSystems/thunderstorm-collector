@@ -67,6 +67,20 @@ print(json.dumps({"args": sys.argv[1:], "env": dict(os.environ),
         self.assertEqual(sorted(set(re.findall(r"/api/check\w*", source))), ["/api/checkAsync"])
         self.assertNotRegex(source, r"\bSYNC\b")
 
+    def test_server_pattern_accepts_bracketed_ipv6_with_embedded_ipv4_only(self):
+        # Static twin of the PowerShell test that BatchRobustness inherits, for hosts without
+        # cmd.exe: apply the collector's own JScript pattern, which only uses constructs that
+        # Python's re reads the same way. fullmatch because JScript's $ does not match before
+        # a final newline.
+        source = Path(SCRIPT).read_text()
+        match = re.search(r"if \(!/(\^.*\$)/\.test\(server\)\)", source)
+        self.assertIsNotNone(match, "server validation not found in the Batch collector")
+        pattern = re.compile(match.group(1))
+        for server in shared.IPV6_SERVERS:
+            self.assertTrue(pattern.fullmatch(server), server)
+        for server in shared.MALFORMED_SERVERS:
+            self.assertFalse(pattern.fullmatch(server), server)
+
     def test_adapter_rejects_unsupported_cli_arguments(self):
         adapter = Path(__file__).resolve().parents[2] / "tests/test-collectors.d/bat/build_command.sh"
         result = subprocess.run(["bash", "-c", '. "$1"; collector_build_command --dry-run', "test", str(adapter)],
