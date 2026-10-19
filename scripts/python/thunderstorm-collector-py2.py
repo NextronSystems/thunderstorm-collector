@@ -57,6 +57,8 @@ PYTHON_MAJOR = 2
 MIN_VERSION = (2, 7)
 VERSION = "0.2"
 MAX_RESPONSE = 1024 * 1024
+SEND_CHUNK = 64 * 1024
+MAX_MARKER_JSON = 64 * 1024
 hard_skips = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots"]
 skip_elements = [r"^/mnt(?:/|$)", r"\.dat$", r"\.npm", r"\.vmdk$",
                  r"\.vswp$", r"\.nvram$", r"\.vmsd$", r"\.lck$"]
@@ -133,14 +135,21 @@ def is_cloud_path(path):
 
 def _build_multipart_preamble(boundary, filepath):
     name = _bytes(filepath).replace(b"\\", b"/")
-    for char in (b'"', b";", b"\r", b"\n", b"\x00", b"\t"):
-        name = name.replace(char, b"_")
+    # Quotes and semicolons end the parameter value. Every control character (CR, LF,
+    # TAB, ESC, DEL, ...) makes a strict multipart parser reject the whole request, so the
+    # file would never be collected. Only this metadata changes, never the file bytes.
+    name = re.sub(br'[\x00-\x1f\x7f";]', b"_", name)
     return (b"--" + _bytes(boundary) +
             b'\r\nContent-Disposition: form-data; name="file"; filename="' +
             name + b'"\r\nContent-Type: application/octet-stream\r\n\r\n')
 
 
 def read_response(response):
+    # Python 2's httplib (strict=0) reads a reply without an HTTP status line, such as an
+    # SSH banner or HTML sent by a wrong port, as an HTTP/0.9 response with status 200.
+    # Python 3 raises BadStatusLine itself, where version is never 9.
+    if getattr(response, "version", 11) == 9:
+        raise ValueError("response is not HTTP/1.x")
     body = response.read(MAX_RESPONSE + 1)
     if len(body) > MAX_RESPONSE:
         raise ValueError("response exceeds 1 MiB limit")
@@ -210,13 +219,16 @@ class Collector(object):
                     log("[WARN] Collection markers unsupported (HTTP {})".format(response.status))
                     return True
                 if 200 <= response.status < 300:
-                    if kind == "begin":
+                    if kind == "begin" and len(body) > MAX_MARKER_JSON:
+                        log("[WARN] Ignoring oversized collection marker response")
+                    elif kind == "begin":
                         try:
                             data = json.loads(body.decode("utf-8"))
                             value = data.get("scan_id") if isinstance(data, dict) else None
                             if isinstance(value, text_type) and value:
                                 self.scan_id = value
-                        except (ValueError, UnicodeError):
+                        except (ValueError, UnicodeError, RuntimeError):
+                            # RuntimeError (RecursionError): nesting deeper than the recursion limit
                             pass
                     return True
                 raise ValueError("HTTP {}".format(response.status))
@@ -269,14 +281,14 @@ class Collector(object):
 
     def upload(self, path, metadata):
         if self.args.dry_run:
-            log("[DRY-RUN] Would submit {}".format(_text(path)))
+            log("[DRY-RUN] Would submit {}".format(path))
             self.would_submit += 1
             return
         self.in_flight = path
         try:
             data = self.snapshot(path, metadata)
         except (IOError, OSError, ValueError) as error:
-            log("[ERROR] Cannot read {}: {}".format(_text(path), error))
+            log("[ERROR] Cannot read {}: {}".format(path, error))
             self.failed += 1
             self.in_flight = None
             return
@@ -302,7 +314,11 @@ class Collector(object):
                     connection.putheader(key, value)
                 connection.endheaders()
                 connection.send(preamble)
-                connection.send(data)
+                # Since Python 3.5, sendall() applies the socket timeout to the whole buffer, so
+                # one send of a large sample would give up after 30 seconds even while the server
+                # keeps reading. Chunks keep the documented idle-I/O semantics of the timeout.
+                for offset in range(0, len(data), SEND_CHUNK):
+                    connection.send(data[offset:offset + SEND_CHUNK])
                 connection.send(epilogue)
                 response = connection.getresponse()
                 read_response(response)
@@ -315,9 +331,9 @@ class Collector(object):
                         delay = max(0, min(int(response.getheader("Retry-After", "2")), 120))
                     except (ValueError, TypeError):
                         delay = 2
-                log("[ERROR] Upload {}: HTTP {}".format(_text(path), response.status))
+                log("[ERROR] Upload {}: HTTP {}".format(path, response.status))
             except (IOError, OSError, ValueError, http_client.HTTPException) as error:
-                log("[ERROR] Upload {}: {}".format(_text(path), error))
+                log("[ERROR] Upload {}: {}".format(path, error))
             finally:
                 if connection is not None:
                     connection.close()
@@ -326,32 +342,58 @@ class Collector(object):
         self.failed += 1
         self.in_flight = None
 
-    def walk(self, root):
-        if self.excluded(root):
-            log("[SKIP] Excluded root {}".format(_text(root)))
-            return
-        for directory, directories, files in os.walk(root, followlinks=False,
-                                                    onerror=self.traversal_error):
-            directories[:] = [name for name in directories
-                              if not os.path.islink(os.path.join(directory, name)) and
-                              not self.excluded(os.path.join(directory, name))]
-            for name in files:
+    def entries(self, root):
+        """Yield (path, metadata, error) for every entry below root that is not a directory.
+
+        The walk is iterative and never follows links. os.walk is a recursive generator
+        before Python 3.12 (and on Python 2), so a directory tree deeper than the recursion
+        limit, a single mkdir -p of about 1000 one-character levels, would abort the whole
+        run with a RecursionError and leave the rest of the filesystem unscanned."""
+        stack = [root]
+        while stack:
+            directory = stack.pop()
+            try:
+                # A queued directory may have waited through many uploads. os.walk checked for
+                # a link right before descending, so do the same: one swapped for a symlink in
+                # the meantime would be listed through the link, outside the selected root.
+                if not stat.S_ISDIR(os.lstat(directory).st_mode):
+                    log("[SKIP] No longer a directory: {}".format(directory))
+                    continue
+                names = os.listdir(directory)
+            except (IOError, OSError) as error:
+                self.traversal_error(error)
+                continue
+            for name in names:
                 path = os.path.join(directory, name)
-                self.scanned += 1
                 try:
                     metadata = os.lstat(path)
                 except (IOError, OSError) as error:
-                    self.failed += 1
-                    log("[ERROR] Cannot stat {}: {}".format(_text(path), error))
+                    yield path, None, error
                     continue
-                if (not stat.S_ISREG(metadata.st_mode) or
-                        any(re.search(pattern, path) for pattern in skip_elements) or
-                        not self.eligible(metadata)):
-                    self.skipped += 1
-                    continue
-                self.upload(path, metadata)
-                if self.args.progress:
-                    log("[{} examined]".format(self.scanned))
+                if stat.S_ISDIR(metadata.st_mode):
+                    if not self.excluded(path):
+                        stack.append(path)
+                elif not (stat.S_ISLNK(metadata.st_mode) and os.path.isdir(path)):
+                    yield path, metadata, None
+
+    def walk(self, root):
+        if self.excluded(root):
+            log("[SKIP] Excluded root {}".format(root))
+            return
+        for path, metadata, error in self.entries(root):
+            self.scanned += 1
+            if error is not None:
+                self.failed += 1
+                log("[ERROR] Cannot stat {}: {}".format(path, error))
+                continue
+            if (not stat.S_ISREG(metadata.st_mode) or
+                    any(re.search(pattern, path) for pattern in skip_elements) or
+                    not self.eligible(metadata)):
+                self.skipped += 1
+                continue
+            self.upload(path, metadata)
+            if self.args.progress:
+                log("[{} examined]".format(self.scanned))
 
     def run(self):
         roots = []
@@ -359,7 +401,7 @@ class Collector(object):
             path = os.path.realpath(os.path.abspath(path))
             if not os.path.isdir(path):
                 self.scan_errors += 1
-                log("[ERROR] Missing or invalid directory {}".format(_text(path)))
+                log("[ERROR] Missing or invalid directory {}".format(path))
             else:
                 roots.append(path)
         if not roots:
@@ -367,7 +409,7 @@ class Collector(object):
             return 2
         log("[INFO] Scan roots (recursive; exclusions apply):")
         for root in roots:
-            log("[INFO]   Scan root: {}".format(_text(root)))
+            log("[INFO]   Scan root: {}".format(root))
         log("[INFO] Limits: max-age={} days (0=disabled); max-size={} KiB; dry-run={}".format(
             self.args.max_age, self.args.max_size_kb, self.args.dry_run))
         hard_skips.extend(os.path.normpath(p) for p in get_excluded_mounts())
