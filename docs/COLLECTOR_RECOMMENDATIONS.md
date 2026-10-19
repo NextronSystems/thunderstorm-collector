@@ -104,7 +104,7 @@ The [v1.0.1 release](https://github.com/NextronSystems/thunderstorm-collector/re
 | WASI Preview 1 (`wasip1`) | `wasm` |
 | Native Client (`nacl`) | `386`, `amd64p32`, `arm` |
 
-The dedicated **`amd64-freebsd8-netscaler`** package uses Go 1.9.7 and is included in the [v1.1.0 pre-release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0); it is absent from v1.0.1. See [download availability](../README.md#download-a-collector) and the [NetScaler test record](../go/README.md#citrix-netscaler-and-freebsd-84).
+The dedicated **`amd64-freebsd8-netscaler`** package uses Go 1.9.7 and is included in the [v1.1.0 release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0); it is absent from v1.0.1. See [download availability](../README.md#download-a-collector) and the [NetScaler test record](../go/README.md#citrix-netscaler-and-freebsd-84).
 
 JavaScript, WASI and Native Client packages need a host runtime that exposes the required files and networking. Their publication, and that of Plan 9 packages, does not establish an end-to-end collection test or an ordinary appliance deployment route.
 

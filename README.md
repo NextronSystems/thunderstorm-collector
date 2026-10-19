@@ -52,18 +52,18 @@ Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases
 - **Go packages** contain the executable and a default `config.yml`. Windows packages use ZIP; other platforms use `.tar.gz`. The standalone `config-<version>.yml` asset is an additional copy of that configuration.
 - **Script assets** are individual, versioned files. Download the selected collector and check its runtime requirements. Each script runs independently; the repository's test harness is not required on the target.
 
-**Release availability, 19 October 2026:** v1.0.1 remains the latest stable release. The [v1.1.0 pre-release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) includes the revised script collectors, additional legacy script variants, and dedicated NetScaler package. `master` may contain further changes; use the documentation matching your download.
+**Release availability, 19 October 2026:** [v1.1.0](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) is the latest stable release. It includes the revised script collectors, additional legacy script variants, and dedicated NetScaler package. `master` may contain further changes; use the documentation matching your download.
 
 - **Current scripts:** open the collector file linked in the [script selection table](scripts/README.md#choosing-a-collector) and use GitHub's **Download raw file** control, preserving the filename and extension. A single script is sufficient; no repository clone or build is needed. Follow its language guide for runtime requirements and settings.
-- **NetScaler binary:** download `thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz` and its `.sha256` file from the [v1.1.0 pre-release assets](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0), after checking the [target requirements](go/README.md#choose-a-collector-for-your-netscaler). For newer validation builds, follow the [CI artifact download steps](go/legacy/README.md#download-and-select). Local compilation is optional.
-- **Published v1.0.1 Go binaries:** use the [matching Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/go/README.md).
+- **NetScaler binary:** download `thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz` and its `.sha256` file from the [v1.1.0 release assets](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0), after checking the [target requirements](go/README.md#choose-a-collector-for-your-netscaler). For newer validation builds, follow the [CI artifact download steps](go/legacy/README.md#download-and-select). Local compilation is optional.
+- **Published v1.1.0 Go binaries:** use the [matching Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.1.0/go/README.md).
 
 ## Quick Start
 
-For the **Linux amd64 Go package from v1.0.1**, download the archive from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.0.1), extract it, and enter the package directory:
+For the **Linux amd64 Go package from v1.1.0**, download the archive from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0), extract it, and enter the package directory:
 
 ```sh
-tar -xzf thunderstorm-collector-1.0.1-amd64-linux.tar.gz
+tar -xzf thunderstorm-collector-1.1.0-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
 ```
 

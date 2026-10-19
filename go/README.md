@@ -93,7 +93,7 @@ Before a broad assessment, preview a small directory of synthetic files and perf
 
 For **FreeBSD 8.4 / amd64**, use the separate collector built with **Go 1.9.7** and `CGO_ENABLED=0`. Regular FreeBSD packages are not interchangeable with this target.
 
-**Release availability:** the [v1.1.0 pre-release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) includes **`thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz`** and its `.sha256` file under **Assets**. **v1.0.1 and earlier do not contain this dedicated package.** For later versions, look for `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` in the selected release.
+**Release availability:** the [v1.1.0 release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) includes **`thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz`** and its `.sha256` file under **Assets**. **v1.0.1 and earlier do not contain this dedicated package.** For later versions, look for `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` in the selected release.
 
 The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the checksum and consult its build information for the exact source commit and compiler. The [legacy build guide](legacy/README.md) covers CI artifacts and building from source when a release asset is unavailable. For assessment paths and filters, use the [NetScaler collection profile](../emerging-threats/citrix-netscaler/README.md).
 
