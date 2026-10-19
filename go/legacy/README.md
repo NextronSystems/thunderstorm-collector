@@ -6,9 +6,11 @@ This build uses exactly **Go 1.9.7**, `GOOS=freebsd`, `GOARCH=amd64` and `CGO_EN
 
 ## Download and select
 
-Use the [NetScaler package and compatibility guide](../README.md#citrix-netscaler-and-freebsd-84) for target selection, validation status and unsupported-toolchain limitations. The [main download guide](../../README.md#download-a-collector) distinguishes published releases from current builds.
+Start with the [NetScaler selection steps](../README.md#choose-a-collector-for-your-netscaler) to confirm the OS and CPU and compare the Go binary with the Bash alternative. The [compatibility guide](../README.md#citrix-netscaler-and-freebsd-84) records validation status and toolchain limitations.
 
-To download the existing prebuilt CI package:
+For a versioned package, open the [v1.1.0 release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) and download `thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz` plus its `.sha256` file under **Assets**. Verify the checksum, then extract the archive. The [main download guide](../../README.md#download-a-collector) covers package selection and current source.
+
+For a newer prebuilt CI validation package:
 
 1. Sign in to GitHub and open the [Legacy NetScaler workflow runs](https://github.com/NextronSystems/thunderstorm-collector/actions/workflows/legacy-netscaler.yml).
 2. Select a successful run for the branch and commit you intend to use.

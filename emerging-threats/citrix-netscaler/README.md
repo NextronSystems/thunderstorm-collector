@@ -4,6 +4,10 @@
 
 Reviewed **2026-10-11**. This profile selects a broad set of NetScaler files for submission to Thunderstorm. Detection uses the server's installed signatures. The profile contains a **Go configuration** and **header settings for the existing Bash collector**.
 
+## Choose the collector first
+
+Use the [NetScaler selection steps](../../go/README.md#choose-a-collector-for-your-netscaler) to identify the firmware/build, underlying OS and CPU. The dedicated Go binary targets confirmed FreeBSD 8.4/amd64; the [Bash preset below](#option-2-existing-bash-collector) is an alternative when its requirements are met. FreeBSD 14.3 appears in the Go test record as a VM environment, not as a NetScaler version boundary. Actual firmware validation remains pending for both options.
+
 ## Collection scope
 
 Walk these directories recursively, including hidden files and subdirectories, subject to the collectors' exclusions, access permissions, and file-size limit:
