@@ -33,6 +33,8 @@ class BashRobustnessTests(unittest.TestCase):
         self.samples.mkdir()
         self.requests = []
         self.uploads = []
+        self.filenames = []
+        self.part_types = []
         self.upload_statuses = []
         self.marker_status = 200
         self.end_status = 200
@@ -60,12 +62,19 @@ class BashRobustnessTests(unittest.TestCase):
                 else:
                     response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    header_block = data.split(b"\r\n\r\n", 1)[0]
+                    declared = re.search(b'filename="([^"]*)"', header_block)
+                    test.filenames.append(declared.group(1) if declared else None)
                     if 200 <= status < 300:
                         headers = ("Content-Type: " + self.headers["Content-Type"] +
                                    "\r\nMIME-Version: 1.0\r\n\r\n").encode()
                         message = BytesParser(policy=email.policy.default).parsebytes(headers + data)
+                        parts = list(message.iter_parts())
                         test.uploads.extend((part.get_filename(), part.get_payload(decode=True))
-                                            for part in message.iter_parts())
+                                            for part in parts)
+                        # None records a part that carries no Content-Type header at all.
+                        test.part_types.extend(None if part["Content-Type"] is None else str(part["Content-Type"])
+                                               for part in parts)
                 self.send_response(status)
                 if test.redirect:
                     self.send_header("Location", "/unapproved-sink")
@@ -132,6 +141,219 @@ class BashRobustnessTests(unittest.TestCase):
         result = self.run_collector()
         self.assertEqual(result.returncode, 0, self.output)
         self.assert_payloads([("payload:" + name).encode() for name in names])
+
+    def test_file_part_is_always_octet_stream(self):
+        # curl guesses a part type from the file name unless one is given (text/plain
+        # for .txt, image/jpeg for .jpg, no header for unknown extensions).
+        names = ["notes.txt", "picture.jpg", "page.html", "document.docx", "unknown.nfo", "noextension"]
+        for name in names:
+            (self.samples / name).write_bytes(("payload:" + name).encode())
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        for transport, env in transports:
+            with self.subTest(transport=transport):
+                self.uploads.clear()
+                self.part_types.clear()
+                result = self.run_collector(env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertEqual(len(self.uploads), len(names), self.output)
+                self.assertEqual(self.part_types, ["application/octet-stream"] * len(names))
+
+    def test_traversal_diagnostics_are_bounded_without_losing_partial_results(self):
+        sample = self.samples / "real.txt"
+        sample.write_bytes(b"readable")
+        path = self.tool_path(find='''#!/bin/sh
+printf '%s\\000' "$SAMPLE"
+i=0
+while [ "$i" -lt 3000 ]; do
+    echo "find: '/some/unreadable/directory-$i': Permission denied" >&2
+    i=$((i + 1))
+done
+exit 1
+''')
+        (Path(path) / "curl").symlink_to(shutil.which("curl"))
+        result = self.run_collector(env={"PATH": path, "SAMPLE": str(sample)})
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assert_payloads([b"readable"])
+        self.assertIn("Incomplete scan", self.output)
+        self.assertIn("first 4096 diagnostic bytes", self.output)
+        self.assertLess(len(self.output), 8192)
+
+    def test_server_must_be_a_plain_host_name_and_secrets_are_never_logged(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        log = self.root / "collector.log"
+        for bad in ["user:s3cret@127.0.0.1", "http://127.0.0.1", "127.0.0.1:8080", "127.0.0.1/path",
+                    "127.0.0.1#fragment", "127.0.0.1?query", "-option", "host name", "127.0.0.1\n",
+                    "s3cret@", "[::1", "::1"]:
+            with self.subTest(server=bad):
+                self.requests.clear()
+                result = self.run_collector("--server", bad, log_file=log)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("Server must be a DNS name", self.output)
+                self.assertEqual(self.requests, [])
+                self.assertNotIn("s3cret", self.output)
+                self.assertNotIn("s3cret", log.read_text())
+
+    def test_valid_server_forms_pass_validation(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        for good in ["localhost", "127.0.0.1", "thunderstorm.example-1.org", "[::1]",
+                     "[::ffff:127.0.0.1]", "[64:ff9b::192.0.2.33]"]:
+            with self.subTest(server=good):
+                result = self.run_collector("--server", good, "--dry-run")
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertNotIn("Server must be", self.output)
+
+    def test_end_marker_reports_scan_errors(self):
+        # The guide's marker example carries scan_errors; without it the server-side
+        # record of a run with a missing root looks complete.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        result = self.run_collector(roots=[self.samples, self.root / "missing"])
+        self.assertEqual(result.returncode, 1, self.output)
+        stats = self.markers[-1]["stats"]
+        self.assertEqual(self.markers[-1]["type"], "end")
+        self.assertEqual((stats["scan_errors"], stats["submitted"], stats["failed"]), (1, 1, 0))
+
+    def test_source_is_percent_encoded_in_any_locale(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        source = u"Fall-M\u00fcller-\u0141\u00f3d\u017a-\u00e4\u00f6\u00df"
+        for locale in ("C", "en_US.UTF-8", "de_DE.UTF-8", "C.UTF-8"):
+            with self.subTest(locale=locale):
+                self.requests.clear()
+                result = self.run_collector("--source", source, env={"LC_ALL": locale})
+                self.assertEqual(result.returncode, 0, self.output)
+                uploads = [path for path in self.requests if path.startswith("/api/check")]
+                self.assertEqual(len(uploads), 1)
+                self.assertTrue(uploads[0].isascii(), uploads[0])
+                self.assertEqual(parse_qs(urlsplit(uploads[0]).query)["source"], [source])
+
+    def test_control_characters_never_reach_the_multipart_header(self):
+        # A strict parser (Go net/http) answers HTTP 400 for any C0 control character
+        # other than TAB or DEL in a part header, so the file would never be collected.
+        controls = [b"\x01", b"\x08", b"\x0b", b"\x0c", b"\x1b", b"\x1f", b"\x7f", b"\t", b"\r", b"\n"]
+        for index, control in enumerate(controls):
+            (self.samples / os.fsdecode(b"ctl%d" % index + control + b"name.exe")).write_bytes(b"payload%d" % index)
+        nested = self.samples / os.fsdecode(b"dir\x1b[2K\x01")
+        nested.mkdir()
+        (nested / "inside.txt").write_bytes(b"nested")
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        expected = [b"payload%d" % i for i in range(len(controls))] + [b"nested"]
+        for transport, env in transports:
+            with self.subTest(transport=transport):
+                self.uploads.clear()
+                self.filenames.clear()
+                result = self.run_collector(env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assert_payloads(expected)
+                self.assertEqual(len(self.filenames), len(expected))
+                for name in self.filenames:
+                    self.assertIsNotNone(name)
+                    self.assertIsNone(re.search(b"[\x00-\x1f\x7f]", name), name)
+
+    def recording_tool(self, name):
+        return '''#!/bin/sh
+: > "$ARGS_FILE"
+check_directory() {
+    if [ -d "$1" ] && [ -z "$(find "$1" -mindepth 1 | head -1)" ]; then
+        echo CAPATH_IS_AN_EMPTY_DIRECTORY >> "$ARGS_FILE"
+    else
+        echo CAPATH_IS_NOT_AN_EMPTY_DIRECTORY >> "$ARGS_FILE"
+    fi
+}
+previous=""
+for argument do
+    printf 'ARG %s\\n' "$argument" >> "$ARGS_FILE"
+    [ "$previous" = --capath ] && check_directory "$argument"
+    case "$argument" in
+        --ca-directory=*) check_directory "${argument#--ca-directory=}" ;;
+    esac
+    previous="$argument"
+done
+exit 7
+'''
+
+    def test_ca_cert_replaces_system_trust_for_curl_and_wget(self):
+        # curl keeps its built-in CA directory and GnuTLS wget its system trust when only a
+        # CA file is passed; the empty directory makes --ca-cert the only trust anchor.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        cert = self.root / "ca.pem"
+        cert.write_text("not a real certificate; the recording tool never connects\n")
+        for name, expected in (("curl", ["ARG --cacert", "ARG " + str(cert), "ARG --capath"]),
+                               ("wget", ["ARG --ca-certificate=" + str(cert)])):
+            with self.subTest(transport=name):
+                shutil.rmtree(self.root / "tools", ignore_errors=True)
+                path = self.tool_path(**{name: self.recording_tool(name)})
+                args = self.root / (name + ".args")
+                result = self.run_collector("--ssl", "--ca-cert", str(cert),
+                                            env={"PATH": path, "ARGS_FILE": str(args)})
+                self.assertEqual(result.returncode, 2, self.output)
+                recorded = args.read_text().splitlines()
+                for line in expected:
+                    self.assertIn(line, recorded)
+                self.assertIn("CAPATH_IS_AN_EMPTY_DIRECTORY", recorded)
+                self.assertNotIn("CAPATH_IS_NOT_AN_EMPTY_DIRECTORY", recorded)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl required for local TLS fixture")
+    def test_ca_cert_trusts_the_configured_ca_and_rejects_an_unrelated_one(self):
+        # Guards the empty CA directory against TLS backends that mishandle it.
+        def run(*command):
+            subprocess.run(command, check=True, capture_output=True, cwd=self.root)
+        run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key",
+            "-out", "ca.pem", "-days", "1", "-subj", "/CN=Test Root CA")
+        run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "other.key",
+            "-out", "other.pem", "-days", "1", "-subj", "/CN=Unrelated CA")
+        run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", "leaf.key",
+            "-out", "leaf.csr", "-subj", "/CN=localhost")
+        (self.root / "leaf.cnf").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+                                            "extendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n")
+        run("openssl", "x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+            "-CAcreateserial", "-out", "leaf.pem", "-days", "1", "-extfile", "leaf.cnf")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.root / "leaf.pem", self.root / "leaf.key")
+        self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+        (self.samples / "real.txt").write_bytes(b"readable")
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        for name, env in transports:
+            with self.subTest(transport=name):
+                self.uploads.clear()
+                result = self.run_collector("--ssl", "--server", "localhost", "--ca-cert",
+                                            str(self.root / "other.pem"), env=env)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertEqual(self.uploads, [])
+                result = self.run_collector("--ssl", "--server", "localhost", "--ca-cert",
+                                            str(self.root / "ca.pem"), env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assert_payloads([b"readable"])
+
+    def test_cloud_filter_matches_directories_not_regular_file_names(self):
+        # The file name is attacker-controlled: a sample called "mega" must be collected.
+        names = ["mega", "Dropbox", ".dropbox", "SyncThing", "OneDrive", "Nextcloud",
+                 "tresorit", "MEGAsync", "OneDrive-Setup.exe", "onedrive-update.exe",
+                 "Nextcloud-3.0.AppImage", "OneDrive -x.bin", "Google Drive", "iCloud Drive",
+                 "Google Drive notes.txt", "CloudStorage", "normal.txt"]
+        for name in names:
+            (self.samples / name).write_bytes(name.encode())
+        for name in ["Dropbox", "OneDrive - Company", "OneDrive-Corp", "Nextcloud-alice",
+                     "Library/CloudStorage"]:
+            folder = self.samples / "cloud" / name
+            folder.mkdir(parents=True)
+            (folder / "skip.txt").write_bytes(b"excluded")
+        folder = self.samples / "Google Drive notes"
+        folder.mkdir()
+        (folder / "keep.txt").write_bytes(b"ordinary-folder")
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([name.encode() for name in names] + [b"ordinary-folder"])
 
     def test_newline_root_does_not_scan_its_sibling(self):
         selected = self.root / "selected\n"
