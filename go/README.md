@@ -54,9 +54,46 @@ See [downloads and current release availability](../README.md#download-a-collect
 
 ### Citrix NetScaler and FreeBSD 8.4
 
-For older Citrix NetScaler appliances based on **FreeBSD 8.4**, select the separate **amd64 (64-bit x86)** collector built with **Go 1.9.7** and `CGO_ENABLED=0`. Confirm the appliance's OS and architecture first; regular FreeBSD packages are not interchangeable with this legacy target. Other NetScaler versions need a collector selected using their actual OS, architecture and verified compatibility evidence.
+**FreeBSD 8.4 is the target of the dedicated legacy binary. FreeBSD 14.3 is a VM test environment for that same binary, not a boundary between legacy and recent NetScaler firmware.** These two tests do not establish a supported range from 8.4 through 14.3. Intermediate versions need the same environment checks described below; the absence of a test does not itself establish incompatibility.
 
-**Release availability:** `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` is included starting with the first tagged release containing the legacy packaging workflow. **v1.0.1 and earlier do not contain this dedicated package.** Check the [selected release's assets](https://github.com/NextronSystems/thunderstorm-collector/releases): if the package is absent, that release does not provide the legacy build. This guidance does not imply that a containing release has already been published.
+#### Choose a collector for your NetScaler
+
+First identify the **NetScaler firmware/build**, **underlying OS**, and **CPU architecture**. In the NetScaler CLI, record the firmware/build and enter the system shell:
+
+```text
+show ns version
+shell
+```
+
+Then inspect the underlying system:
+
+```sh
+uname -a
+```
+
+These are the vendor-documented [firmware command](https://developer-docs.netscaler.com/en-us/adc-command-reference-int/current-release/ns/ns-version.html) and [FreeBSD identification procedure](https://support.citrix.com/external/article?articleUrl=CTX495617-how-to-check-the-version-of-freebsd-on-netscaler&language=en_US). In Citrix's example, `11.4-NETSCALER-13.1` identifies **FreeBSD 11.4** beneath **NetScaler 13.1**; the architecture is `amd64` (64-bit x86). Run the shell command on the NetScaler instance being assessed, rather than a management host or hypervisor.
+
+For orientation, vendor notices for FreeBSD-based products list **FreeBSD 8.4 for [13.0](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/Citrix_ADC_ADM_FreeBSD_13.0_Third_Party_Notices.pdf)** and **FreeBSD 11.4 for [13.1](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/NetScaler_ADC_ADM_FreeBSD_13.1_Third_Party_Notices.pdf) and [14.1](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/NetScaler_ADC_ADM_FreeBSD_14.1_Third_Party_Notices.pdf)**. These are component inventories, not collector test results or a complete firmware-to-OS mapping. Components can vary by product/build, so use the actual appliance output to select a collector.
+
+| Appliance environment | Collector to evaluate first | Requirements | Recorded test status |
+| --- | --- | --- | --- |
+| **FreeBSD 8.4, amd64 confirmed** | Dedicated **`amd64-freebsd8-netscaler`** Go package; [download below](#dedicated-netscaler-package-and-downloads) | Matching OS/CPU; no installed Go runtime needed. [Bash with the NetScaler preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) is an alternative when its requirements are met. | An identified legacy artifact passed FreeBSD 8.4 VM tests. Named NetScaler firmware testing remains pending. |
+| **Other FreeBSD versions**, including versions between 8.4 and 14.3 | [Bash collector with the NetScaler assessment preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) | Bash 3.2+, compatible upload tools and Unix utilities as listed below. A regular FreeBSD Go package is another candidate after the compiler/OS checks below. | Bash preset tested with synthetic files on macOS; actual NetScaler firmware testing remains pending. |
+| **Other OS or CPU architecture** | A Go package matching the actual OS/CPU, or the [Bash preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) when its requirements are met | Check the [platform and runtime requirements](../docs/COLLECTOR_RECOMMENDATIONS.md#compatibility-boundaries). Select by the instance's environment, not the NetScaler product name alone. | No product-wide compatibility claim; validate the exact target. |
+
+The **Bash alternative runs independently of the Go binary**. It requires Bash 3.2 or newer, `curl` or GNU wget with `--no-config`, GNU/BSD utilities, readable input paths and writable temporary storage. Follow the [full Bash requirements](../scripts/bash/README.md#requirements) and the linked preset; the script does not read the Go YAML configuration. Use known local collection roots: its automatic mount exclusions rely on Linux `/proc/mounts` and do not establish mount coverage on FreeBSD.
+
+For the **regular FreeBSD amd64/386 Go packages**, the Go 1.10 builds require **FreeBSD 10.3 or later** according to the [compiler's installation requirements](https://github.com/golang/go/blob/go1.10.8/doc/install.html). This is a minimum OS requirement, not a tested NetScaler firmware range or a guarantee on every newer kernel. Packages built with newer Go versions have their own requirements. The legacy binary's FreeBSD 14.3 VM test does not make it the preferred build for modern FreeBSD; see the [specific ASLR test note](#aslr-when-testing-on-modern-freebsd).
+
+If local execution is unavailable or the required tools cannot be used, **copy the relevant files to a collection workstation and upload them from there**. Point the workstation collector at the copied directories. It uploads those local files; it does not acquire the appliance remotely, and coverage depends on which files were copied.
+
+Before a broad assessment, preview a small directory of synthetic files and perform a controlled upload on the intended appliance. Record the firmware/build, OS/CPU, collector revision, selected paths and result. Use the [NetScaler assessment guide](../emerging-threats/citrix-netscaler/README.md) for the broader collection configuration.
+
+#### Dedicated NetScaler package and downloads
+
+For **FreeBSD 8.4 / amd64**, use the separate collector built with **Go 1.9.7** and `CGO_ENABLED=0`. Regular FreeBSD packages are not interchangeable with this target.
+
+**Release availability:** the [v1.1.0 pre-release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) includes **`thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz`** and its `.sha256` file under **Assets**. **v1.0.1 and earlier do not contain this dedicated package.** For later versions, look for `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` in the selected release.
 
 The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the checksum and consult its build information for the exact source commit and compiler. The [legacy build guide](legacy/README.md) covers CI artifacts and building from source when a release asset is unavailable. For assessment paths and filters, use the [NetScaler collection profile](../emerging-threats/citrix-netscaler/README.md).
 

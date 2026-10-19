@@ -33,7 +33,7 @@ For platform-specific selection, start with the **[collector recommendations](do
 
 Prefer direct THOR scanning where the target is supported and local scanning is permitted. **THOR 11 is planned to add Windows ARM64 and Linux ARM64 support**, reducing the need for collectors on those supported systems. Collectors remain useful for legacy systems, appliances, other architectures, and central file-analysis workflows. See the [announcement and selection guidance](docs/COLLECTOR_RECOMMENDATIONS.md#direct-thor-scanning-and-arm64).
 
-For VMware ESXi, use the [Python quick start](scripts/README.md#vmware-esxi-use-the-python-collector); for older NetScaler systems, check the [dedicated FreeBSD 8.4 package guidance](go/README.md#citrix-netscaler-and-freebsd-84).
+For VMware ESXi, use the [Python quick start](scripts/README.md#vmware-esxi-use-the-python-collector). For Citrix NetScaler, follow the [firmware/OS identification and collector selection steps](go/README.md#choose-a-collector-for-your-netscaler): use the dedicated binary for confirmed FreeBSD 8.4/amd64, or the [Bash assessment preset](emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) when its requirements are met.
 
 ## Emerging Threats: Assessment Guides and Collection Profiles
 
@@ -41,7 +41,7 @@ Use the [Emerging Threats guides](emerging-threats/README.md) to choose the file
 
 | Assessment | Guide and configuration |
 | --- | --- |
-| **Citrix NetScaler** | [Broad assessment guide](emerging-threats/citrix-netscaler/README.md), with a [Go configuration](emerging-threats/citrix-netscaler/config.yml) and presets for the existing Bash collector. |
+| **Citrix NetScaler** | [Broad assessment guide](emerging-threats/citrix-netscaler/README.md), with a [Go configuration](emerging-threats/citrix-netscaler/config.yml) and a [preset for the existing Bash collector](emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector). |
 
 These profiles are optional and downloaded separately from release packages. Each guide documents its scope, limits, execution requirements, and validation status. For Go, download the profile YAML using GitHub's **Download raw file** control and load it with `-t`; for Bash, apply the guide's preset to a deployment copy of the script.
 
@@ -52,10 +52,10 @@ Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases
 - **Go packages** contain the executable and a default `config.yml`. Windows packages use ZIP; other platforms use `.tar.gz`. The standalone `config-<version>.yml` asset is an additional copy of that configuration.
 - **Script assets** are individual, versioned files. Download the selected collector and check its runtime requirements. Each script runs independently; the repository's test harness is not required on the target.
 
-**Release availability, 12 October 2026:** v1.0.1 is the latest published release; v1.1.0 has not been published. The revised script collectors, additional legacy script variants, and dedicated NetScaler package described on `master` are newer than v1.0.1.
+**Release availability, 19 October 2026:** v1.0.1 remains the latest stable release. The [v1.1.0 pre-release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) includes the revised script collectors, additional legacy script variants, and dedicated NetScaler package. `master` may contain further changes; use the documentation matching your download.
 
 - **Current scripts:** open the collector file linked in the [script selection table](scripts/README.md#choosing-a-collector) and use GitHub's **Download raw file** control, preserving the filename and extension. A single script is sufficient; no repository clone or build is needed. Follow its language guide for runtime requirements and settings.
-- **Current NetScaler binary:** follow the [CI artifact download steps](go/legacy/README.md#download-and-select) to get a prebuilt package. Local compilation is optional.
+- **NetScaler binary:** download `thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz` and its `.sha256` file from the [v1.1.0 pre-release assets](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0), after checking the [target requirements](go/README.md#choose-a-collector-for-your-netscaler). For newer validation builds, follow the [CI artifact download steps](go/legacy/README.md#download-and-select). Local compilation is optional.
 - **Published v1.0.1 Go binaries:** use the [matching Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/go/README.md).
 
 ## Quick Start
