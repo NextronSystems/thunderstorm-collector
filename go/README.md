@@ -4,6 +4,12 @@ This guide covers the compiled Go collector: configuration, filtering, platform 
 
 For product-specific collection scope, use the [Emerging Threats profiles](../emerging-threats/README.md). Script collectors have their own [configuration and runtime guides](../scripts/README.md).
 
+If deploying a collector is impractical, THOR can also scan files remotely
+through **SSHFS** from a supported analysis workstation. The source needs
+SSH/SFTP access and readable files, rather than a compatible scanner or
+collector binary. See [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md)
+for prerequisites, licensing and a comparison with native and offline scans.
+
 ## Usage
 
 Run your executable with `--help` to see every available option and the effective defaults for the loaded configuration. The [main README contains the complete help output](../README.md#command-line-help). It shows built-in Unix defaults; a loaded YAML configuration can change them, including the file-size limit.
@@ -165,7 +171,13 @@ This [page](https://golang.org/doc/install/source#environment) contains all poss
 
 Use `go version <binary>` when the executable contains build information recognized by your Go toolchain. For older binaries, consult the matching release/build record. The dedicated NetScaler package records its compiler and source commit in `BUILD-INFO.txt`.
 
-The pre-compiled binaries for IBM AIX do not support Power7 systems. On request, we can provide binaries build with `gccgo` instead of `go` that run on Power7 systems.
+The standard Go-based binaries for IBM AIX require POWER8 or newer and do not
+support actual POWER7 hardware. For POWER7, consider a validated script
+collector, SSHFS scanning from a supported workstation, or exported evidence;
+see the [AIX example](../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example)
+and the dedicated [POWER7 SSHFS scanning guide](../docs/AIX_POWER7_SSHFS_SCANNING.md).
+Contact Nextron to confirm current availability and target compatibility of
+any special `gccgo` build.
 
 Regular FreeBSD packages follow the normal Go 1.10/stable build process. For FreeBSD 8.4 NetScaler gateways, see the [separate legacy package guidance](#citrix-netscaler-and-freebsd-84) above.
 
@@ -174,6 +186,10 @@ Note: We haven't tested all compiled binaries on the respective platforms. Pleas
 ## Performance Considerations
 
 Analysis runs on the Thunderstorm server. Collection scope, file sizes, signatures, and server capacity determine processing time. The packaged filters are a general starting point; use the assessment profile when its broader scope is required.
+
+Enumerating, reading and uploading files still consumes source resources.
+Reduced transfer volume depends on file selection; see
+[recurring collection](../docs/SCANNING_APPROACHES.md#recurring-collection).
 
 Start with a small collection and inspect server load and results before increasing scope or concurrency. Adjust `--threads` and `--uploads-per-minute` to control upload pressure. Asynchronous acceptance means the server accepted a file; check analysis completion separately.
 

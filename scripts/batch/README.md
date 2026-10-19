@@ -10,6 +10,10 @@ These instructions describe the current source file. Check the
 published asset; older releases have different options. See
 [script selection](../README.md#choosing-a-collector) for alternatives.
 
+For systems where running a collector is impractical, compare
+[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
+SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+
 ## Quick Start
 
 Copy `scripts/batch/thunderstorm-collector.bat` from the source checkout to a

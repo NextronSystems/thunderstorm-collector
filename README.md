@@ -16,6 +16,24 @@ Why some systems cannot run a security agent, and how collectors bring their fil
 
 https://github.com/user-attachments/assets/eb23f1e6-a6b0-4367-a5e1-fa2e93e4b331
 
+## Choose a Scanning Approach
+
+A Thunderstorm collector is one way to assess a system. Other options are a
+native THOR scan, a remote filesystem scan using **SSHFS**, or offline analysis
+of exported evidence. With SSHFS, THOR runs on an analysis workstation and reads
+files through the source's SSH/SFTP service; no scanner or collector runs on
+the source.
+
+See [Choosing a THOR scanning approach](docs/SCANNING_APPROACHES.md) for the
+comparison, an SSHFS example, licensing and evidence coverage. SSHFS is useful
+for an ad-hoc assessment; scheduled Thunderstorm collectors are often a better
+fit for recurring assessments.
+
+For legacy AIX hosts, see the dedicated
+[AIX on POWER7 SSHFS scanning guide](docs/AIX_POWER7_SSHFS_SCANNING.md), with a
+quick path-allowlist scan for incident response and a thorough assessment
+procedure covering root access, mount inventory and exclusions.
+
 ## Choose a Collector
 
 | Starting point | When to use it | Documentation |

@@ -11,6 +11,10 @@ published asset; older releases have different options. For other runtimes, see
 [script selection](../README.md#choosing-a-collector). For VMware ESXi interpreter
 and deployment considerations, see the [ESXi guide](../README.md#vmware-esxi-use-the-python-collector).
 
+For systems where running a collector is impractical, compare
+[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
+SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+
 ## Quick Start
 
 Copy `scripts/python/thunderstorm-collector.py` from the source checkout to a

@@ -73,12 +73,14 @@ configuration before making changes.
 ### Remote filesystem boundaries
 
 An SSHFS mount does not expose the source's filesystem types as native local
-mount types. Inventory the source and explicitly exclude pseudo filesystems,
-device trees and out-of-scope remote mounts using their paths on the analysis
-workstation. Do not rely on local filesystem-type detection to skip remote
-`/proc` or NFS mounts. See the
-[AIX on POWER7 SSHFS guide](AIX_POWER7_SSHFS_SCANNING.md) for the explanation,
-root-access options and exclusion procedure.
+mount types. For a fast first pass, allowlist a small set of relevant directories
+and check only those subtrees for unexpected nested mounts. For a broader scan,
+inventory the source and explicitly exclude pseudo filesystems, device trees
+and out-of-scope remote mounts using their paths on the analysis workstation.
+Do not rely on local filesystem-type detection to skip remote `/proc` or NFS
+mounts. The [AIX on POWER7 SSHFS guide](AIX_POWER7_SSHFS_SCANNING.md) provides a
+[quick path-allowlist procedure](AIX_POWER7_SSHFS_SCANNING.md#1-quick-incident-response-scan-using-a-path-allowlist)
+and a [thorough assessment procedure](AIX_POWER7_SSHFS_SCANNING.md#2-thorough-assessment-with-mount-inventory-and-exclusions).
 
 ### Read only mount and scan example
 
@@ -104,16 +106,19 @@ From a full THOR package with a valid Forensic Lab License:
 ./thor-linux-64 --lab \
   -p "$HOME/thor-mounts/target/etc" \
   --virtual-map "$HOME/thor-mounts/target:/" \
-  -j target-example --threads 2
+  -j target-example --threads 0
 ```
 
 The `-p` option selects the directory to scan. Virtual mapping restores the original
 path prefix for path-based analysis, and `-j` attributes results to the source
 hostname. Set that value to the actual source identifier. The `--lab` preset
 enables filesystem analysis across platforms, intense scanning and other lab
-settings, including disabling resource safeguards. The explicit thread limit
-reduces concurrency; it does not impose a source I/O or network bandwidth limit.
-Use a dedicated analysis workstation and size the scan for the source's capacity.
+settings, including disabling resource safeguards. `--threads 0` explicitly uses
+all cores on the analysis workstation, as `--lab` normally does. More threads
+can help, but source storage, SSH encryption or the network may limit throughput.
+Use an explicit count such as `--threads 2` or `--threads 4` if source load
+requires less concurrency; a thread count does not impose a source I/O or
+network bandwidth limit. Size the scan for the source's capacity.
 See the [THOR command line options](https://thor-manual.nextron-systems.com/en/latest/usage/flags.html)
 and [lab scanning documentation](https://thor-manual.nextron-systems.com/en/latest/usage/special-scan-modes.html#lab-scanning).
 
@@ -207,8 +212,9 @@ See [THOR lab scanning](https://thor-manual.nextron-systems.com/en/latest/usage/
 
 For detailed instructions, see
 [Scanning AIX on POWER7 with THOR over SSHFS](AIX_POWER7_SSHFS_SCANNING.md).
-It covers root permissions, AIX mount inventory, explicit exclusions and the
-metadata and coverage limits of the mounted view.
+Start with its quick path-allowlist procedure for incident response, then use
+the thorough procedure for wider coverage. It also covers thread selection,
+root permissions, mount inventory, exclusions and metadata limits.
 
 OS compatibility and CPU compatibility are separate requirements. Standard Go
 `ppc64` builds require POWER8 or newer, so the standard Go-based AIX collector
