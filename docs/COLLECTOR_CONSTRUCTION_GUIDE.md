@@ -5,6 +5,11 @@ operating system or architecture. A collector reads approved local files and
 uploads them to THOR Thunderstorm for analysis. It does not scan locally and
 does not need a THOR license on the collecting host.
 
+Before commissioning a new collector, compare the existing
+[scanning approaches](SCANNING_APPROACHES.md). SSHFS can expose source files to
+THOR on an analysis workstation when suitable SSH/SFTP access exists, avoiding
+the need for a collector on the source. Exported evidence is another option.
+
 Start with the upload protocol and an explicit capability profile, not a
 translation of another collector's source. A minimal, honest implementation is
 preferable to silently weakening security or pretending a legacy runtime has

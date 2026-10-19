@@ -6,6 +6,18 @@ For VMware ESXi, start with the [Python guidance below](#vmware-esxi-use-the-pyt
 
 For recommendations by product rather than scripting language, see the [product and platform recommendation list](../docs/COLLECTOR_RECOMMENDATIONS.md). It distinguishes candidate combinations from recorded tests and explains when external file collection is needed.
 
+## Alternatives to Running a Collector
+
+If a compatible script or its dependencies cannot be deployed, consider
+**SSHFS scanning**: mount accessible source directories on a supported analysis
+workstation and run THOR there. The source needs SSH/SFTP access and sufficient
+read permissions; it does not run a scanner or collector.
+
+See [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md) for the
+SSHFS example and a comparison with native scans, Thunderstorm submissions and
+offline analysis, including licensing and evidence coverage. Scheduled
+collectors remain useful for recurring assessments where they can be deployed.
+
 ## Choosing a Collector
 
 The eight collectors are organized by language. Choose a file using the target's available runtime, then follow its guide for all prerequisites and configuration options.

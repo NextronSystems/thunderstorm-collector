@@ -6,6 +6,10 @@ For alternatives, use the [script chooser](../README.md#choosing-a-collector).
 See [download guidance](../../README.md#download-a-collector) for release availability;
 the options below describe the current source collector.
 
+For systems where running a collector is impractical, compare
+[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
+SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+
 ## Requirements and Transport Selection
 
 The script uses POSIX shell syntax and is tested with dash and BusyBox ash. Test the actual shell and utility versions on your target; a dash run is not evidence for every BusyBox build.

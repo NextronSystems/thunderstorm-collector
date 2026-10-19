@@ -6,6 +6,13 @@ For alternatives, use the [script chooser](../README.md#choosing-a-collector).
 See [download guidance](../../README.md#download-a-collector) for release availability;
 the options below describe the current source collector.
 
+For systems where running a collector is impractical, compare
+[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
+SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+The guide also covers [AIX on POWER7](../../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example).
+For that platform's mount and permission details, see the
+[AIX SSHFS scanning guide](../../docs/AIX_POWER7_SSHFS_SCANNING.md).
+
 ### Dependency Setup
 
 JSON::PP ships with upstream Perl 5.14+, but distribution packages can split out

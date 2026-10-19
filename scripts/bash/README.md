@@ -8,6 +8,10 @@ For alternatives, use the [script chooser](../README.md#choosing-a-collector).
 See [download guidance](../../README.md#download-a-collector) for release availability;
 the options below describe the current source collector.
 
+For systems where running a collector is impractical, compare
+[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
+SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+
 ## Requirements
 
 | Requirement | Detail |

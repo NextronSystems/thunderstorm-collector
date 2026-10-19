@@ -2,6 +2,20 @@
 
 This guide describes persistent THOR Thunderstorm collection on an ESXi 7 host without Secure Boot enabled. Before scheduling it, follow the current [ESXi collector requirements and quick start](../../scripts/README.md#vmware-esxi-use-the-python-collector) to select and validate the Python collector on the target.
 
+## Alternative for an Ad Hoc Assessment
+
+For a one-time assessment, you can also mount accessible ESXi directories over
+**SSHFS** and scan them with THOR on a supported analysis workstation. The ESXi
+host needs suitable SSH/SFTP access and read permissions; it does not run a
+scanner or collector. This alternative does not require the persistent collector
+setup below. Check the host's access policy separately.
+
+See [Choosing a THOR scanning approach](../../docs/SCANNING_APPROACHES.md) for
+prerequisites, licensing and evidence coverage, and the
+[ESXi SSHFS walkthrough](https://www.nextron-systems.com/2023/02/14/how-to-scan-esxi-systems-using-thor/)
+for the appliance example. A scheduled collector is useful for recurring
+assessments where on-host execution is permitted.
+
 ## Preparing THOR Thunderstorm
 
 
