@@ -175,7 +175,7 @@ The standard Go-based binaries for IBM AIX require POWER8 or newer and do not
 support actual POWER7 hardware. For POWER7, consider a validated script
 collector, SSHFS scanning from a supported workstation, or exported evidence;
 see the [AIX example](../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example)
-and the dedicated [POWER7 SSHFS scanning guide](../docs/AIX_POWER7_SSHFS_SCANNING.md).
+and the dedicated [POWER7 SSHFS scanning guide](../integration-guides/aix/aix-power7-sshfs-scanning.md).
 Contact Nextron to confirm current availability and target compatibility of
 any special `gccgo` build.
 

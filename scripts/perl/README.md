@@ -11,7 +11,7 @@ For systems where running a collector is impractical, compare
 SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
 The guide also covers [AIX on POWER7](../../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example).
 For that platform's mount and permission details, see the
-[AIX SSHFS scanning guide](../../docs/AIX_POWER7_SSHFS_SCANNING.md).
+[AIX SSHFS scanning guide](../../integration-guides/aix/aix-power7-sshfs-scanning.md).
 
 ### Dependency Setup
 

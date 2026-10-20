@@ -10,7 +10,7 @@ access is available.
 - [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md) — Native
   scans, SSHFS, Thunderstorm collectors and offline evidence analysis, including
   prerequisites and licensing.
-- [AIX on POWER7 via SSHFS](../docs/AIX_POWER7_SSHFS_SCANNING.md) — A quick path-allowlist
+- [AIX on POWER7 via SSHFS](aix/aix-power7-sshfs-scanning.md) — A quick path-allowlist
   scan for incident response, plus a thorough procedure with mount inventory
   and exclusions.
 

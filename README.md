@@ -30,8 +30,8 @@ for an ad-hoc assessment; scheduled Thunderstorm collectors are often a better
 fit for recurring assessments.
 
 For legacy AIX hosts, see the dedicated
-[AIX on POWER7 SSHFS scanning guide](docs/AIX_POWER7_SSHFS_SCANNING.md), with a
-quick path-allowlist scan for incident response and a thorough assessment
+[AIX on POWER7 SSHFS scanning guide](integration-guides/aix/aix-power7-sshfs-scanning.md),
+with a quick path-allowlist scan for incident response and a thorough assessment
 procedure covering root access, mount inventory and exclusions.
 
 ## Choose a Collector
