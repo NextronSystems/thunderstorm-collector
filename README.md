@@ -173,7 +173,7 @@ These settings apply to the **Go collector**. Script collectors have their own d
 
 ## Product Integration Guides
 
-[Product integration guides](integration-guides/Readme.md) describe deployment, networking, and recurring collection on particular systems. The existing [ESXi 7 without Secure Boot guide](integration-guides/esxi/esxi7-wo-secure-boot.md) covers a persistent Python deployment. Start with the current [ESXi collector requirements and quick start](scripts/README.md#vmware-esxi-use-the-python-collector) before scheduling collection.
+[Product integration guides](integration-guides/README.md) describe deployment, networking, and recurring collection on particular systems, and list [related Nextron repositories](integration-guides/README.md#related-nextron-repositories) for container scanning, mail filtering, API clients, and test servers. The existing [ESXi 7 without Secure Boot guide](integration-guides/esxi/esxi7-wo-secure-boot.md) covers a persistent Python deployment. Start with the current [ESXi collector requirements and quick start](scripts/README.md#vmware-esxi-use-the-python-collector) before scheduling collection.
 
 ## Testing and Compatibility
 
