@@ -23,7 +23,7 @@ This guide is based on IBM and upstream documentation and source inspection;
 it has not been tested against a live AIX/POWER7 host during its preparation.
 
 For the alternatives and licensing overview, see
-[Choosing a THOR scanning approach](SCANNING_APPROACHES.md).
+[Choosing a THOR scanning approach](../../docs/SCANNING_APPROACHES.md).
 
 ## 1. Quick incident-response scan using a path allowlist
 

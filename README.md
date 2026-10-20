@@ -30,8 +30,8 @@ for an ad-hoc assessment; scheduled Thunderstorm collectors are often a better
 fit for recurring assessments.
 
 For legacy AIX hosts, see the dedicated
-[AIX on POWER7 SSHFS scanning guide](docs/AIX_POWER7_SSHFS_SCANNING.md), with a
-quick path-allowlist scan for incident response and a thorough assessment
+[AIX on POWER7 SSHFS scanning guide](integration-guides/aix/aix-power7-sshfs-scanning.md),
+with a quick path-allowlist scan for incident response and a thorough assessment
 procedure covering root access, mount inventory and exclusions.
 
 ## Choose a Collector
@@ -173,7 +173,7 @@ These settings apply to the **Go collector**. Script collectors have their own d
 
 ## Product Integration Guides
 
-[Product integration guides](integration-guides/Readme.md) describe deployment, networking, and recurring collection on particular systems. The existing [ESXi 7 without Secure Boot guide](integration-guides/esxi/esxi7-wo-secure-boot.md) covers a persistent Python deployment. Start with the current [ESXi collector requirements and quick start](scripts/README.md#vmware-esxi-use-the-python-collector) before scheduling collection.
+[Product integration guides](integration-guides/README.md) describe deployment, networking, and recurring collection on particular systems, and list [related Nextron repositories](integration-guides/README.md#related-nextron-repositories) for container scanning, mail filtering, API clients, and test servers. The existing [ESXi 7 without Secure Boot guide](integration-guides/esxi/esxi7-wo-secure-boot.md) covers a persistent Python deployment. Start with the current [ESXi collector requirements and quick start](scripts/README.md#vmware-esxi-use-the-python-collector) before scheduling collection.
 
 ## Testing and Compatibility
 

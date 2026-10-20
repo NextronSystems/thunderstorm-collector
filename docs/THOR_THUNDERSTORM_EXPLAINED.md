@@ -282,7 +282,7 @@ You need a Thunderstorm service and a collector.
 
 6. **Schedule it.** Add the collector to cron, Windows Task Scheduler or your automation, as shown in [At Scale](#7-at-scale).
 
-For assessments with a defined scope, the [Emerging Threats guides](../emerging-threats/README.md) list which files and directories to collect; the first one covers Citrix NetScaler. Product-specific deployment guides are in [Product Integration Guides](../integration-guides/Readme.md).
+For assessments with a defined scope, the [Emerging Threats guides](../emerging-threats/README.md) list which files and directories to collect; the first one covers Citrix NetScaler. Product-specific deployment guides are in [Product Integration Guides](../integration-guides/README.md).
 
 ## Glossary
 
@@ -311,7 +311,7 @@ In this repository:
 - [Script collectors](../scripts/README.md): which script for which runtime, and the ESXi quick start
 - [Collector recommendations](COLLECTOR_RECOMMENDATIONS.md): products and platforms, and the evidence behind each recommendation
 - [Collector construction guide](COLLECTOR_CONSTRUCTION_GUIDE.md): the upload protocol, and how to build a collector for another platform
-- [Emerging Threats](../emerging-threats/README.md) and [Product Integration Guides](../integration-guides/Readme.md)
+- [Emerging Threats](../emerging-threats/README.md) and [Product Integration Guides](../integration-guides/README.md)
 - [Testing overview](COLLECTOR_TESTING_OVERVIEW.md) and the [script acceptance report](SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
 
 From Nextron Systems:

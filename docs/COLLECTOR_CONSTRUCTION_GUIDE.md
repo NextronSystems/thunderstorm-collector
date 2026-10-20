@@ -9,6 +9,8 @@ Before commissioning a new collector, compare the existing
 [scanning approaches](SCANNING_APPROACHES.md). SSHFS can expose source files to
 THOR on an analysis workstation when suitable SSH/SFTP access exists, avoiding
 the need for a collector on the source. Exported evidence is another option.
+[Check reuse before building](#check-reuse-before-building-a-new-profile) lists
+existing collectors, build variants and companion repositories to try first.
 
 Start with the upload protocol and an explicit capability profile, not a
 translation of another collector's source. A minimal, honest implementation is
@@ -72,6 +74,57 @@ Python 2 means an actual Python 2 run, not a Python 3 run of a similar file.
 PowerShell 5.1/7 execution of the PS2 file is not an actual PowerShell 2 test.
 Test BusyBox ash and its utilities, not just dash. OS, TLS libraries and external
 tool builds matter as much as language syntax.
+
+### Check Reuse Before Building a New Profile
+
+Build a new profile only for a named target that no existing option serves, and
+record in its README why each option below fails. The Go collector is a compiled
+profile outside the table above; see its [README](../go/README.md) and the
+[published binary inventory](COLLECTOR_RECOMMENDATIONS.md#published-go-binary-targets).
+
+| Option | What it can reach | Check before relying on it |
+|---|---|---|
+| Published Go package | The OS and CPU targets in the inventory | The package's own kernel and CPU floor. Standard Go `ppc64` builds need POWER8 or newer, so they do not serve POWER7. |
+| Existing script profile | Hosts that already have that runtime | The profile README's exact interpreter, module and tool list. |
+| The Go collector built with another toolchain, such as `gccgo` | CPUs and systems that Go's own compiler does not support, such as AIX on POWER7 | The toolchain on the build host, and validation on the real target. The [Go README](../go/README.md) says to contact Nextron about special `gccgo` builds. |
+| A script profile limited to core modules | Older Unix hosts that have Perl or Python but not the libraries the current profiles need | Perl before 5.14 has no core JSON::PP or HTTP::Tiny, and TLS needs modules that are not core. Expect HTTP only and no markers. |
+| A JVM profile | Hosts without Go support that already have a supported Java runtime | An installed, supported JRE and that Java version's TLS defaults. One JAR serves every CPU. |
+| A C profile | Hosts with a compiler and no other runtime | The highest memory-safety and maintenance burden. Keep the scope to asynchronous upload, and add TLS only through a maintained library. |
+
+Some targets do not provide a collector. The `wasip1` WebAssembly port of Go has
+no outbound sockets ([golang/go#65928](https://github.com/golang/go/issues/65928)),
+and the [collector recommendations](COLLECTOR_RECOMMENDATIONS.md#published-go-binary-targets)
+already note that the published JavaScript and WASI packages need a host runtime
+and are not tested end to end. A browser page can read only folders the user
+selects, and uploads from another origin need CORS support from the service or a
+same-origin proxy. Rust, Node.js, PHP, Ruby, Lua and Tcl profiles add reach only
+on a target that has that runtime and none of the options above; Rust's Tier 1
+baselines, Linux 3.2 on x86 and Windows 10, are newer than those of the Go 1.10
+builds.
+
+### Clients That Do Not Walk the Filesystem
+
+Mail, proxy, object-storage and container integrations get their sample bytes
+from another source but submit them through the same API. Sections 2, 5, 6 and 7
+apply unchanged: multipart framing, complete 2xx responses, bounded retries, TLS
+verification and truthful counts. Sections 3 and 4 apply only where the client
+has a run lifecycle or selects files.
+
+Decide these points explicitly:
+
+- **Sync or async.** The script profiles submit asynchronously only. A client
+  that must act on the verdict before it releases content, such as a mail filter,
+  needs `/api/check` and a policy for slow or unavailable analysis: release or
+  hold.
+- **Attribution.** Send a `source` that names the system or tenant and a filename
+  that identifies the object, such as a message part, object key or container
+  path. Verify which of them the Thunderstorm log records.
+- **Duplicates.** Event-driven clients see redelivery. Section 5 explains why
+  exactly-once delivery cannot be promised.
+
+Existing clients are listed under
+[related Nextron repositories](../integration-guides/README.md#related-nextron-repositories);
+check them before starting another.
 
 ## 2. Implement the Upload Protocol
 
@@ -144,6 +197,13 @@ do not promise it retains the original path verbatim. Encoding or sanitizing
 metadata must never change payload bytes. Reject or explicitly replace invalid
 filename encodings in metadata only. Never run a filename as shell syntax.
 
+A collector that reads copies, mounts or extracted exports sends the path it sees
+locally, not the path on the source system. The Go collector sends the absolute
+local path, and no current collector can map a local prefix back to the original
+one; THOR on an analysis workstation can, with `--virtual-map`. State in the
+profile which path is sent. If original paths matter for the assessment, design
+and test an explicit prefix mapping rather than rewriting names ad hoc.
+
 ### Successful Transport Is Not Completed Analysis
 
 A submission is successful only after a **complete** HTTP 2xx response and no
@@ -161,14 +221,15 @@ valid chunks and trailers as well as truncation over both HTTP and HTTPS.
 The async service returns a sample job identifier, for example:
 
 ```json
-{"id":"sample-job-id"}
+{"id":12345}
 ```
 
-This `id` is NOT the collection `scan_id`. If implementing polling, parse JSON,
-retain the sample job ID, bound polling and inspect the actual deployed service's
-status/result schema. Native THOR acceptance used the completion status
-`Sample analysis complete`. The stub uses a `results` field; other service
-versions can use `result`. Do not assume those entire responses are interchangeable.
+This `id` is a JSON integer on THOR 10.7 (the stub returns a UUID string), and it
+is NOT the collection `scan_id`. If implementing polling, parse JSON, retain the
+sample job ID, bound polling and inspect the actual deployed service's
+status/result schema. THOR 10.7 returns the completion status `Sample analysis
+complete` and, once finished, a `result` field. The stub reports `done` and uses
+a `results` field. Do not assume those entire responses are interchangeable.
 The reviewed collectors do not poll; an independent tester can do so.
 
 A complete accepted transfer, completed analysis and positive detection are
@@ -354,6 +415,16 @@ GNU wget, use a version that supports disabling both user and system startup
 configuration. Test hostile temporary tool settings that request insecure TLS
 or redirect following; neither may override the collector profile silently.
 
+HTTP library defaults can also contradict this section. Check them for the
+runtime in use:
+
+| Client | Default or behavior to check |
+|---|---|
+| Go `net/http` | Follows redirects unless `CheckRedirect` refuses them; the Go collector refuses. A body of unknown length is sent chunked, as the Go collector does for uploads, and native THOR accepted its uploads in the recorded VM tests. |
+| Java `HttpURLConnection` | Follows redirects. Buffers the whole request body in memory unless fixed-length or chunked streaming is set; a fixed length also publishes an exact `Content-Length`. The JDK property `sun.net.http.retryPost` defaults to true, so a POST can be resent without the caller noticing. |
+| libcurl | Redirects are off unless `CURLOPT_FOLLOWLOCATION` is set. Proxy environment variables are honored unless a proxy is set; an empty string disables the proxy. `.curlrc` is read by the curl tool, not by the library. |
+| Node.js | `fetch` follows redirects unless `redirect` is set to `manual`. `NODE_TLS_REJECT_UNAUTHORIZED=0` disables certificate verification for the whole process, so treat it as hostile configuration. A multipart body built from an in-memory `Buffer` or `Blob` holds the entire file. |
+
 ## 6. Define Operator Visible Outcomes
 
 Dry-run must perform **zero HTTP requests**, including marker handshakes, TLS
@@ -411,7 +482,15 @@ shared production service. Repeat target-dependent tests on the actual runtime.
 The shared harness in this repository selects available compatible collectors.
 An explicitly requested missing/unrunnable collector must fail rather than
 silently produce a green empty run. Its interface probes are routing, not a
-universal feature contract. Add a new selector intentionally, with tests.
+universal feature contract. Add a new selector intentionally, with tests: script
+collectors register in `COLLECTORS` in
+[`select_collectors.py`](../scripts/tests/select_collectors.py), and the
+mock-based suite in [`tests/`](../tests/test-collectors.sh) takes one directory
+per collector under `tests/test-collectors.d/`. The harness runs against the
+[thunderstorm-stub-server](https://github.com/Nextron-Labs/thunderstorm-stub-server),
+which also implements the optional collection endpoint; the mock-based suite uses
+the [thunderstorm-mock](https://github.com/NextronSystems/thunderstorm-mock)
+behind the proxy described in section 2.
 Pin the stub revision in CI and compile it for the test host. An incompatible
 release binary's Exec format error is not a collector result.
 After launching a local stub, verify that the owned process is still alive as
@@ -441,7 +520,10 @@ Allowed libraries/external tools and RAM/storage budget: <...>
 Delivery format: <standalone file or declared package>
 Authorized test endpoint/version/authentication policy: <...>
 Capability decisions: <recursion, extensions, size units, mtime policy, markers,
-dry-run, TLS/custom CA, signals/logging, supported path encodings>
+dry-run, TLS/custom CA, signals/logging, supported path encodings, path sent as
+the filename, API base path>
+Existing options checked: <collectors, build variants and clients considered, and
+why each does not serve this target>
 Accepted restrictions: <...>
 Actual target runtimes available for verification: <...>
 

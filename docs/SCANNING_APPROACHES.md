@@ -78,9 +78,9 @@ and check only those subtrees for unexpected nested mounts. For a broader scan,
 inventory the source and explicitly exclude pseudo filesystems, device trees
 and out-of-scope remote mounts using their paths on the analysis workstation.
 Do not rely on local filesystem-type detection to skip remote `/proc` or NFS
-mounts. The [AIX on POWER7 SSHFS guide](AIX_POWER7_SSHFS_SCANNING.md) provides a
-[quick path-allowlist procedure](AIX_POWER7_SSHFS_SCANNING.md#1-quick-incident-response-scan-using-a-path-allowlist)
-and a [thorough assessment procedure](AIX_POWER7_SSHFS_SCANNING.md#2-thorough-assessment-with-mount-inventory-and-exclusions).
+mounts. The [AIX on POWER7 SSHFS guide](../integration-guides/aix/aix-power7-sshfs-scanning.md) provides a
+[quick path-allowlist procedure](../integration-guides/aix/aix-power7-sshfs-scanning.md#1-quick-incident-response-scan-using-a-path-allowlist)
+and a [thorough assessment procedure](../integration-guides/aix/aix-power7-sshfs-scanning.md#2-thorough-assessment-with-mount-inventory-and-exclusions).
 
 ### Read only mount and scan example
 
@@ -211,7 +211,7 @@ See [THOR lab scanning](https://thor-manual.nextron-systems.com/en/latest/usage/
 ## AIX on POWER7 as an example
 
 For detailed instructions, see
-[Scanning AIX on POWER7 with THOR over SSHFS](AIX_POWER7_SSHFS_SCANNING.md).
+[Scanning AIX on POWER7 with THOR over SSHFS](../integration-guides/aix/aix-power7-sshfs-scanning.md).
 Start with its quick path-allowlist procedure for incident response, then use
 the thorough procedure for wider coverage. It also covers thread selection,
 root permissions, mount inventory, exclusions and metadata limits.
