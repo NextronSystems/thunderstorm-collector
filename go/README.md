@@ -9,6 +9,9 @@ through **SSHFS** from a supported analysis workstation. The source needs
 SSH/SFTP access and readable files, rather than a compatible scanner or
 collector binary. See [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md)
 for prerequisites, licensing and a comparison with native and offline scans.
+The prototype [SFTP collector](../sftp/README.md) uses the same SSH/SFTP access
+from another system, but selects files before transferring them and sends only
+those to Thunderstorm.
 
 ## Usage
 
@@ -173,7 +176,8 @@ Use `go version <binary>` when the executable contains build information recogni
 
 The standard Go-based binaries for IBM AIX require POWER8 or newer and do not
 support actual POWER7 hardware. For POWER7, consider a validated script
-collector, SSHFS scanning from a supported workstation, or exported evidence;
+collector, SSHFS scanning from a supported workstation, the prototype
+[SFTP collector](../sftp/README.md) on another system, or exported evidence;
 see the [AIX example](../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example)
 and the dedicated [POWER7 SSHFS scanning guide](../integration-guides/aix/aix-power7-sshfs-scanning.md).
 Contact Nextron to confirm current availability and target compatibility of

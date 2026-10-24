@@ -86,6 +86,7 @@ profile outside the table above; see its [README](../go/README.md) and the
 |---|---|---|
 | Published Go package | The OS and CPU targets in the inventory | The package's own kernel and CPU floor. Standard Go `ppc64` builds need POWER8 or newer, so they do not serve POWER7. |
 | Existing script profile | Hosts that already have that runtime | The profile README's exact interpreter, module and tool list. |
+| The prototype [SFTP collector](../sftp/README.md) | Any source with a working SFTP server, read from the Thunderstorm host or another system; nothing runs on the source | An SSH account that can read the files in scope, and the collector's [limits](../sftp/README.md#limits): modification time only and no filesystem types. Not tested on products. |
 | The Go collector built with another toolchain, such as `gccgo` | CPUs and systems that Go's own compiler does not support, such as AIX on POWER7 | The toolchain on the build host, and validation on the real target. The [Go README](../go/README.md) says to contact Nextron about special `gccgo` builds. |
 | A script profile limited to core modules | Older Unix hosts that have Perl or Python but not the libraries the current profiles need | Perl before 5.14 has no core JSON::PP or HTTP::Tiny, and TLS needs modules that are not core. Expect HTTP only and no markers. |
 | A JVM profile | Hosts without Go support that already have a supported Java runtime | An installed, supported JRE and that Java version's TLS defaults. One JAR serves every CPU. |
