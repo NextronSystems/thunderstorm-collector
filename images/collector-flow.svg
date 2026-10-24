@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="284" viewBox="0 0 880 284" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="title">Go and script collector data flow</title>
+  <desc id="desc">The Go collector or a script collector runs on the source system, walks the configured paths, selects files by size, age, extension and header, and uploads the matches over HTTP or HTTPS to THOR Thunderstorm, which analyzes each sample with THOR and serves many sources.</desc>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d7de; }
+    .panel { fill: #f6f8fa; stroke: #d0d7de; }
+    .collector { fill: #ddf4ff; stroke: #0969da; }
+    .storm { fill: #fbefff; stroke: #8250df; }
+    .t { fill: #1f2328; }
+    .m { fill: #59636e; }
+    .accent { fill: #0969da; }
+    .accent2 { fill: #8250df; }
+    .yes { fill: #1a7f37; }
+    .mark { fill: none; stroke: #ffffff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .line { fill: none; stroke: #59636e; stroke-width: 2; }
+    .head { fill: #59636e; }
+    .icon { fill: none; stroke: #59636e; stroke-width: 1.5; }
+    .dot { fill: #59636e; }
+    @media (prefers-color-scheme: dark) {
+      .card { fill: #0d1117; stroke: #3d444d; }
+      .panel { fill: #151b23; stroke: #3d444d; }
+      .collector { fill: #0c2d6b; stroke: #4493f8; }
+      .storm { fill: #2e1f52; stroke: #ab7df8; }
+      .t { fill: #f0f6fc; }
+      .m { fill: #9198a1; }
+      .accent { fill: #4493f8; }
+      .accent2 { fill: #ab7df8; }
+      .yes { fill: #238636; }
+      .line { stroke: #9198a1; }
+      .head { fill: #9198a1; }
+      .icon { stroke: #9198a1; }
+      .dot { fill: #9198a1; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect class="card" x="0.5" y="0.5" width="879" height="283" rx="12"/>
+
+  <!-- Source system with the collector running on it -->
+  <rect class="panel" x="24" y="24" width="488" height="236" rx="10"/>
+  <g transform="translate(470 38)">
+    <rect class="icon" x="0" y="0" width="26" height="11" rx="2"/>
+    <rect class="icon" x="0" y="15" width="26" height="11" rx="2"/>
+    <circle class="dot" cx="20" cy="5.5" r="1.6"/>
+    <circle class="dot" cx="20" cy="20.5" r="1.6"/>
+  </g>
+  <text class="t" x="40" y="52" font-size="15" font-weight="600">Source system</text>
+  <text class="m" x="40" y="72" font-size="12">Server, workstation or appliance</text>
+
+  <circle class="yes" cx="49" cy="113" r="9"/>
+  <path class="mark" d="M44.5 113.5 L48 117 L53.5 109"/>
+  <text class="t" x="66" y="117.5" font-size="12.5">Can run a Go binary</text>
+  <text class="t" x="66" y="134" font-size="12.5">or a script runtime</text>
+  <circle class="yes" cx="49" cy="166" r="9"/>
+  <path class="mark" d="M44.5 166.5 L48 170 L53.5 162"/>
+  <text class="t" x="66" y="170.5" font-size="12.5">Can reach Thunderstorm</text>
+  <text class="t" x="66" y="187" font-size="12.5">over HTTP(S)</text>
+
+  <text class="m" x="40" y="226" font-size="12">Started by cron, Task Scheduler</text>
+  <text class="m" x="40" y="242" font-size="12">or Ansible; one pass per run</text>
+
+  <rect class="collector" x="268" y="92" width="228" height="152" rx="10" stroke-width="1.5"/>
+  <path class="accent" d="M284 106 H314 L303 119 V130 L295 134 V119 Z"/>
+  <text class="t" x="324" y="119" font-size="15" font-weight="600">Collector</text>
+  <text class="m" x="324" y="135" font-size="11.5">Go binary or script</text>
+  <circle class="accent" cx="287" cy="161" r="2"/>
+  <text class="t" x="295" y="165" font-size="12">Walks the configured paths</text>
+  <circle class="accent" cx="287" cy="182" r="2"/>
+  <text class="t" x="295" y="186" font-size="12">Selects by size, age,</text>
+  <text class="t" x="295" y="203" font-size="12">extension and header</text>
+  <circle class="accent" cx="287" cy="220" r="2"/>
+  <text class="t" x="295" y="224" font-size="12">Uploads the matches</text>
+
+  <!-- Collector to Thunderstorm -->
+  <line class="line" x1="497" y1="168" x2="655" y2="168" marker-end="url(#arrow)"/>
+  <text class="t" x="584" y="158" font-size="12.5" font-weight="600" text-anchor="middle">HTTP(S)</text>
+  <text class="m" x="584" y="187" font-size="11.5" text-anchor="middle">selected files only</text>
+
+  <rect class="storm" x="656" y="92" width="200" height="152" rx="10" stroke-width="1.5"/>
+  <path class="accent2" d="M675 105 L664 123 L672 123 L668 138 L682 117 L674 117 L679 105 Z"/>
+  <text class="t" x="690" y="127" font-size="15" font-weight="600">Thunderstorm</text>
+  <circle class="accent2" cx="675" cy="161" r="2"/>
+  <text class="t" x="683" y="165" font-size="12">Analyzes each sample</text>
+  <text class="t" x="683" y="182" font-size="12">with THOR</text>
+  <circle class="accent2" cx="675" cy="199" r="2"/>
+  <text class="t" x="683" y="203" font-size="12">Serves many sources</text>
+  <circle class="accent2" cx="675" cy="220" r="2"/>
+  <text class="t" x="683" y="224" font-size="12">Reports per file</text>
+</svg>

@@ -16,19 +16,55 @@ SSHFS, but transfers only the selected files and sends them to Thunderstorm.
 
 ## Scanning methods at a glance
 
+![Five ways to cover a system: THOR or THOR Legacy on the system itself; a Go or script collector on the system sending selected files to Thunderstorm; the SFTP collector reading selected files from a system that only offers SSH; THOR scanning an SSHFS mount; and THOR scanning exported evidence on a workstation.](../images/coverage-methods.svg)
+
 | Approach | Where THOR runs | Source system requirements | Typical use |
 |---|---|---|---|
-| **1. Native THOR scan** | On the source system | Compatible THOR binary for the OS, CPU and runtime; sufficient permissions | Assessment using the native checks available on that platform |
+| **1a. Native THOR scan** | On the source system | Compatible THOR binary for the OS, CPU and runtime; sufficient permissions | Assessment using the native checks available on that platform |
+| **1b. THOR Legacy scan** | On the source system | A Windows version listed for the [dedicated THOR Legacy version](https://thor-manual.nextron-systems.com/en/latest/usage/requirements.html#legacy-systems), and a THOR Legacy license | Native checks on older Windows versions outside the standard requirements |
 | **2a. Remote filesystem scan via SSHFS** | On a supported analysis workstation | Reachable SSH/SFTP service and credentials that can read the relevant paths | Ad-hoc assessment without installing a scanner or collector on the source |
 | **2b. Thunderstorm with a collector on the source** | On a central Thunderstorm server | Compatible collector or script, readable files and connectivity to the service | Recurring assessments with configurable file selection |
 | **2c. Thunderstorm with the SFTP collector** (prototype) | On a central Thunderstorm server | Reachable SSH/SFTP service and credentials that can read the relevant paths | Selective or recurring collection when nothing can run on the source |
 | **3. Offline analysis of exported evidence** | On a supported analysis workstation | A way to export files, backups or filesystem images | Analysis when direct access or on-system execution is impractical |
 
-The numbering groups SSHFS and the two Thunderstorm routes as ways to analyze
-files over the network. It does not imply equal evidence coverage or a
-mandatory sequence. All three can also serve one-time investigations; SSHFS
-scans can be scheduled if their connection and access requirements are
-acceptable.
+The numbering groups the two native scans, and SSHFS with the two Thunderstorm
+routes as ways to analyze files over the network. It does not imply equal
+evidence coverage or a mandatory sequence. All network routes can also serve
+one-time investigations; SSHFS scans can be scheduled if their connection and
+access requirements are acceptable.
+
+## Advantages and disadvantages
+
+| Method | Advantages | Disadvantages |
+|---|---|---|
+| **THOR on the system** | The most complete coverage of one host: files plus the live checks THOR offers on that platform. No central service is needed. | Needs a supported OS, CPU and runtime, and permission to run THOR. A full scan takes time and uses CPU and disk on the host. |
+| **THOR Legacy on the system** | Native scans of older Windows versions that the standard THOR release no longer supports. | Needs the dedicated THOR Legacy version and a THOR Legacy license. These systems receive only limited support. |
+| **Go collector** | One binary for many OS and CPU targets, including old Windows and Linux releases, with no installed runtime. Metadata filters skip unsuitable files before reading them, which keeps the load low. Suits frequent runs with an age filter; one Thunderstorm service serves many sources. | Needs a Thunderstorm service, a network path from the source to it, and permission to run a binary. Analyzes submitted files only, with no process, memory or other live checks. Files outside the filters are not analyzed. |
+| **Script collectors** | Use a runtime the system already has (Bash, POSIX sh, Python, Perl, PowerShell or Batch). No binary to deploy, and the code is easy to review and adapt. | Depend on the interpreter version and tools such as curl; features and defaults differ between scripts. Same file-only scope and Thunderstorm requirements as the Go collector. |
+| **SFTP collector** (prototype) | Nothing runs on the source and nothing is copied there. Only selected files cross the network. The source needs no route to Thunderstorm, and one host can collect from many sources. | A prototype without product testing. Needs the SFTP subsystem, inbound SSH and stored SSH credentials. The age filter uses only the modification time, and filesystem types are not reported. File-only scope. |
+| **THOR over SSHFS** | Nothing runs on the source. Every file in scope is checked, including by filename IOCs. No Thunderstorm service is needed. | Needs a Forensic Lab License and an analysis workstation with SSHFS. A lab scan reads every file in scope, so traffic and disk reads on the source grow with the data in scope. The connection must stay up for the whole scan. |
+| **Exported evidence** | Needs no live access or network path to the source and suits isolated networks. The same evidence can be scanned again. | Needs a Forensic Lab License, an export or imaging process and storage. The result reflects the time of the export, not the live system. |
+
+## Recommended method by situation
+
+Several methods often work for the same system. Where THOR can run on the
+system and is permitted, prefer it: no file-based method replaces its live
+checks. Otherwise, choose the method that needs the least on the source while
+still covering the files and the schedule you need.
+
+| Situation | Recommended | Alternative | Why |
+|---|---|---|---|
+| A system that meets the standard THOR requirements, where THOR may run | THOR on the system | Go collector for frequent checks of new files between full scans | Only a native scan adds the live checks. |
+| A Windows version older than the standard THOR requirements | THOR Legacy, with its license | Go collector; its Go 1.10 builds keep support for XP- and Vista-era Windows | Native checks on the old system. The collector covers files where THOR Legacy is not available. |
+| Many systems with frequent checks of new or changed files | Go collector with an age filter | A script collector where the Go binary does not fit | Light runs on the sources, central analysis. Repeat runs without an age filter periodically. |
+| A system THOR does not support that can run a Go binary, such as an appliance or an unsupported CPU | Go collector | Script collector | One binary without runtime dependencies. |
+| A system with a suitable interpreter but no matching Go build, or where binaries may not be run | Script collector | SFTP collector or THOR over SSHFS | Uses what is already installed. |
+| Only SSH/SFTP is available, and one complete assessment is needed, as in incident response | THOR over SSHFS | SFTP collector | Checks every file in scope, also by filename IOCs, and needs no Thunderstorm service. |
+| Only SSH/SFTP is available, and collection repeats, covers many systems or runs over slow links | SFTP collector (prototype) | THOR over SSHFS | Transfers only the selected files; one host covers many sources. |
+| The source accepts SSH but cannot reach Thunderstorm | SFTP collector (prototype) | THOR over SSHFS | The connection starts from the collector host; the source needs no outbound path. |
+| No live access, an isolated network, or files available only as a vendor export | Exported evidence with THOR | Upload the exports with a collector on another system | Analysis without touching the live system. |
+
+Product-specific choices are in the [collector recommendations](COLLECTOR_RECOMMENDATIONS.md).
 
 ## Native THOR scans
 
@@ -41,6 +77,11 @@ Native execution allows THOR to use the live-system checks available for that
 platform. Remotely starting a native THOR binary is still a native scan: the
 scanner executes on the source system, even if an administrator launches it
 from elsewhere.
+
+Older Windows versions outside the standard requirements can be scanned with a
+dedicated THOR Legacy version and a THOR Legacy license. These systems receive
+only limited support. The [THOR requirements](https://thor-manual.nextron-systems.com/en/latest/usage/requirements.html#legacy-systems) list the Windows
+versions for the THOR release in use.
 
 ## Remote filesystem scans with SSHFS
 

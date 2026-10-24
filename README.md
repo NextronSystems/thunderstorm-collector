@@ -4,6 +4,8 @@
 
 Thunderstorm collectors provide lightweight, agentless file collection for analysis by the [THOR Thunderstorm](https://www.nextron-systems.com/thor-thunderstorm/) service. They walk configured directories on an endpoint, apply filters for file size, age, and type, and send matching file samples to the service.
 
+![The Go collector or a script collector runs on the source system, walks the configured paths, selects files by size, age, extension and header, and uploads the matches over HTTP(S) to Thunderstorm, which analyzes each sample with THOR and serves many sources.](images/collector-flow.svg)
+
 Selective collection keeps endpoint workload and network traffic low. Metadata filters exclude unsuitable files without reading their full contents, and only matching samples are sent for analysis. For recurring collection, an age filter can focus each run on recently created or modified files. This supports frequent checks with broad coverage of relevant files within the configured scope, while the Thunderstorm service performs the computationally intensive analysis.
 
 No collector installation or permanently running endpoint agent is required. Collectors run as portable binaries or standalone scripts using the required runtime and tools available on the endpoint. They can be started remotely through Ansible or another automation script, or placed on the endpoint and scheduled with cron or Windows Task Scheduler. Each invocation performs a collection pass and exits.
@@ -18,23 +20,30 @@ https://github.com/user-attachments/assets/eb23f1e6-a6b0-4367-a5e1-fa2e93e4b331
 
 ## Choose a Scanning Approach
 
-A Thunderstorm collector is one way to assess a system. Other options are a
-native THOR scan, a remote filesystem scan using **SSHFS**, or offline analysis
-of exported evidence. With SSHFS, THOR runs on an analysis workstation and reads
-files through the source's SSH/SFTP service; no scanner or collector runs on
-the source.
+A Thunderstorm collector is one of several ways to cover a system with THOR.
+THOR can run on the system itself, a collector can send the system's files to
+Thunderstorm, or another system can read the files over SSH or from an export:
 
-See [Choosing a THOR scanning approach](docs/SCANNING_APPROACHES.md) for the
-comparison, an SSHFS example, licensing and evidence coverage. SSHFS is useful
-for an ad-hoc assessment; scheduled Thunderstorm collectors are often a better
-fit for recurring assessments.
+![Five ways to cover a system: THOR or THOR Legacy on the system itself; a Go or script collector on the system sending selected files to Thunderstorm; the SFTP collector reading selected files from a system that only offers SSH; THOR scanning an SSHFS mount; and THOR scanning exported evidence on a workstation.](images/coverage-methods.svg)
 
-When nothing can run on the source but SSH/SFTP is available, the prototype
-**[SFTP collector](sftp/README.md)** uses the same access as SSHFS but selects
-files before transferring them. It runs on the Thunderstorm host or another
-system, chooses files by path, name, size, modification time and header, and
-sends only those to Thunderstorm. A THOR lab scan of an SSHFS mount reads every
-file in scope up to its size limit.
+Several methods often work for the same system. Where THOR can run and is
+permitted, prefer it: only a native scan adds THOR's live system checks.
+Otherwise, use the method that needs the least on the source while still
+covering what you need:
+
+| Situation | Recommended | Alternative |
+| --- | --- | --- |
+| The system meets the standard THOR requirements, and THOR may run | THOR on the system | Go collector for frequent checks of new files between scans |
+| A Windows version older than the standard THOR requirements | [THOR Legacy](https://thor-manual.nextron-systems.com/en/latest/usage/requirements.html#legacy-systems), with its license | [Go collector](go/README.md) |
+| THOR does not support the system, but a Go binary or a script runtime can run | [Go collector](go/README.md) | [Script collector](scripts/README.md#choosing-a-collector) |
+| Many systems with frequent checks of new or changed files | Go or script collector with an age filter | THOR on the system at longer intervals |
+| Only SSH/SFTP is available; one complete assessment, as in incident response | [THOR over SSHFS](docs/SCANNING_APPROACHES.md#remote-filesystem-scans-with-sshfs) (Forensic Lab License) | [SFTP collector](sftp/README.md) |
+| Only SSH/SFTP is available; repeated collection, many systems or slow links | [SFTP collector](sftp/README.md) (prototype) | THOR over SSHFS |
+| No live access, an isolated network, or files only as a vendor export | [Exported evidence](docs/SCANNING_APPROACHES.md#offline-analysis-of-exported-evidence) scanned with THOR | Upload the exports with a collector on another system |
+
+[Choosing a THOR scanning approach](docs/SCANNING_APPROACHES.md) lists the
+advantages and disadvantages of each method, the reasons behind these
+recommendations, an SSHFS example, licensing and evidence coverage.
 
 For legacy AIX hosts, see the dedicated
 [AIX on POWER7 SSHFS scanning guide](integration-guides/aix/aix-power7-sshfs-scanning.md),

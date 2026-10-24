@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="452" viewBox="0 0 880 452" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="title">Ways to cover a system with THOR</title>
+  <desc id="desc">Five methods. THOR or THOR Legacy runs on the system itself and scans files and live system state; best for systems THOR supports. A Go or script collector runs on the system and sends selected files over HTTP or HTTPS to Thunderstorm; best for systems THOR cannot run on and frequent checks of new files. The prototype SFTP collector reads selected files over SFTP from a system that only offers SSH and sends them to Thunderstorm; best for recurring, selective collection. THOR scans an SSHFS mount of a system that only offers SSH, with a Forensic Lab License; best for a one-time assessment of every file in scope. THOR scans exported evidence such as images on a workstation; best without live access or in isolated networks.</desc>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d7de; }
+    .src { fill: #f6f8fa; stroke: #afb8c1; }
+    .thor { fill: #dafbe1; stroke: #1a7f37; }
+    .collector { fill: #ddf4ff; stroke: #0969da; }
+    .storm { fill: #fbefff; stroke: #8250df; }
+    .sep { stroke: #d8dee4; stroke-width: 1; }
+    .t { fill: #1f2328; }
+    .m { fill: #59636e; }
+    .line { fill: none; stroke: #59636e; stroke-width: 2; }
+    .head { fill: #59636e; }
+    @media (prefers-color-scheme: dark) {
+      .card { fill: #0d1117; stroke: #3d444d; }
+      .src { fill: #151b23; stroke: #656c76; }
+      .thor { fill: #0f2e1b; stroke: #3fb950; }
+      .collector { fill: #0c2d6b; stroke: #4493f8; }
+      .storm { fill: #2e1f52; stroke: #ab7df8; }
+      .sep { stroke: #3d444d; }
+      .t { fill: #f0f6fc; }
+      .m { fill: #9198a1; }
+      .line { stroke: #9198a1; }
+      .head { fill: #9198a1; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect class="card" x="0.5" y="0.5" width="879" height="451" rx="12"/>
+
+  <g font-size="11" font-weight="600" letter-spacing="0.6">
+    <text class="m" x="24" y="30">METHOD</text>
+    <text class="m" x="236" y="30">ON THE SOURCE SYSTEM</text>
+    <text class="m" x="468" y="30">ANALYSIS</text>
+    <text class="m" x="660" y="30">BEST FOR</text>
+  </g>
+  <line class="sep" x1="24" y1="42" x2="856" y2="42"/>
+
+  <!-- 1. THOR on the system -->
+  <g transform="translate(0 46)">
+    <text class="t" x="24" y="33" font-size="14" font-weight="600">THOR on the system</text>
+    <text class="m" x="24" y="51" font-size="11.5">THOR, or THOR Legacy for</text>
+    <text class="m" x="24" y="66" font-size="11.5">older Windows versions</text>
+    <rect class="thor" x="236" y="15" width="404" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="438" y="35" font-size="12" font-weight="600" text-anchor="middle">THOR runs on the system itself</text>
+    <text class="t" x="438" y="51" font-size="11" text-anchor="middle">scans files and live system state</text>
+    <text class="t" x="660" y="30" font-size="11.5">Systems THOR supports:</text>
+    <text class="t" x="660" y="45" font-size="11.5">the most complete coverage</text>
+    <text class="t" x="660" y="60" font-size="11.5">of a single host</text>
+  </g>
+  <line class="sep" x1="24" y1="124" x2="856" y2="124"/>
+
+  <!-- 2. Collector on the system -->
+  <g transform="translate(0 124)">
+    <text class="t" x="24" y="33" font-size="14" font-weight="600">Collector on the system</text>
+    <text class="m" x="24" y="51" font-size="11.5">Go binary or script</text>
+    <rect class="collector" x="236" y="15" width="164" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="318" y="35" font-size="12" font-weight="600" text-anchor="middle">Collector runs here</text>
+    <text class="t" x="318" y="51" font-size="11" text-anchor="middle">and selects files</text>
+    <line class="line" x1="400" y1="39" x2="467" y2="39" marker-end="url(#arrow)"/>
+    <text class="t" x="433" y="31" font-size="11" font-weight="600" text-anchor="middle">HTTP(S)</text>
+    <rect class="storm" x="468" y="15" width="172" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="554" y="35" font-size="12" font-weight="600" text-anchor="middle">Thunderstorm</text>
+    <text class="t" x="554" y="51" font-size="11" text-anchor="middle">analyzes the samples</text>
+    <text class="t" x="660" y="30" font-size="11.5">Systems THOR can't run on,</text>
+    <text class="t" x="660" y="45" font-size="11.5">and frequent checks of new</text>
+    <text class="t" x="660" y="60" font-size="11.5">files on many systems</text>
+  </g>
+  <line class="sep" x1="24" y1="202" x2="856" y2="202"/>
+
+  <!-- 3. SFTP collector -->
+  <g transform="translate(0 202)">
+    <text class="t" x="24" y="33" font-size="14" font-weight="600">SFTP collector</text>
+    <text class="m" x="24" y="51" font-size="11.5">Prototype; nothing runs</text>
+    <text class="m" x="24" y="66" font-size="11.5">on the source</text>
+    <rect class="src" x="236" y="15" width="164" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="318" y="35" font-size="12" font-weight="600" text-anchor="middle">SSH with SFTP</text>
+    <text class="t" x="318" y="51" font-size="11" text-anchor="middle">nothing installed</text>
+    <line class="line" x1="400" y1="39" x2="467" y2="39" marker-end="url(#arrow)"/>
+    <text class="t" x="433" y="31" font-size="11" font-weight="600" text-anchor="middle">SFTP</text>
+    <rect class="storm" x="468" y="15" width="172" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="554" y="35" font-size="12" font-weight="600" text-anchor="middle">SFTP collector</text>
+    <text class="t" x="554" y="51" font-size="11" text-anchor="middle">and Thunderstorm</text>
+    <text class="t" x="660" y="30" font-size="11.5">SSH-only systems: recurring,</text>
+    <text class="t" x="660" y="45" font-size="11.5">selective collection, also</text>
+    <text class="t" x="660" y="60" font-size="11.5">with no route to Thunderstorm</text>
+  </g>
+  <line class="sep" x1="24" y1="280" x2="856" y2="280"/>
+
+  <!-- 4. THOR over SSHFS -->
+  <g transform="translate(0 280)">
+    <text class="t" x="24" y="33" font-size="14" font-weight="600">THOR over SSHFS</text>
+    <text class="m" x="24" y="51" font-size="11.5">Forensic Lab License;</text>
+    <text class="m" x="24" y="66" font-size="11.5">nothing runs on the source</text>
+    <rect class="src" x="236" y="15" width="164" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="318" y="35" font-size="12" font-weight="600" text-anchor="middle">SSH with SFTP</text>
+    <text class="t" x="318" y="51" font-size="11" text-anchor="middle">nothing installed</text>
+    <line class="line" x1="400" y1="39" x2="467" y2="39" marker-end="url(#arrow)"/>
+    <text class="t" x="433" y="31" font-size="11" font-weight="600" text-anchor="middle">SSHFS</text>
+    <rect class="thor" x="468" y="15" width="172" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="554" y="35" font-size="12" font-weight="600" text-anchor="middle">THOR lab scan</text>
+    <text class="t" x="554" y="51" font-size="11" text-anchor="middle">on a workstation</text>
+    <text class="t" x="660" y="30" font-size="11.5">SSH-only systems: a one-time</text>
+    <text class="t" x="660" y="45" font-size="11.5">assessment of every file</text>
+    <text class="t" x="660" y="60" font-size="11.5">in scope</text>
+  </g>
+  <line class="sep" x1="24" y1="358" x2="856" y2="358"/>
+
+  <!-- 5. Exported evidence -->
+  <g transform="translate(0 358)">
+    <text class="t" x="24" y="33" font-size="14" font-weight="600">Exported evidence</text>
+    <text class="m" x="24" y="51" font-size="11.5">Forensic Lab License</text>
+    <rect class="src" x="236" y="15" width="164" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="318" y="35" font-size="12" font-weight="600" text-anchor="middle">Image, backup</text>
+    <text class="t" x="318" y="51" font-size="11" text-anchor="middle">or vendor export</text>
+    <line class="line" x1="400" y1="39" x2="467" y2="39" marker-end="url(#arrow)"/>
+    <text class="t" x="433" y="31" font-size="11" font-weight="600" text-anchor="middle">copy</text>
+    <rect class="thor" x="468" y="15" width="172" height="48" rx="8" stroke-width="1.5"/>
+    <text class="t" x="554" y="35" font-size="12" font-weight="600" text-anchor="middle">THOR lab scan</text>
+    <text class="t" x="554" y="51" font-size="11" text-anchor="middle">on a workstation</text>
+    <text class="t" x="660" y="30" font-size="11.5">No live access, isolated</text>
+    <text class="t" x="660" y="45" font-size="11.5">networks, or files only</text>
+    <text class="t" x="660" y="60" font-size="11.5">available as an export</text>
+  </g>
+</svg>

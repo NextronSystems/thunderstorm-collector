@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="320" viewBox="0 0 880 320" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="title">SFTP collector data flow</title>
+  <desc id="desc">A source system that cannot run the Go or a script collector but offers SSH with SFTP. The SFTP collector reads the listing, file headers and only the selected files over SFTP and sends them over HTTP or HTTPS to THOR Thunderstorm. The collector and Thunderstorm can run on the same system, or the collector on a separate system in between.</desc>
+  <style>
+    .card { fill: #ffffff; stroke: #d0d7de; }
+    .mask { fill: #ffffff; }
+    .panel { fill: #f6f8fa; stroke: #d0d7de; }
+    .group { fill: none; stroke: #8c959f; stroke-dasharray: 6 5; }
+    .collector { fill: #ddf4ff; stroke: #0969da; }
+    .storm { fill: #fbefff; stroke: #8250df; }
+    .t { fill: #1f2328; }
+    .m { fill: #59636e; }
+    .accent { fill: #0969da; }
+    .accent2 { fill: #8250df; }
+    .no { fill: #cf222e; }
+    .yes { fill: #1a7f37; }
+    .mark { fill: none; stroke: #ffffff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .line { fill: none; stroke: #59636e; stroke-width: 2; }
+    .head { fill: #59636e; }
+    .icon { fill: none; stroke: #59636e; stroke-width: 1.5; }
+    .dot { fill: #59636e; }
+    @media (prefers-color-scheme: dark) {
+      .card { fill: #0d1117; stroke: #3d444d; }
+      .mask { fill: #0d1117; }
+      .panel { fill: #151b23; stroke: #3d444d; }
+      .group { stroke: #656c76; }
+      .collector { fill: #0c2d6b; stroke: #4493f8; }
+      .storm { fill: #2e1f52; stroke: #ab7df8; }
+      .t { fill: #f0f6fc; }
+      .m { fill: #9198a1; }
+      .accent { fill: #4493f8; }
+      .accent2 { fill: #ab7df8; }
+      .no { fill: #da3633; }
+      .yes { fill: #238636; }
+      .line { stroke: #9198a1; }
+      .head { fill: #9198a1; }
+      .icon { stroke: #9198a1; }
+      .dot { fill: #9198a1; }
+    }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="head"/>
+    </marker>
+  </defs>
+
+  <rect class="card" x="0.5" y="0.5" width="879" height="319" rx="12"/>
+  <g transform="translate(0 -16)">
+
+  <!-- Source system -->
+  <rect class="panel" x="24" y="52" width="232" height="236" rx="10"/>
+  <g transform="translate(214 66)">
+    <rect class="icon" x="0" y="0" width="26" height="11" rx="2"/>
+    <rect class="icon" x="0" y="15" width="26" height="11" rx="2"/>
+    <circle class="dot" cx="20" cy="5.5" r="1.6"/>
+    <circle class="dot" cx="20" cy="20.5" r="1.6"/>
+  </g>
+  <text class="t" x="40" y="80" font-size="15" font-weight="600">Source system</text>
+  <text class="m" x="40" y="100" font-size="12">Appliance, network device,</text>
+  <text class="m" x="40" y="116" font-size="12">legacy or embedded host</text>
+
+  <circle class="no" cx="49" cy="146" r="9"/>
+  <path class="mark" d="M45.5 142.5 L52.5 149.5 M52.5 142.5 L45.5 149.5"/>
+  <text class="t" x="66" y="150.5" font-size="13">Go collector</text>
+  <circle class="no" cx="49" cy="172" r="9"/>
+  <path class="mark" d="M45.5 168.5 L52.5 175.5 M52.5 168.5 L45.5 175.5"/>
+  <text class="t" x="66" y="176.5" font-size="13">Script collector</text>
+  <circle class="yes" cx="49" cy="198" r="9"/>
+  <path class="mark" d="M44.5 198.5 L48 202 L53.5 194"/>
+  <text class="t" x="66" y="202.5" font-size="13" font-weight="600">SSH with SFTP</text>
+
+  <text class="m" x="40" y="242" font-size="12">Nothing is installed or</text>
+  <text class="m" x="40" y="258" font-size="12">run on the source</text>
+
+  <!-- Source to collector -->
+  <line class="line" x1="257" y1="170" x2="411" y2="170" marker-end="url(#arrow)"/>
+  <text class="t" x="334" y="160" font-size="12.5" font-weight="600" text-anchor="middle">SSH / SFTP</text>
+  <text class="m" x="334" y="189" font-size="11.5" text-anchor="middle">listing, headers and</text>
+  <text class="m" x="334" y="204" font-size="11.5" text-anchor="middle">selected files only</text>
+
+  <!-- Collector and Thunderstorm, optionally on one system -->
+  <rect class="group" x="392" y="52" width="464" height="236" rx="12"/>
+  <rect class="mask" x="406" y="44" width="150" height="18"/>
+  <text class="t" x="414" y="57" font-size="12.5" font-weight="600">Can run on one system</text>
+
+  <rect class="collector" x="412" y="88" width="188" height="164" rx="10" stroke-width="1.5"/>
+  <path class="accent" d="M428 104 H458 L447 117 V128 L439 132 V117 Z"/>
+  <text class="t" x="468" y="123" font-size="15" font-weight="600">SFTP collector</text>
+  <circle class="accent" cx="431" cy="148" r="2"/>
+  <text class="t" x="439" y="152" font-size="12">Lists files over SFTP</text>
+  <circle class="accent" cx="431" cy="169" r="2"/>
+  <text class="t" x="439" y="173" font-size="12">Selects by path, name,</text>
+  <text class="t" x="439" y="190" font-size="12">size, age and header</text>
+  <circle class="accent" cx="431" cy="207" r="2"/>
+  <text class="t" x="439" y="211" font-size="12">Sends only the selection</text>
+  <text class="m" x="428" y="236" font-size="11.5">Nothing stored on disk</text>
+
+  <line class="line" x1="600" y1="170" x2="655" y2="170" marker-end="url(#arrow)"/>
+  <text class="t" x="628" y="160" font-size="11.5" font-weight="600" text-anchor="middle">HTTP(S)</text>
+
+  <rect class="storm" x="656" y="88" width="180" height="164" rx="10" stroke-width="1.5"/>
+  <path class="accent2" d="M675 101 L664 119 L672 119 L668 134 L682 113 L674 113 L679 101 Z"/>
+  <text class="t" x="690" y="123" font-size="15" font-weight="600">Thunderstorm</text>
+  <circle class="accent2" cx="675" cy="148" r="2"/>
+  <text class="t" x="683" y="152" font-size="12">Analyzes each sample</text>
+  <text class="t" x="683" y="169" font-size="12">with THOR</text>
+  <circle class="accent2" cx="675" cy="186" r="2"/>
+  <text class="t" x="683" y="190" font-size="12">Reports results with</text>
+  <text class="t" x="683" y="207" font-size="12">the original path and</text>
+  <text class="t" x="683" y="224" font-size="12">source name</text>
+
+  <text class="m" x="392" y="314" font-size="12">The collector can also run on a separate system in between.</text>
+  </g>
+</svg>

@@ -13,6 +13,8 @@ listing already says about them, and streams only the selected files to
 Thunderstorm. The source runs no collector, script or scanner, and keeps no
 copied file or scheduled task.
 
+![A source system that cannot run the Go or a script collector but offers SSH with SFTP. The SFTP collector reads the listing, headers and only the selected files over SFTP and sends them over HTTP(S) to Thunderstorm. The collector and Thunderstorm can run on one system, or the collector on a separate system in between.](../images/sftp-collector-flow.svg)
+
 ## When to Use It
 
 Use the SFTP collector when SSH with SFTP is available on the source and one
