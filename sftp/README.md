@@ -165,6 +165,11 @@ analysis side, where a current toolchain is available.
 - `--threads` sets parallel header checks and uploads, `--walk-threads`
   parallel directory listings. Over high-latency links, listing time grows
   with the number of directories; more walk threads shorten it.
+- Roots follow the same rules as listed entries: excludes apply to them, and a
+  root that is a symlink is not followed; give its target instead.
+- `--response-timeout` bounds the wait for Thunderstorm's answer after an
+  upload: 2 minutes by default, 30 minutes with `--upload-synchronous`. An
+  upload also stops when Thunderstorm accepts no data for 2 minutes.
 
 Run `--help` for all options. Exit status 1 means that a selected file could
 not be read or sent, a root could not be read, the configuration was invalid,

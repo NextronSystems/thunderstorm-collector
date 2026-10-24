@@ -44,6 +44,9 @@ type Config struct {
 	Source   string   `yaml:"source"`
 	Sync     bool     `yaml:"upload-synchronous"`
 
+	// ResponseTimeout bounds the wait for Thunderstorm's answer to an upload.
+	ResponseTimeout string `yaml:"response-timeout"`
+
 	Threads     int    `yaml:"threads"`
 	WalkThreads int    `yaml:"walk-threads"`
 	DryRun      bool   `yaml:"dry-run"`
@@ -68,37 +71,11 @@ func defaultConfig() Config {
 	return config
 }
 
-// templateArgument returns the value of -t/--template, which must be read
-// before the other flags so that command-line values override the file.
-func templateArgument(args []string) string {
-	for i, arg := range args {
-		switch {
-		case (arg == "-t" || arg == "--template") && i+1 < len(args):
-			return args[i+1]
-		case strings.HasPrefix(arg, "--template="):
-			return strings.TrimPrefix(arg, "--template=")
-		}
-	}
-	return ""
-}
-
-func parseConfig(args []string) (Config, error) {
-	config := defaultConfig()
-	if template := templateArgument(args); template != "" {
-		data, err := os.ReadFile(template)
-		if err != nil {
-			return config, fmt.Errorf("could not read template: %v", err)
-		}
-		if err := yaml.Unmarshal(data, &config); err != nil {
-			return config, fmt.Errorf("could not parse template %s: %v", template, err)
-		}
-	}
-
+// newFlagSet defines every option with config's current values as defaults.
+func newFlagSet(config *Config, template *string, help *bool) *pflag.FlagSet {
 	flags := pflag.NewFlagSet("thunderstorm-sftp-collector", pflag.ContinueOnError)
 	flags.SortFlags = false
-	var template string
-	var help bool
-	flags.StringVarP(&template, "template", "t", "", "Load options from this YAML file (the Go collector's config.yml keys are accepted).")
+	flags.StringVarP(template, "template", "t", "", "Load options from this YAML file (the Go collector's config.yml keys are accepted).")
 	flags.StringVar(&config.SFTPHost, "sftp-host", config.SFTPHost, "Host name or IP of the system to collect from.")
 	flags.IntVar(&config.SFTPPort, "sftp-port", config.SFTPPort, "SSH port of that system.")
 	flags.StringVar(&config.SFTPUser, "sftp-user", config.SFTPUser, "SSH user.")
@@ -118,13 +95,40 @@ func parseConfig(args []string) (Config, error) {
 	flags.BoolVar(&config.Insecure, "insecure", config.Insecure, "Don't verify the Thunderstorm HTTPS certificate.")
 	flags.StringVarP(&config.Source, "source", "o", config.Source, "Source name reported to Thunderstorm (default: the SFTP host).")
 	flags.BoolVar(&config.Sync, "upload-synchronous", config.Sync, "Use /api/check and log each result instead of /api/checkAsync.")
+	flags.StringVar(&config.ResponseTimeout, "response-timeout", config.ResponseTimeout, "How long to wait for Thunderstorm's answer after an upload, e.g. 90s or 5m (default: 2m, or 30m with --upload-synchronous).")
 	flags.IntVarP(&config.Threads, "threads", "r", config.Threads, "Parallel header checks and uploads.")
 	flags.IntVar(&config.WalkThreads, "walk-threads", config.WalkThreads, "Parallel directory listings.")
 	flags.BoolVar(&config.DryRun, "dry-run", config.DryRun, "Select files but upload nothing.")
 	flags.BoolVar(&config.Debug, "debug", config.Debug, "Log the decision for every file.")
 	flags.StringVar(&config.Manifest, "manifest", config.Manifest, "Write every listed entry with its metadata and decision to this JSONL file.")
 	flags.StringVar(&config.StatsJSON, "stats-json", config.StatsJSON, "Write the run statistics to this JSON file.")
-	flags.BoolVarP(&help, "help", "h", false, "Show this help.")
+	flags.BoolVarP(help, "help", "h", false, "Show this help.")
+	return flags
+}
+
+// parseConfig parses the arguments twice with the same flag definitions: once
+// to find the template exactly as the flag parser reads it (every -t form, the
+// last one winning), then over the loaded template, so that command-line
+// values override the file.
+func parseConfig(args []string) (Config, error) {
+	var template string
+	var help bool
+	scratch := defaultConfig()
+	if err := newFlagSet(&scratch, &template, &help).Parse(args); err != nil {
+		return scratch, err
+	}
+	config := defaultConfig()
+	if template != "" {
+		data, err := os.ReadFile(template)
+		if err != nil {
+			return config, fmt.Errorf("could not read template: %v", err)
+		}
+		if err := yaml.Unmarshal(data, &config); err != nil {
+			return config, fmt.Errorf("could not parse template %s: %v", template, err)
+		}
+	}
+
+	flags := newFlagSet(&config, &template, &help)
 	if err := flags.Parse(args); err != nil {
 		return config, err
 	}
@@ -144,20 +148,21 @@ func parseConfig(args []string) (Config, error) {
 
 // Settings is the validated form of Config used by the collector.
 type Settings struct {
-	RootPaths    []string
-	Extensions   []string
-	MagicHeaders [][]byte
-	Executable   bool
-	ExcludeGlobs []string
-	MaxFileSize  int64
-	Threshold    time.Time
-	Threads      int
-	WalkThreads  int
-	DryRun       bool
-	Debug        bool
-	Sync         bool
-	UploadURL    string
-	StatusURL    string
+	RootPaths       []string
+	Extensions      []string
+	MagicHeaders    [][]byte
+	Executable      bool
+	ExcludeGlobs    []string
+	MaxFileSize     int64
+	Threshold       time.Time
+	Threads         int
+	WalkThreads     int
+	DryRun          bool
+	Debug           bool
+	Sync            bool
+	ResponseTimeout time.Duration
+	UploadURL       string
+	StatusURL       string
 }
 
 var whitespace = regexp.MustCompile(`\s+`)
@@ -178,6 +183,18 @@ func validateConfig(config Config) (Settings, error) {
 	}
 	if len(config.RootPaths) == 0 {
 		return settings, errors.New("path: no root path given")
+	}
+	settings.ResponseTimeout = 2 * time.Minute
+	if config.Sync {
+		// A synchronous answer arrives only after the analysis.
+		settings.ResponseTimeout = 30 * time.Minute
+	}
+	if config.ResponseTimeout != "" {
+		timeout, err := time.ParseDuration(config.ResponseTimeout)
+		if err != nil || timeout <= 0 {
+			return settings, fmt.Errorf("response-timeout: %q is not a positive duration such as 90s or 5m", config.ResponseTimeout)
+		}
+		settings.ResponseTimeout = timeout
 	}
 	if config.MaxAge != "" {
 		threshold, err := parseMaxAge(config.MaxAge)

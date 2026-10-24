@@ -8,12 +8,14 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -33,7 +35,7 @@ func main() {
 	}
 	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime)
 
-	httpClient, err := newHTTPClient(config)
+	httpClient, err := newHTTPClient(config, settings.ResponseTimeout)
 	if err != nil {
 		logger.Print(err)
 		os.Exit(1)
@@ -95,8 +97,29 @@ func orNone(value string) string {
 	return value
 }
 
-func newHTTPClient(config Config) (*http.Client, error) {
+// Connection limits: dialing gives up after connectTimeout, and an upload
+// stops when Thunderstorm accepts no data for stallTimeout.
+const (
+	connectTimeout = 30 * time.Second
+	stallTimeout   = 2 * time.Minute
+	statusTimeout  = 30 * time.Second
+)
+
+// newHTTPClient returns a client whose requests cannot hang: dialing, TLS,
+// sending (no progress for stallTimeout) and the wait for the response
+// headers (responseTimeout) are bounded. The collector bounds reading the
+// response body itself.
+func newHTTPClient(config Config, responseTimeout time.Duration) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &stallTimeoutConn{Conn: conn, timeout: stallTimeout}, nil
+	}
+	transport.ResponseHeaderTimeout = responseTimeout
 	if config.SSL {
 		tlsConfig := &tls.Config{InsecureSkipVerify: config.Insecure}
 		if len(config.CAs) > 0 {
@@ -122,8 +145,28 @@ func newHTTPClient(config Config) (*http.Client, error) {
 	}, nil
 }
 
+// stallTimeoutConn fails a write that makes no progress for timeout, so an
+// upload to a server that stops reading ends instead of blocking.
+type stallTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *stallTimeoutConn) Write(p []byte) (int, error) {
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(p)
+}
+
 func checkThunderstorm(client *http.Client, statusURL string) error {
-	response, err := client.Get(statusURL)
+	ctx, cancel := context.WithTimeout(context.Background(), statusTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}

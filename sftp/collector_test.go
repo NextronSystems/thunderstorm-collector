@@ -48,11 +48,11 @@ type receivedSample struct {
 	sha256 string
 }
 
-// thunderstorm records the uploads it receives.
-func thunderstorm(t *testing.T) (*httptest.Server, func() []receivedSample) {
+// uploadRecorder is a Thunderstorm stand-in that records every upload.
+func uploadRecorder() (http.Handler, func() []receivedSample) {
 	var mutex sync.Mutex
 	var samples []receivedSample
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		file, header, err := r.FormFile("file")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -71,14 +71,21 @@ func thunderstorm(t *testing.T) (*httptest.Server, func() []receivedSample) {
 		samples = append(samples, receivedSample{params["filename"], hex.EncodeToString(hasher.Sum(nil))})
 		mutex.Unlock()
 		w.Write([]byte(`{"id": 1}`))
-	}))
-	t.Cleanup(server.Close)
-	return server, func() []receivedSample {
+	})
+	return handler, func() []receivedSample {
 		mutex.Lock()
 		defer mutex.Unlock()
 		sort.Slice(samples, func(i, j int) bool { return samples[i].path < samples[j].path })
 		return append([]receivedSample(nil), samples...)
 	}
+}
+
+// thunderstorm runs an upload recorder as an HTTP server.
+func thunderstorm(t *testing.T) (*httptest.Server, func() []receivedSample) {
+	handler, received := uploadRecorder()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server, received
 }
 
 func writeFile(t *testing.T, name string, content string, mode os.FileMode, mtime time.Time) string {

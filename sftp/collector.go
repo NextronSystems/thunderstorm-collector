@@ -141,8 +141,6 @@ type Collector struct {
 
 	magicLength int
 	files       chan candidate
-	walkSlots   chan struct{}
-	walkGroup   sync.WaitGroup
 	workerGroup sync.WaitGroup
 	retrySleep  func(time.Duration)
 }
@@ -155,7 +153,6 @@ func NewCollector(settings Settings, sftpClient *sftp.Client, httpClient *http.C
 		logger:     logger,
 		manifest:   manifest,
 		files:      make(chan candidate, settings.Threads),
-		walkSlots:  make(chan struct{}, settings.WalkThreads),
 		retrySleep: time.Sleep,
 	}
 	for _, header := range settings.MagicHeaders {
@@ -185,6 +182,7 @@ func (c *Collector) Run() {
 			}
 		}()
 	}
+	queue := newDirectoryQueue()
 	for _, root := range c.RootPaths {
 		c.logger.Printf("Listing '%s' on the source", root)
 		info, err := c.sftp.Lstat(root)
@@ -193,62 +191,136 @@ func (c *Collector) Run() {
 			c.logger.Printf("Could not read scan root '%s': %v", root, err)
 			continue
 		}
-		if !info.IsDir() {
-			c.consider(root, info)
-			continue
+		if info.Mode()&os.ModeSymlink != 0 {
+			c.logger.Printf("Scan root '%s' is a symlink and is not followed; give its target instead", root)
 		}
-		c.walkGroup.Add(1)
-		go c.walkDirectory(root, true)
+		c.classify(queue, walkEntry{path: root, isRoot: true}, info)
 	}
-	c.walkGroup.Wait()
+	var walkers sync.WaitGroup
+	for i := 0; i < c.WalkThreads; i++ {
+		walkers.Add(1)
+		go func() {
+			defer walkers.Done()
+			c.walk(queue)
+		}()
+	}
+	walkers.Wait()
 	close(c.files)
 	c.workerGroup.Wait()
 	c.Stats.DurationSeconds = time.Since(start).Seconds()
 }
 
-// walkDirectory lists one directory and starts a walker for each
-// subdirectory. walkSlots bounds the listings in flight, not the goroutines.
-// A READDIR reply carries the attributes of every entry (OpenSSH's sftp-server
-// takes them with lstat), so no per-file STAT request is needed and symlinks
-// are seen as links, never followed.
-func (c *Collector) walkDirectory(directory string, isRoot bool) {
-	defer c.walkGroup.Done()
-	c.walkSlots <- struct{}{}
-	entries, err := c.sftp.ReadDir(directory)
-	<-c.walkSlots
+type walkEntry struct {
+	path   string
+	isRoot bool
+}
+
+// directoryQueue holds the directories still to be listed. A fixed number of
+// walkers take the most recently added one, so the queue grows with the depth
+// of the tree rather than its width. A walker hands each selected file to the
+// upload workers before it lists the next directory, so slow uploads hold back
+// listing and at most walk-threads listings are in memory.
+type directoryQueue struct {
+	mutex   sync.Mutex
+	ready   *sync.Cond
+	pending []walkEntry
+	active  int
+}
+
+func newDirectoryQueue() *directoryQueue {
+	queue := &directoryQueue{}
+	queue.ready = sync.NewCond(&queue.mutex)
+	return queue
+}
+
+func (q *directoryQueue) push(directory walkEntry) {
+	q.mutex.Lock()
+	q.pending = append(q.pending, directory)
+	q.mutex.Unlock()
+	q.ready.Signal()
+}
+
+// next returns the next directory to list. It returns false once nothing is
+// pending and no walker is listing, so nothing can be added any more.
+func (q *directoryQueue) next() (walkEntry, bool) {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+	for len(q.pending) == 0 && q.active > 0 {
+		q.ready.Wait()
+	}
+	if len(q.pending) == 0 {
+		return walkEntry{}, false
+	}
+	directory := q.pending[len(q.pending)-1]
+	q.pending = q.pending[:len(q.pending)-1]
+	q.active++
+	return directory, true
+}
+
+func (q *directoryQueue) done() {
+	q.mutex.Lock()
+	q.active--
+	finished := q.active == 0 && len(q.pending) == 0
+	q.mutex.Unlock()
+	if finished {
+		q.ready.Broadcast()
+	}
+}
+
+func (c *Collector) walk(queue *directoryQueue) {
+	for {
+		directory, ok := queue.next()
+		if !ok {
+			return
+		}
+		c.listDirectory(queue, directory)
+		queue.done()
+	}
+}
+
+// listDirectory lists one directory. A READDIR reply carries the attributes of
+// every entry (OpenSSH's sftp-server takes them with lstat), so no per-file
+// STAT request is needed and symlinks are seen as links, never followed.
+func (c *Collector) listDirectory(queue *directoryQueue, directory walkEntry) {
+	entries, err := c.sftp.ReadDir(directory.path)
 	if err != nil {
-		if isRoot {
+		if directory.isRoot {
 			atomic.AddInt64(&c.Stats.RootErrors, 1)
-			c.logger.Printf("Could not read scan root '%s': %v", directory, err)
+			c.logger.Printf("Could not read scan root '%s': %v", directory.path, err)
 		} else {
 			atomic.AddInt64(&c.Stats.WalkErrors, 1)
-			c.logger.Printf("Could not list '%s': %v", directory, err)
+			c.logger.Printf("Could not list '%s': %v", directory.path, err)
 		}
 		return
 	}
 	atomic.AddInt64(&c.Stats.DirectoriesListed, 1)
 	for _, info := range entries {
-		entryPath := path.Join(directory, info.Name())
-		if glob := c.exclusion(entryPath); glob != "" {
-			c.debugf("Skipping '%s' due to exclusion rule %s", entryPath, glob)
-			atomic.AddInt64(&c.Stats.Excluded, 1)
-			c.record(entryPath, info, decisionExcluded, nil)
-			continue
-		}
-		switch mode := info.Mode(); {
-		case mode.IsDir():
-			c.record(entryPath, info, decisionDirectory, nil)
-			c.walkGroup.Add(1)
-			go c.walkDirectory(entryPath, false)
-		case mode&os.ModeSymlink != 0:
-			atomic.AddInt64(&c.Stats.Symlinks, 1)
-			c.record(entryPath, info, decisionSymlink, nil)
-		case mode.IsRegular():
-			c.consider(entryPath, info)
-		default:
-			atomic.AddInt64(&c.Stats.Irregular, 1)
-			c.record(entryPath, info, decisionIrregular, nil)
-		}
+		c.classify(queue, walkEntry{path: path.Join(directory.path, info.Name())}, info)
+	}
+}
+
+// classify applies the exclusions and the entry type to a root or a listed
+// entry alike: directories are queued, regular files considered, symlinks and
+// other entries only recorded.
+func (c *Collector) classify(queue *directoryQueue, entry walkEntry, info os.FileInfo) {
+	if glob := c.exclusion(entry.path); glob != "" {
+		c.debugf("Skipping '%s' due to exclusion rule %s", entry.path, glob)
+		atomic.AddInt64(&c.Stats.Excluded, 1)
+		c.record(entry.path, info, decisionExcluded, nil)
+		return
+	}
+	switch mode := info.Mode(); {
+	case mode.IsDir():
+		c.record(entry.path, info, decisionDirectory, nil)
+		queue.push(entry)
+	case mode&os.ModeSymlink != 0:
+		atomic.AddInt64(&c.Stats.Symlinks, 1)
+		c.record(entry.path, info, decisionSymlink, nil)
+	case mode.IsRegular():
+		c.consider(entry.path, info)
+	default:
+		atomic.AddInt64(&c.Stats.Irregular, 1)
+		c.record(entry.path, info, decisionIrregular, nil)
 	}
 }
 
@@ -340,12 +412,21 @@ func (c *Collector) process(candidate candidate) {
 
 	var headerBytes int64
 	if !candidate.typeKnown {
-		// One READ request for exactly the bytes the longest header needs.
+		// One READ request for exactly the bytes the longest header needs. A
+		// shorter file ends with io.EOF; any other error is a failed check.
 		header := make([]byte, c.magicLength)
-		n, _ := file.ReadAt(header, 0)
+		n, err := file.ReadAt(header, 0)
 		headerBytes = int64(n)
 		atomic.AddInt64(&c.Stats.HeaderReads, 1)
 		atomic.AddInt64(&c.Stats.HeaderBytes, headerBytes)
+		if err != nil && err != io.EOF {
+			c.logger.Printf("Could not read the header of '%s': %v", candidate.path, err)
+			atomic.AddInt64(&c.Stats.FileErrors, 1)
+			c.record(candidate.path, candidate.info, decisionError, func(e *manifestEntry) {
+				e.HeaderBytes, e.Error = headerBytes, err.Error()
+			})
+			return
+		}
 		if !c.headerWanted(header[:n]) {
 			c.skip(candidate.path, candidate.info, decisionWrongType, &c.Stats.WrongType)
 			return
@@ -399,12 +480,22 @@ const (
 	maxRetryAfter     = 120
 )
 
+// maxResponseBytes bounds a Thunderstorm answer. An asynchronous answer is a
+// short JSON object; a synchronous one lists the results for one sample.
+const maxResponseBytes = 16 << 20
+
 type uploadResult struct {
 	bytes      int64
 	sha256     string
 	response   string
 	readFailed bool
+	// copyErr is set when the request body was not sent completely, because
+	// the file could not be read or because the HTTP side stopped reading.
+	copyErr error
 }
+
+// permanentError marks an upload failure that a retry would only repeat.
+type permanentError struct{ error }
 
 // uploadWithRetries sends the file and retries like the Go collector: network
 // errors with exponential backoff, HTTP 503 after Retry-After. Each attempt
@@ -415,8 +506,9 @@ func (c *Collector) uploadWithRetries(file *sftp.File, remotePath string) (uploa
 			return uploadResult{readFailed: true}, err
 		}
 		result, status, retryAfter, err := c.upload(file, remotePath)
+		var permanent permanentError
 		switch {
-		case result.readFailed:
+		case result.readFailed, errors.As(err, &permanent):
 			return result, err
 		case err != nil && attempt < maxRetries:
 			c.logger.Printf("Could not send '%s', will try again: %v", remotePath, err)
@@ -444,34 +536,30 @@ func (c *Collector) upload(file *sftp.File, remotePath string) (result uploadRes
 	counter := &countingWriter{total: &c.Stats.ContentBytes}
 	copied := make(chan uploadResult, 1)
 	go func() {
-		var copyResult uploadResult
-		defer func() { copied <- copyResult }()
+		var sent uploadResult
+		defer func() { copied <- sent }()
 		part, err := form.CreatePart(formFileHeader("file", remotePath))
-		if err != nil {
-			bodyWriter.CloseWithError(err)
-			return
+		if err == nil {
+			// *sftp.File implements io.WriterTo, so io.Copy keeps several READ
+			// requests in flight instead of one round trip per 32 KiB.
+			sent.bytes, err = io.Copy(io.MultiWriter(part, hasher, counter), file)
+			// A closed pipe means the HTTP side stopped reading; anything
+			// else is a failed read on the source.
+			sent.readFailed = err != nil && !errors.Is(err, io.ErrClosedPipe)
 		}
-		// *sftp.File implements io.WriterTo, so io.Copy keeps several READ
-		// requests in flight instead of one round trip per 32 KiB.
-		n, err := io.Copy(io.MultiWriter(part, hasher, counter), file)
-		copyResult.bytes = n
-		if err != nil {
-			// A closed pipe means the HTTP side gave up; anything else is a
-			// failed read on the source.
-			copyResult.readFailed = !errors.Is(err, io.ErrClosedPipe)
-			bodyWriter.CloseWithError(fmt.Errorf("could not read file: %v", err))
-			return
+		if err == nil {
+			err = form.Close()
 		}
-		bodyWriter.CloseWithError(form.Close())
+		sent.copyErr = err
+		bodyWriter.CloseWithError(err)
 	}()
 
 	response, postErr := c.client.Post(c.UploadURL, form.FormDataContentType(), body)
 	if postErr == nil {
-		responseBody, readErr := io.ReadAll(response.Body)
-		response.Body.Close()
 		status = response.StatusCode
+		responseBody, readErr := c.readResponse(response.Body)
 		if readErr != nil {
-			postErr = fmt.Errorf("could not read response: %v", readErr)
+			postErr = permanentError{readErr}
 		}
 		result.response = string(responseBody)
 		if location := response.Header.Get("Location"); status >= 300 && status <= 399 {
@@ -490,12 +578,40 @@ func (c *Collector) upload(file *sftp.File, remotePath string) (result uploadRes
 	}
 	body.Close()
 	sent := <-copied
-	result.bytes, result.readFailed = sent.bytes, sent.readFailed
+	result.bytes, result.readFailed, result.copyErr = sent.bytes, sent.readFailed, sent.copyErr
 	result.sha256 = hex.EncodeToString(hasher.Sum(nil))
-	if result.readFailed {
-		return result, status, retryAfter, fmt.Errorf("could not read file after %d bytes", result.bytes)
+	switch {
+	case result.readFailed:
+		return result, status, retryAfter, fmt.Errorf("could not read file after %d bytes: %v", result.bytes, sent.copyErr)
+	case postErr == nil && status == http.StatusOK && sent.copyErr != nil:
+		// A 200 counts only for a sample that was sent completely.
+		postErr = fmt.Errorf("Thunderstorm answered before the upload was complete (%d bytes read): %v", result.bytes, sent.copyErr)
 	}
 	return result, status, retryAfter, postErr
+}
+
+// readResponse reads an answer within the size limit and, when set, the
+// response timeout; closing the body ends a read that does not finish.
+func (c *Collector) readResponse(body io.ReadCloser) ([]byte, error) {
+	defer body.Close()
+	var timedOut int32
+	if c.ResponseTimeout > 0 {
+		timer := time.AfterFunc(c.ResponseTimeout, func() {
+			atomic.StoreInt32(&timedOut, 1)
+			body.Close()
+		})
+		defer timer.Stop()
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	switch {
+	case err != nil && atomic.LoadInt32(&timedOut) == 1:
+		return data, fmt.Errorf("no complete response within %v", c.ResponseTimeout)
+	case err != nil:
+		return data, fmt.Errorf("could not read the response: %v", err)
+	case len(data) > maxResponseBytes:
+		return data[:maxResponseBytes], fmt.Errorf("the response exceeds %d bytes", maxResponseBytes)
+	}
+	return data, nil
 }
 
 type countingWriter struct{ total *int64 }
