@@ -8,7 +8,7 @@ Selective collection keeps endpoint workload and network traffic low. Metadata f
 
 No collector installation or permanently running endpoint agent is required. Collectors run as portable binaries or standalone scripts using the required runtime and tools available on the endpoint. They can be started remotely through Ansible or another automation script, or placed on the endpoint and scheduled with cron or Windows Task Scheduler. Each invocation performs a collection pass and exits.
 
-This repository provides a compiled Go collector, standalone script collectors, and assessment guides with collection configurations. Available filters, dependencies, and capabilities vary by collector.
+This repository provides a compiled Go collector, standalone script collectors, a prototype SFTP collector for systems on which nothing can run, and assessment guides with collection configurations. Available filters, dependencies, and capabilities vary by collector.
 
 ## See How It Works
 
@@ -29,6 +29,13 @@ comparison, an SSHFS example, licensing and evidence coverage. SSHFS is useful
 for an ad-hoc assessment; scheduled Thunderstorm collectors are often a better
 fit for recurring assessments.
 
+When nothing can run on the source but SSH/SFTP is available, the prototype
+**[SFTP collector](sftp/README.md)** uses the same access as SSHFS but selects
+files before transferring them. It runs on the Thunderstorm host or another
+system, chooses files by path, name, size, modification time and header, and
+sends only those to Thunderstorm. A THOR lab scan of an SSHFS mount reads every
+file in scope up to its size limit.
+
 For legacy AIX hosts, see the dedicated
 [AIX on POWER7 SSHFS scanning guide](integration-guides/aix/aix-power7-sshfs-scanning.md),
 with a quick path-allowlist scan for incident response and a thorough assessment
@@ -40,6 +47,7 @@ procedure covering root access, mount inventory and exclusions.
 | --- | --- | --- |
 | **Go collector** | Recommended for most general-purpose systems with a compatible OS and CPU architecture. Runs as a compiled binary without an installed Go runtime. | [Go usage, configuration, and platform compatibility](go/README.md) |
 | **Script collectors** | Use an available scripting runtime when a compiled binary is impractical or you need to adapt the collection logic. | [Script selection and requirements](scripts/README.md#choosing-a-collector) |
+| **SFTP collector** (prototype) | Nothing can run on the source, but SSH with SFTP is available. Runs on the Thunderstorm host or another system and pulls the selected files; the source needs no route to Thunderstorm. Build from source; not in releases yet. | [Use cases, differences, and comparison with SSHFS](sftp/README.md) |
 
 The eight standalone scripts are organized into [Bash](scripts/bash/README.md), [POSIX sh / ash](scripts/ash/README.md), [Python](scripts/python/README.md), [Perl](scripts/perl/README.md), [PowerShell](scripts/powershell/README.md), and [Batch](scripts/batch/README.md) directories. Python and PowerShell each include a separate legacy variant.
 

@@ -10,7 +10,9 @@ Use a native scan when it is supported and operationally suitable. For other
 systems, choose an approach based on available access, permitted software,
 network connectivity and how often assessments are needed. SSHFS is a useful
 alternative for an immediate assessment; a scheduled Thunderstorm collector is
-often a better fit for recurring assessments.
+often a better fit for recurring assessments. When only SSH/SFTP is available,
+the prototype SFTP collector combines the two: it reads files over SFTP like
+SSHFS, but transfers only the selected files and sends them to Thunderstorm.
 
 ## Scanning methods at a glance
 
@@ -18,13 +20,15 @@ often a better fit for recurring assessments.
 |---|---|---|---|
 | **1. Native THOR scan** | On the source system | Compatible THOR binary for the OS, CPU and runtime; sufficient permissions | Assessment using the native checks available on that platform |
 | **2a. Remote filesystem scan via SSHFS** | On a supported analysis workstation | Reachable SSH/SFTP service and credentials that can read the relevant paths | Ad-hoc assessment without installing a scanner or collector on the source |
-| **2b. Thunderstorm with a collector** | On a central Thunderstorm server | Compatible collector or script, readable files and connectivity to the service | Recurring assessments with configurable file selection |
+| **2b. Thunderstorm with a collector on the source** | On a central Thunderstorm server | Compatible collector or script, readable files and connectivity to the service | Recurring assessments with configurable file selection |
+| **2c. Thunderstorm with the SFTP collector** (prototype) | On a central Thunderstorm server | Reachable SSH/SFTP service and credentials that can read the relevant paths | Selective or recurring collection when nothing can run on the source |
 | **3. Offline analysis of exported evidence** | On a supported analysis workstation | A way to export files, backups or filesystem images | Analysis when direct access or on-system execution is impractical |
 
-The numbering groups SSHFS and Thunderstorm as two ways to analyze files over
-the network. It does not imply equal evidence coverage or a mandatory sequence.
-Both can also serve one-time investigations; SSHFS scans can be scheduled if
-their connection and access requirements are acceptable.
+The numbering groups SSHFS and the two Thunderstorm routes as ways to analyze
+files over the network. It does not imply equal evidence coverage or a
+mandatory sequence. All three can also serve one-time investigations; SSHFS
+scans can be scheduled if their connection and access requirements are
+acceptable.
 
 ## Native THOR scans
 
@@ -141,8 +145,12 @@ outside the assessment.
 
 File data read by THOR travels over the SSHFS connection, along with directory
 and metadata requests. Large scopes, high latency and intensive settings can
-produce substantial traffic and source disk activity. Select relevant paths
-and exclusions, and account for large data stores and virtual machine disks.
+produce substantial traffic and source disk activity. A lab scan
+[scans every file regardless of its extension or magic header](https://thor-manual.nextron-systems.com/en/latest/usage/special-scan-modes.html#lab-scanning),
+up to its size limit, so its traffic grows with the data in scope rather than
+with the files of interest. Select relevant paths and exclusions, and account
+for large data stores and virtual machine disks. To transfer only selected
+files over the same access, see [Pulling files over SFTP](#pulling-files-over-sftp).
 Scan duration depends on the source, scope and network; timings from the older
 appliance articles are examples, not a general performance guarantee.
 
@@ -166,6 +174,30 @@ by the collector's transport. Use certificate verification and a suitable CA
 store. The service requires a Thunderstorm Service License; a collector does
 not need a local THOR scanner license.
 See [Thunderstorm deployment and licensing](https://thor-manual.nextron-systems.com/en/latest/usage/deployment.html#thor-thunderstorm-service).
+
+### Pulling files over SFTP
+
+The prototype [SFTP collector](../sftp/README.md) serves systems that offer
+SSH/SFTP access but on which neither THOR nor a collector can run. It runs on
+the Thunderstorm host or on a system that reaches both, lists the source's
+filesystem over SFTP and sends only the selected files. Nothing runs on the
+source, and the source needs no route to Thunderstorm. The connection runs the
+other way than for the collectors above: the collector host needs inbound SSH
+access to the source and keeps the SSH credentials for it.
+
+Compared with THOR over SSHFS, selection happens before transfer. Path, name,
+size, modification time and permission filters use the directory listing, and
+a header filter reads only the first bytes of a file. Network traffic and disk
+reads on the source therefore follow the selection, while a lab scan of an
+SSHFS mount reads every file in scope. In return, files outside the selection
+are never analyzed, not even by filename IOCs, and the age filter can use only
+the modification time: SFTP version 3, which OpenSSH implements, reports no
+change time. The collector's
+[comparison with SSHFS](../sftp/README.md#compared-with-thor-over-sshfs) covers
+both sides. A complete SSHFS assessment followed by scheduled SFTP collections
+combines the two.
+
+The SFTP collector is built from source and has not been tested on products.
 
 ### Recurring collection
 
@@ -229,8 +261,12 @@ For an AIX system running on POWER7, consider:
 - **Thunderstorm:** use a script collector whose interpreter, dependencies and
   transport work on that AIX installation. A script's language alone does not
   establish compatibility with every AIX release.
+- **SFTP collector:** send selected files to Thunderstorm from a system with
+  SSH/SFTP access to AIX; nothing runs on AIX. The
+  [SFTP collector](../sftp/README.md) is a prototype and has not been tested on
+  AIX.
 - **Exported evidence:** transfer files or a supported export for lab analysis
-  when neither live network approach is suitable.
+  when none of the live network approaches is suitable.
 
 Any special collector build using another toolchain, such as `gccgo`, needs
 separate confirmation of availability and validation on the intended system.
@@ -250,4 +286,4 @@ See [Thunderstorm analysis modes](https://www.nextron-systems.com/thor-thunderst
 When describing an assessment, record the source, accessible paths, collection
 or acquisition time, filters, unreadable files and scan errors. Describe the
 result as analysis of that evidence rather than promising identical coverage
-across all four approaches.
+across these approaches.

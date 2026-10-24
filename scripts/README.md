@@ -11,7 +11,10 @@ For recommendations by product rather than scripting language, see the [product 
 If a compatible script or its dependencies cannot be deployed, consider
 **SSHFS scanning**: mount accessible source directories on a supported analysis
 workstation and run THOR there. The source needs SSH/SFTP access and sufficient
-read permissions; it does not run a scanner or collector.
+read permissions; it does not run a scanner or collector. The prototype
+[SFTP collector](../sftp/README.md) uses the same access without a mount: it
+runs on the Thunderstorm host or another system, selects files from the SFTP
+directory listing and sends only those to Thunderstorm.
 
 See [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md) for the
 SSHFS example and a comparison with native scans, Thunderstorm submissions and

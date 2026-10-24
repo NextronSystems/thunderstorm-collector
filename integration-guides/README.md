@@ -7,7 +7,10 @@ assessment, **SSHFS** can expose files to THOR on an analysis workstation withou
 installing a scanner or collector on the source, provided suitable SSH/SFTP
 access is available. [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md)
 compares native scans, SSHFS, Thunderstorm collectors and offline evidence
-analysis, including prerequisites and licensing.
+analysis, including prerequisites and licensing. Where only SSH/SFTP is
+available and files should be collected selectively or repeatedly, the
+prototype [SFTP collector](../sftp/README.md) pulls the selected files from
+another system and sends them to Thunderstorm.
 
 ## Platform guides
 
@@ -26,7 +29,7 @@ Other products, including appliances that cannot run a collector, are covered by
 | `integration-guides/<platform>/` | Running Thunderstorm collection, or an alternative such as SSHFS, on one platform |
 | [`emerging-threats/`](../emerging-threats/README.md) | Time-bound collection profiles for a named assessment, such as the NetScaler profile |
 | [`docs/`](../docs/) | Cross-cutting references: scanning approaches, collector recommendations, construction guide, testing overview, acceptance report |
-| [`go/`](../go/README.md) and [`scripts/`](../scripts/README.md) | Reference for each collector: options, requirements and compatibility evidence |
+| [`go/`](../go/README.md), [`scripts/`](../scripts/README.md) and [`sftp/`](../sftp/README.md) | Reference for each collector: options, requirements and compatibility evidence |
 
 ## Related Nextron repositories
 
