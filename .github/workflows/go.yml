@@ -46,3 +46,28 @@ jobs:
           go-version: ${{ matrix.go-version }}
       - name: Build release artifacts
         run: make release
+
+  sftp:
+    # The SFTP collector is a separate module that needs a current Go version:
+    # test with the version in sftp/go.mod and with the newest release, which
+    # also builds the release packages.
+    name: SFTP collector (Go ${{ matrix.go-version || 'from go.mod' }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - go-version-file: sftp/go.mod
+          - go-version: stable
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          go-version-file: ${{ matrix.go-version-file }}
+          cache-dependency-path: sftp/go.sum
+      - name: Test
+        run: make -C sftp test
+      - name: Build release packages
+        run: make -C sftp release

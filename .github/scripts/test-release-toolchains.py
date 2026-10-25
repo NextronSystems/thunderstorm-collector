@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Exercise the actual two-compiler release steps with deterministic compiler stubs."""
+"""Exercise the actual release build steps, the two compilers and the SFTP
+collector, with deterministic compiler stubs."""
 import os
 import shutil
 import subprocess
@@ -55,10 +56,12 @@ else:
 
 with tempfile.TemporaryDirectory(prefix="release-toolchains-") as tmp:
     root = Path(tmp)
-    for name in ("go", "scripts", "tools"):
+    for name in ("go", "scripts", "sftp", "tools"):
         (root / name).mkdir()
-    for name in ("Makefile", "go/Makefile"):
+    for name in ("Makefile", "go/Makefile", "sftp/Makefile"):
         shutil.copy2(repo / name, root / name)
+    (root / "sftp/README.md").write_text("fixture-sftp-readme\n")
+    (root / "sftp/main.go").write_text("fixture-sftp-source\n")
     (root / "go/config.yml").write_text("fixture-config\n")
     (root / "go/main.go").write_text("fixture-source\n")
     (root / "scripts/python").mkdir()
@@ -69,7 +72,9 @@ with tempfile.TemporaryDirectory(prefix="release-toolchains-") as tmp:
     for key in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL"):
         env.pop(key, None)
     env.update(PATH=str(root / "tools") + os.pathsep + env["PATH"], VERSION="refs/tags/v1.0.2")
-    for compiler, name in (("stable", "Build project with Go stable"), ("go1.10", "Build project with Go 1.10")):
+    for compiler, name in (("stable", "Build project with Go stable"),
+                           ("stable", "Build SFTP collector with Go stable"),
+                           ("go1.10", "Build project with Go 1.10")):
         env["TEST_RELEASE_COMPILER"] = compiler
         result = subprocess.run(["bash", "-eu", "-c", build_step(name)], cwd=root, env=env, capture_output=True, text=True)
         if result.returncode:
@@ -85,9 +90,19 @@ with tempfile.TemporaryDirectory(prefix="release-toolchains-") as tmp:
                 raise AssertionError(target + " packaged " + actual + ", expected " + expected)
             if package.extractfile(prefix + "config.yml").read() != b"fixture-config\n":
                 raise AssertionError("Packaged configuration changed")
+    # The SFTP packages come from the stable step and survive the Go 1.10 rebuild.
+    for arch in ("amd64", "arm64"):
+        archive = root / "release" / ("thunderstorm-sftp-collector-1.0.2-" + arch + "-linux.tar.gz")
+        with tarfile.open(archive) as package:
+            prefix = "thunderstorm-sftp-collector-" + arch + "-linux/"
+            actual = package.extractfile(prefix + arch + "-linux-thunderstorm-sftp-collector").read().decode()
+            if actual != "stable:linux/" + arch:
+                raise AssertionError("SFTP " + arch + " packaged " + actual + ", expected stable:linux/" + arch)
+            if package.extractfile(prefix + "README.md").read() != b"fixture-sftp-readme\n":
+                raise AssertionError("Packaged SFTP README changed")
     if (root / "release/config-1.0.2.yml").read_bytes() != b"fixture-config\n":
         raise AssertionError("Standalone configuration changed")
     if (root / "release/thunderstorm-collector-1.0.2.py").read_bytes() != b"fixture-script\n":
         raise AssertionError("Script release asset changed")
 
-print("Release compiler selection passed: Go 1.10 for shared targets, stable-only packages preserved, config/scripts intact")
+print("Release compiler selection passed: Go 1.10 for shared targets, stable-only and SFTP packages preserved, config/scripts intact")

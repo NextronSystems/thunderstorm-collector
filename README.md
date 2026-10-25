@@ -56,7 +56,7 @@ procedure covering root access, mount inventory and exclusions.
 | --- | --- | --- |
 | **Go collector** | Recommended for most general-purpose systems with a compatible OS and CPU architecture. Runs as a compiled binary without an installed Go runtime. | [Go usage, configuration, and platform compatibility](go/README.md) |
 | **Script collectors** | Use an available scripting runtime when a compiled binary is impractical or you need to adapt the collection logic. | [Script selection and requirements](scripts/README.md#choosing-a-collector) |
-| **SFTP collector** (prototype) | Nothing can run on the source, but SSH with SFTP is available. Runs on the Thunderstorm host or another system and pulls the selected files; the source needs no route to Thunderstorm. Build from source; not in releases yet. | [Use cases, differences, and comparison with SSHFS](sftp/README.md) |
+| **SFTP collector** (prototype) | Nothing can run on the source, but SSH with SFTP is available. Runs on the Thunderstorm host or another system and pulls the selected files; the source needs no route to Thunderstorm. Linux amd64 and arm64 packages in releases after v1.1.0; other platforms build from source. | [Use cases, differences, and comparison with SSHFS](sftp/README.md) |
 
 The eight standalone scripts are organized into [Bash](scripts/bash/README.md), [POSIX sh / ash](scripts/ash/README.md), [Python](scripts/python/README.md), [Perl](scripts/perl/README.md), [PowerShell](scripts/powershell/README.md), and [Batch](scripts/batch/README.md) directories. Python and PowerShell each include a separate legacy variant.
 
@@ -86,6 +86,7 @@ Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases
 
 - **Go packages** contain the executable and a default `config.yml`. Windows packages use ZIP; other platforms use `.tar.gz`. The standalone `config-<version>.yml` asset is an additional copy of that configuration.
 - **Script assets** are individual, versioned files. Download the selected collector and check its runtime requirements. Each script runs independently; the repository's test harness is not required on the target.
+- **SFTP collector packages**, in releases after v1.1.0, contain the Linux binary for amd64 or arm64 and the [SFTP collector README](sftp/README.md). They run on the Thunderstorm host or another system with SSH access to the sources, not on the sources.
 
 **Release availability, 19 October 2026:** [v1.1.0](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) is the latest stable release. It includes the revised script collectors, additional legacy script variants, and dedicated NetScaler package. `master` may contain further changes; use the documentation matching your download.
 

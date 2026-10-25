@@ -45,6 +45,13 @@ jobs:
           VERSION: ${{ github.ref }}
         run: |
           make release
+      - name: Build SFTP collector with Go stable
+        env:
+          VERSION: ${{ github.ref }}
+        run: |
+          # The SFTP collector needs a current Go version. Its Linux packages
+          # stay in release/ during the Go 1.10 rebuild below.
+          make release-sftp
       - name: Setup Go and vendor
         uses: ./.github/actions/setup-go
         with:
