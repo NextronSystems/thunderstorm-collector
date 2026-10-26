@@ -20,7 +20,8 @@ copied file or scheduled task.
 
 What the SFTP collector is for, where it runs and how it compares with scanning an SSHFS mount (an 89-second animation, no sound; the findings in it are illustrative):
 
-<!-- Video: in GitHub's web editor, drop sftp-collector-explainer.mp4 on this line, then delete this comment. -->
+https://github.com/user-attachments/assets/88adb24b-eae9-413a-94b9-3bb71efca313
+
 
 ## When to Use It
 
