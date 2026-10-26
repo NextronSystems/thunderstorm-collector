@@ -238,7 +238,8 @@ change time. The collector's
 both sides. A complete SSHFS assessment followed by scheduled SFTP collections
 combines the two.
 
-The SFTP collector is built from source and has not been tested on products.
+Releases after v1.1.0 include Linux amd64 and arm64 packages of the SFTP
+collector. It has not been tested on products.
 
 ### Recurring collection
 

@@ -25,11 +25,18 @@ def prepare(directory, version, config):
     repo = os.environ.get("GITHUB_REPOSITORY", "NextronSystems/thunderstorm-collector")
     tag = "v" + version
     docs = "https://github.com/" + repo + "/blob/" + tag
+    sftp = sorted(p.name for p in directory.glob("thunderstorm-sftp-collector-" + version + "-*-linux.tar.gz"))
+    sftp_note = ""
+    if sftp:
+        sftp_note = (
+            "- **Systems that offer only SSH/SFTP:** the SFTP collector prototype (" + ", ".join("`" + name + "`" for name in sftp) + ") runs on a Linux system that reaches the source over SSH and Thunderstorm over HTTP(S); nothing runs on the source. It has not been tested on products. Read the [SFTP collector README](" + docs + "/sftp/README.md).\n"
+        )
     (directory / "release-notes.md").write_text(
         "Collector selection:\n\n"
         "- **VMware ESXi:** use the Python collector. Nextron reports historical success; exact tested firmware/revisions are not recorded. Check the Python requirements and [script instructions](" + docs + "/scripts/README.md).\n"
         "- **Older NetScaler / FreeBSD 8.4 amd64:** use `" + required.name + "`, built with exactly Go 1.9.7. Regular FreeBSD packages are not interchangeable. Compilation/package checks and Linux-hosted runtime tests are verified. External tests reported on 2026-10-08 succeeded on FreeBSD 8.4 amd64 without a workaround and FreeBSD 14.3 amd64 with ASLR disabled for the invocation; the compatibility notes identify the tested CI artifact. Named NetScaler appliance/firmware validation remains pending. Read the [compatibility notes](" + docs + "/go/README.md#citrix-netscaler-and-freebsd-84) and packaged BUILD-INFO.txt. Go 1.9.7 is unsupported and lacks later runtime/standard-library security fixes.\n"
-        "- **Other NetScaler versions:** verify the actual OS, architecture and collector compatibility before selecting a package.\n\n"
+        "- **Other NetScaler versions:** verify the actual OS, architecture and collector compatibility before selecting a package.\n"
+        + sftp_note + "\n"
         "Verify downloads against `SHA256SUMS`.\n"
     )
 

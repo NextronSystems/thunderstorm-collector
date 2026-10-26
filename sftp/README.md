@@ -1,8 +1,9 @@
 # Thunderstorm SFTP Collector (prototype)
 
-**Status: prototype.** Not released, not built by CI and not covered by the
-collector test suites. It has not been tested on any product or appliance.
-Options and behavior may change. Build it from source as described below.
+**Status: prototype.** It has not been tested on any product or appliance,
+and options and behavior may change. CI builds and tests it, and releases after
+v1.1.0 include packages for Linux on amd64 and arm64; see
+[Download or Build](#download-or-build).
 
 The SFTP collector is for systems whose files should be analyzed by THOR
 Thunderstorm, but on which nothing may run. It runs somewhere else: on the
@@ -126,14 +127,23 @@ Selected files are not staged on disk. A file matches the type filters if its
 extension, its execute bit (with `--executable`) or its header matches; the
 header is read only when the listing has not decided.
 
-## Build
+## Download or Build
 
-Go 1.22 or newer:
+Releases after v1.1.0 include `thunderstorm-sftp-collector-<version>-amd64-linux.tar.gz`
+and `thunderstorm-sftp-collector-<version>-arm64-linux.tar.gz` for the system
+that runs the collector. Each package holds the binary and this README; verify
+it against the release's `SHA256SUMS`.
+
+For other platforms, build from source with the Go version in [go.mod](go.mod)
+or newer:
 
 ```sh
 cd sftp
 go build -o thunderstorm-sftp-collector .
 ```
+
+`make release` builds both Linux packages into `dist/`, and `make test` runs
+`go vet` and the tests.
 
 The module is separate from the [Go collector](../go/README.md), which keeps
 an old Go version for legacy platforms. The SFTP collector runs on the

@@ -9,11 +9,13 @@ help:
 	@echo "  make release         - Build binary packages and individual script assets"
 	@echo "  make release-binary  - Build binary packages"
 	@echo "  make release-scripts - Copy individual script assets"
+	@echo "  make release-sftp    - Build SFTP collector packages for Linux (needs the Go version in sftp/go.mod)"
 	@echo "  make clean           - Remove all release artifacts"
 	@echo "  make test            - Run tests"
 	@echo "  make help            - Show this help menu"
 	@echo ""
 	@echo "Note: Use go/Makefile directly for more specific build options."
+	@echo "      make release does not build the SFTP collector, so it also runs with Go 1.10."
 
 # Define version if not provided by the environment
 VERSION ?= $(shell git describe --tags --always --dirty)
@@ -52,11 +54,23 @@ release-scripts:
 		cp "$$f" "$$target" || exit 1; \
 	done
 
+# The SFTP collector needs a current Go version, unlike the Go collector's
+# release build, so it has its own target instead of being part of release.
+.PHONY: release-sftp
+release-sftp:
+	@mkdir -p release
+	@echo "Building SFTP collector release ${RELEASE_VERSION}"
+	@$(MAKE) --no-print-directory -C sftp release
+	@for f in sftp/dist/thunderstorm-sftp-collector-*.tar.gz; do \
+		suffix=$${f##*thunderstorm-sftp-collector-}; \
+		cp "$$f" "release/thunderstorm-sftp-collector-${RELEASE_VERSION}-$${suffix}" || exit 1; done
+
 .PHONY: clean
 clean: ## Remove all release artifacts
 	@echo "Cleaning release artifacts..."
 	@rm -rf release
 	@$(MAKE) --no-print-directory -C go clean
+	@$(MAKE) --no-print-directory -C sftp clean
 	@echo "Clean complete."
 
 .PHONY: test

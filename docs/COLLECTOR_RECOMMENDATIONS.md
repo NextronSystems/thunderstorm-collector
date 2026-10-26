@@ -93,7 +93,7 @@ Use the [main download guidance](../README.md#download-a-collector) to distingui
 | [Perl](../scripts/perl/README.md) | Perl 5.8.1 syntax plus LWP 6+, JSON::PP and the documented modules; additional HTTPS libraries. An old system Perl alone is insufficient. |
 | [PowerShell](../scripts/powershell/README.md) | PowerShell 3+ or the separate PS2 file, with the required .NET facilities; validate the real Windows/CLR combination. |
 | [Batch](../scripts/batch/README.md) | Windows cmd, enabled WSH/JScript, FileSystemObject, ADODB.Stream and a trusted, OS-compatible curl 8.4+. |
-| [SFTP](../sftp/README.md) (prototype) | Runs on another system and is built from source with Go 1.22+. The source needs an SSH server with the SFTP subsystem, an account that can read the files in scope, and inbound SSH from the collector host. Reads the Go YAML configuration. |
+| [SFTP](../sftp/README.md) (prototype) | Runs on another system: Linux amd64 and arm64 packages in releases after v1.1.0, or built from source with the Go version in its `go.mod`. The source needs an SSH server with the SFTP subsystem, an account that can read the files in scope, and inbound SSH from the collector host. Reads the Go YAML configuration. |
 
 ## Published Go Binary Targets
 

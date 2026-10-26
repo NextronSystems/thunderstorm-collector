@@ -70,9 +70,25 @@ class ReleaseAssetTests(unittest.TestCase):
         self.assertEqual(self.run_make("release-scripts", "refs/tags/v1.2.3"),
                          {"thunderstorm-collector-1.2.3.sh"})
 
+    def sftp_fixture(self):
+        self.fixture("sftp/Makefile", "release:\n\tmkdir -p dist\n"
+                     "\tprintf amd64 > dist/thunderstorm-sftp-collector-amd64-linux.tar.gz\n"
+                     "\tprintf arm64 > dist/thunderstorm-sftp-collector-arm64-linux.tar.gz\n")
+
+    def test_sftp_release_adds_versioned_linux_packages(self):
+        self.sftp_fixture()
+        self.assertEqual(self.run_make("release-sftp", "refs/tags/v1.2.3"), {
+            "thunderstorm-sftp-collector-1.2.3-amd64-linux.tar.gz",
+            "thunderstorm-sftp-collector-1.2.3-arm64-linux.tar.gz",
+        })
+        self.assertEqual((self.root / "release/thunderstorm-sftp-collector-1.2.3-arm64-linux.tar.gz").read_text(encoding="utf-8"), "arm64")
+
     def test_full_release_keeps_the_standalone_config_asset(self):
         self.fixture("go/Makefile", "release:\n\tmkdir -p dist\n\tprintf binary > dist/thunderstorm-collector-arm64-darwin.tar.gz\n")
         self.fixture("scripts/bash/thunderstorm-collector.sh")
+        # The Go 1.10 release pass runs make release, so it must not build the
+        # SFTP collector, which needs a current Go version.
+        self.sftp_fixture()
         self.assertEqual(self.run_make("release"), {
             "config-test.yml", "thunderstorm-collector-test.sh",
             "thunderstorm-collector-test-arm64-darwin.tar.gz",
