@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -49,11 +50,18 @@ func buildHttpTransport(config Config) *http.Transport {
 		tlsConfig.RootCAs = caPool
 	}
 
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			return &stallTimeoutConn{Conn: conn, timeout: writeStallTimeout}, nil
+		},
 		MaxIdleConns:          config.Threads,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -71,6 +79,26 @@ func buildHttpTransport(config Config) *http.Transport {
 		transport.Proxy = http.ProxyFromEnvironment
 	}
 	return transport
+}
+
+// writeStallTimeout bounds how long one write to Thunderstorm may make no
+// progress. A server or gateway that accepts the connection but stops reading
+// the upload would otherwise block the worker, and with it the walk, forever.
+var writeStallTimeout = 2 * time.Minute
+
+// stallTimeoutConn fails a write that makes no progress for timeout. Only writes
+// get a deadline: the HTTP transport keeps a read pending on idle connections,
+// so the wait for an answer is bounded per request instead (see Collector.send).
+type stallTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *stallTimeoutConn) Write(p []byte) (int, error) {
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(p)
 }
 
 func validateConfig(config Config) (cc CollectorConfig, err error) {
@@ -166,6 +194,15 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		cc.MinUploadPeriod = time.Minute / time.Duration(config.UploadsPerMinute)
 	}
 
+	if config.ResponseTimeout < 0 {
+		return cc, errors.New("response-timeout: must be >= 0")
+	}
+	cc.ResponseTimeout = time.Duration(config.ResponseTimeout) * time.Second
+	if config.ServerWait < 0 {
+		return cc, errors.New("server-wait: must be >= 0")
+	}
+	cc.ServerWait = time.Duration(config.ServerWait) * time.Second
+
 	return cc, nil
 }
 
@@ -220,6 +257,9 @@ func main() {
 	collector.StartWorkers()
 	collector.Collect()
 	collector.Stop()
+	if collector.collectionStopped() {
+		logger.Print("The collection was stopped because Thunderstorm could not be reached; it is incomplete")
+	}
 	if errorCount := collector.Statistics.ErrorCount(); errorCount > 0 {
 		logger.Printf("Collection finished with %d error(s), exiting with status 1", errorCount)
 		os.Exit(1)

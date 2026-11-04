@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -69,6 +71,14 @@ type CollectorConfig struct {
 	AllFilesystems  bool
 	MinUploadPeriod time.Duration
 	DryRun          bool
+	// ResponseTimeout bounds the wait for Thunderstorm's answer once a request
+	// has been sent. Zero selects defaultResponseTimeout or, with Sync,
+	// defaultSyncResponseTimeout.
+	ResponseTimeout time.Duration
+	// ServerWait is how long the collector waits for Thunderstorm to come back
+	// after outageThreshold files in a row could not be delivered, see
+	// recordUndeliverable. Zero stops the collection at once.
+	ServerWait time.Duration
 }
 
 type Collector struct {
@@ -80,8 +90,11 @@ type Collector struct {
 	// see refuseRedirects.
 	client *http.Client
 
-	// Set before starting workers; defaults to time.Sleep.
+	// Set before starting workers; default to time.Sleep and time.Now.
 	retrySleep func(time.Duration)
+	now        func() time.Time
+
+	outage *outageState
 
 	workerGroup   *sync.WaitGroup
 	filesToUpload chan infoWithPath
@@ -121,6 +134,9 @@ type CollectionStatistics struct {
 	// read. They are reported but, like the permission-denied directories of any
 	// full-disk scan, do not change the exit status.
 	walkErrors int64
+	// notSent counts selected files that were not sent because the collection
+	// stopped after Thunderstorm stayed unreachable for ServerWait.
+	notSent int64
 
 	// Timings (in nanoseconds, converted to seconds/milliseconds for display)
 
@@ -156,11 +172,28 @@ func (s *CollectionStatistics) getSkipCount(reason SkipReason) int64 {
 }
 
 // ErrorCount returns the number of failures that make the run unsuccessful:
-// selected files that could not be read or accepted, and scan roots that could
-// not be read. Unreadable directories below a root are only reported, see
+// selected files that could not be read, accepted or sent, and scan roots that
+// could not be read. Unreadable directories below a root are only reported, see
 // walkErrors.
 func (s *CollectionStatistics) ErrorCount() int64 {
-	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors)
+	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors) +
+		atomic.LoadInt64(&s.notSent)
+}
+
+// outageState tracks whether Thunderstorm still accepts uploads. It is always
+// allocated on its own, so its leading int64 is 64-bit aligned for atomic access
+// on 32-bit platforms.
+type outageState struct {
+	// consecutiveFailures counts files in a row whose upload failed without an
+	// answer from Thunderstorm (transport errors, or HTTP 503 until the retry
+	// budget was used up). Any other answer resets it.
+	consecutiveFailures int64
+	// stopped is 1 once the collection was stopped because Thunderstorm stayed
+	// unreachable.
+	stopped int32
+	// checking is held for writing while one worker polls /api/status; the other
+	// workers wait for the outcome before they send anything.
+	checking sync.RWMutex
 }
 
 // refuseRedirects makes the HTTP client hand a redirect response back to the
@@ -182,11 +215,20 @@ func redirectHint(response *http.Response) string {
 }
 
 func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
+	if config.ResponseTimeout <= 0 {
+		if config.Sync {
+			config.ResponseTimeout = defaultSyncResponseTimeout
+		} else {
+			config.ResponseTimeout = defaultResponseTimeout
+		}
+	}
 	collector := &Collector{
 		CollectorConfig: config,
 		logger:          logger,
 		client:          &http.Client{CheckRedirect: refuseRedirects},
 		retrySleep:      time.Sleep,
+		now:             time.Now,
+		outage:          &outageState{},
 		Statistics: &CollectionStatistics{
 			skipReasons: make(map[SkipReason]int64),
 		},
@@ -231,7 +273,7 @@ func (c *Collector) StartWorkers() {
 
 func (c *Collector) CheckThunderstormUp() error {
 	c.debugf("Checking whether Thunderstorm at %s answers", c.Server)
-	response, err := c.client.Get(fmt.Sprintf("%s/api/status", c.Server))
+	response, body, err := c.send("GET", fmt.Sprintf("%s/api/status", c.Server), "", nil)
 	if err != nil {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
 			if opError, isOpError := urlError.Err.(*net.OpError); isOpError {
@@ -243,11 +285,6 @@ func (c *Collector) CheckThunderstormUp() error {
 		}
 		return err
 	}
-	defer response.Body.Close()
-	body, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return fmt.Errorf("could not read response body: %v", err)
-	}
 	if response.StatusCode != 200 {
 		return fmt.Errorf("server didn't answer with an OK response code on status page, received code %d%s: %s", response.StatusCode, redirectHint(response), body)
 	}
@@ -255,10 +292,203 @@ func (c *Collector) CheckThunderstormUp() error {
 	return nil
 }
 
+const (
+	defaultResponseTimeout     = 2 * time.Minute
+	defaultSyncResponseTimeout = 30 * time.Minute
+	// maxResponseBytes bounds a response body; Thunderstorm answers with a small
+	// JSON document, also when it reports scan results with --upload-synchronous.
+	maxResponseBytes = 16 * 1024 * 1024
+)
+
+// send performs one request to Thunderstorm and returns the response with its
+// body, which has already been read and closed. The wait for the answer is
+// bounded by ResponseTimeout: the timer starts once the request body has been
+// handed to the connection (at once for a request without a body) and covers
+// the response headers and the body. Writing the body is bounded by the write
+// stall guard of the transport instead, so a large upload over a slow link is
+// not cut off.
+func (c *Collector) send(method string, target string, contentType string, body io.ReadCloser) (*http.Response, []byte, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var timedOut int32
+	var timerOnce sync.Once
+	var timer *time.Timer
+	var timerMutex sync.Mutex
+	startTimer := func() {
+		timerOnce.Do(func() {
+			timerMutex.Lock()
+			timer = time.AfterFunc(c.ResponseTimeout, func() {
+				atomic.StoreInt32(&timedOut, 1)
+				cancel()
+			})
+			timerMutex.Unlock()
+		})
+	}
+	defer func() {
+		timerMutex.Lock()
+		if timer != nil {
+			timer.Stop()
+		}
+		timerMutex.Unlock()
+	}()
+	timeoutError := func(err error) error {
+		if atomic.LoadInt32(&timedOut) == 1 {
+			return fmt.Errorf("no answer from Thunderstorm within %v (see --response-timeout): %v", c.ResponseTimeout, err)
+		}
+		return err
+	}
+
+	var requestBody io.Reader
+	if body == nil {
+		startTimer()
+	} else {
+		// The transport does not always close the body, for example when the
+		// server answers before reading all of it; closing it ends the goroutine
+		// that produces it.
+		defer body.Close()
+		requestBody = &eofNotifier{reader: body, onEOF: startTimer}
+	}
+	request, err := http.NewRequest(method, target, requestBody)
+	if err != nil {
+		return nil, nil, err
+	}
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
+	response, err := c.client.Do(request.WithContext(ctx))
+	if err != nil {
+		if urlError, isUrlError := err.(*url.Error); isUrlError {
+			urlError.Err = timeoutError(urlError.Err)
+			return nil, nil, urlError
+		}
+		return nil, nil, timeoutError(err)
+	}
+	defer response.Body.Close()
+	// The answer may come before the whole body was sent.
+	startTimer()
+	responseBody, err := ioutil.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return response, nil, fmt.Errorf("could not read response body: %v", timeoutError(err))
+	}
+	if len(responseBody) > maxResponseBytes {
+		return response, nil, fmt.Errorf("response body is larger than %d bytes", maxResponseBytes)
+	}
+	return response, responseBody, nil
+}
+
+// eofNotifier calls onEOF once its reader is exhausted.
+type eofNotifier struct {
+	reader io.Reader
+	onEOF  func()
+}
+
+func (r *eofNotifier) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err == io.EOF {
+		r.onEOF()
+	}
+	return n, err
+}
+
 func (c *Collector) Collect() {
 	for _, root := range c.CollectorConfig.RootPaths {
+		if c.collectionStopped() {
+			break
+		}
 		c.collectPath(root)
 	}
+}
+
+// outageThreshold is the number of files in a row that must fail without an
+// answer from Thunderstorm before the collector stops sending and waits for it.
+const outageThreshold = 3
+
+// Delays between the /api/status polls while Thunderstorm is unreachable.
+const (
+	outageFirstPollDelay = 2 * time.Second
+	outageMaxPollDelay   = 60 * time.Second
+)
+
+// errCollectionStopped ends the walk once the collection has been stopped.
+var errCollectionStopped = errors.New("collection stopped because Thunderstorm is unreachable")
+
+func (c *Collector) collectionStopped() bool {
+	return atomic.LoadInt32(&c.outage.stopped) == 1
+}
+
+// recordAnswer notes that Thunderstorm answered an upload, so it is reachable.
+func (c *Collector) recordAnswer() {
+	atomic.StoreInt64(&c.outage.consecutiveFailures, 0)
+}
+
+// recordUndeliverable notes a file that could not be delivered because
+// Thunderstorm did not answer or stayed busy. After outageThreshold such files
+// in a row, the calling worker polls /api/status for up to ServerWait while the
+// other workers wait. If Thunderstorm answers, the collection continues with
+// the next file; otherwise it stops: the walk ends and queued files are counted
+// as not sent.
+func (c *Collector) recordUndeliverable() {
+	if atomic.AddInt64(&c.outage.consecutiveFailures, 1) < outageThreshold {
+		return
+	}
+	c.outage.checking.Lock()
+	defer c.outage.checking.Unlock()
+	// Another worker may have handled the outage while this one waited.
+	if c.collectionStopped() || atomic.LoadInt64(&c.outage.consecutiveFailures) < outageThreshold {
+		return
+	}
+	if c.waitForThunderstorm() {
+		atomic.StoreInt64(&c.outage.consecutiveFailures, 0)
+		return
+	}
+	atomic.StoreInt32(&c.outage.stopped, 1)
+}
+
+// waitForThunderstorm polls /api/status with growing delays until Thunderstorm
+// answers or ServerWait has passed, and reports whether it answered.
+func (c *Collector) waitForThunderstorm() bool {
+	start := c.now()
+	c.logger.Printf("Thunderstorm did not accept %d files in a row; checking %s/api/status for up to %v before sending more", outageThreshold, c.Server, c.ServerWait)
+	delay := outageFirstPollDelay
+	for {
+		remaining := c.ServerWait - c.now().Sub(start)
+		if remaining <= 0 {
+			break
+		}
+		if delay > remaining {
+			delay = remaining
+		}
+		c.retrySleep(delay)
+		err := c.CheckThunderstormUp()
+		if err == nil {
+			c.logger.Printf("Thunderstorm answers again after %v; continuing with the next file", c.now().Sub(start).Round(time.Second))
+			return true
+		}
+		c.debugf("Thunderstorm still does not answer: %v", err)
+		delay *= 2
+		if delay > outageMaxPollDelay {
+			delay = outageMaxPollDelay
+		}
+	}
+	c.logger.Printf("Thunderstorm unreachable for %v, stopping the collection; the remaining files are not sent", c.now().Sub(start).Round(time.Second))
+	return false
+}
+
+// waitWhileThunderstormIsChecked blocks while another worker polls
+// /api/status after an outage.
+func (c *Collector) waitWhileThunderstormIsChecked() {
+	c.outage.checking.RLock()
+	c.outage.checking.RUnlock()
+}
+
+// countNotSent accounts for a file that is not sent because the collection
+// stopped. A file that already had failed attempts counts as an upload error.
+func (c *Collector) countNotSent(info *infoWithPath) {
+	if info.retries > 0 {
+		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+		return
+	}
+	atomic.AddInt64(&c.Statistics.notSent, 1)
 }
 
 // reportWalkError logs and counts a path that filepath.Walk could not read. A
@@ -284,6 +514,9 @@ func (c *Collector) collectPath(root string) {
 	walkStart := time.Now()
 	var submissionWait time.Duration
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if c.collectionStopped() {
+			return errCollectionStopped
+		}
 		if err != nil {
 			c.reportWalkError(root, path, err)
 			return nil
@@ -326,6 +559,10 @@ func (c *Collector) collectPath(root string) {
 	})
 	walkDuration := time.Since(walkStart) - submissionWait
 	atomic.AddInt64(&c.Statistics.timeWalking, int64(walkDuration))
+	if err == errCollectionStopped {
+		c.logger.Printf("Stopped walking through '%s' because Thunderstorm is unreachable", root)
+		return
+	}
 	if err != nil {
 		c.logger.Printf("Could not walk path '%s': %v\n", root, err)
 	}
@@ -369,6 +606,9 @@ func (c *Collector) Stop() {
 	}
 	c.logger.Printf("  - Successfully %s: %d", uploadLabel, atomic.LoadInt64(&c.Statistics.uploadedFiles))
 	c.logger.Printf("  - Read/transmission errors: %d", atomic.LoadInt64(&c.Statistics.fileErrors)+atomic.LoadInt64(&c.Statistics.uploadErrors))
+	if c.collectionStopped() {
+		c.logger.Printf("  - Not sent, the collection stopped because Thunderstorm was unreachable: %d", atomic.LoadInt64(&c.Statistics.notSent))
+	}
 	c.logger.Printf("  - Paths that could not be read during the walk: %d", atomic.LoadInt64(&c.Statistics.rootErrors)+atomic.LoadInt64(&c.Statistics.walkErrors))
 	c.logger.Printf("")
 	c.logger.Printf("Timing:")
@@ -425,17 +665,34 @@ func (c *Collector) throttle() {
 // Returns true if the upload should be retried (e.g., due to transient errors or rate limiting),
 // or false if the upload completed (successfully or with a permanent error).
 func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
+	if c.collectionStopped() {
+		c.countNotSent(info)
+		return false
+	}
 	readStart := time.Now()
 
-	f, err := os.Open(info.path)
+	f, err := openSelectedFile(info.path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			c.debugf("Skipping '%s', it vanished before it could be read: %v", info.path, err)
+			return
+		}
 		c.logger.Printf("Could not open file '%s': %v\n", info.path, err)
 		atomic.AddInt64(&c.Statistics.fileErrors, 1)
 		return
 	}
 	defer f.Close()
 
-	if skipReason, excluded := c.checkFileContent(info, f); excluded {
+	size, skipReason, excluded, err := c.checkOpenedFile(info, f)
+	if err != nil {
+		c.logger.Printf("Could not read file '%s': %v\n", info.path, err)
+		atomic.AddInt64(&c.Statistics.fileErrors, 1)
+		return
+	}
+	if !excluded {
+		skipReason, excluded = c.checkFileContent(info, f)
+	}
+	if excluded {
 		c.debugf("Skipping file '%s' (%s)", info.path, skipReason.String())
 		c.Statistics.incrementSkipReason(skipReason)
 		return
@@ -451,28 +708,41 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		return
 	}
 
+	c.waitWhileThunderstormIsChecked()
+	if c.collectionStopped() {
+		c.countNotSent(info)
+		return false
+	}
 	c.throttle()
 
 	transmitStart := time.Now()
-	contentType, formData := c.getFileContentAsFormData(f, info.path)
-	response, err := c.client.Post(c.thunderstormUrl(), contentType, formData)
-	if err != nil {
+	contentType, formData, readError := c.getFileContentAsFormData(f, info.path, size)
+	response, responseBody, err := c.send("POST", c.thunderstormUrl(), contentType, formData)
+	if fileErr := readError.get(); fileErr != nil {
+		// The file changed or could not be read while it was sent; Thunderstorm is
+		// not to blame, so this is neither retried nor counted as an outage.
+		c.logger.Printf("Could not read file '%s' while sending it: %v", info.path, fileErr)
+		atomic.AddInt64(&c.Statistics.fileErrors, 1)
+		return false
+	}
+	if err != nil && response == nil {
 		if info.retries < maxRetries {
 			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, err)
 			info.retries++
 			c.retrySleep(baseRetryDelay * time.Duration(1<<(info.retries-1)))
 			return true
 		} else {
-			c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it.", info.path)
+			c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it: %v", info.path, err)
 			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+			c.recordUndeliverable()
 			return false
 		}
 	}
-	defer response.Body.Close()
 	if response.StatusCode == http.StatusServiceUnavailable {
 		if info.retries >= maxRetries {
 			c.logger.Printf("Thunderstorm has no free capacities for file '%s', canceling it after %d retries", info.path, maxRetries)
 			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+			c.recordUndeliverable()
 			return false
 		}
 		info.retries++
@@ -488,7 +758,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		c.retrySleep(time.Second * time.Duration(retryTime))
 		return true
 	}
-	responseBody, err := ioutil.ReadAll(response.Body)
+	c.recordAnswer()
 	if err != nil {
 		c.logger.Printf("Could not read response body for file '%s': %v", info.path, err)
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
@@ -634,11 +904,55 @@ func formFileHeader(fieldName string, fileName string) textproto.MIMEHeader {
 	return h
 }
 
+// checkOpenedFile checks the opened file against what the walk selected: it
+// must still be the same regular file, and its current size, which bounds what
+// is sent, must still be within the size limit. A file that grew past the limit
+// is skipped; anything else that changed is an error.
+func (c *Collector) checkOpenedFile(info *infoWithPath, f *os.File) (size int64, reason SkipReason, excluded bool, err error) {
+	current, err := f.Stat()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if !current.Mode().IsRegular() {
+		return 0, 0, false, fmt.Errorf("it is no longer a regular file (%v)", current.Mode())
+	}
+	if !sameFile(info.FileInfo, current) {
+		return 0, 0, false, errors.New("it was replaced after the walk selected it")
+	}
+	if c.MaxFileSize > 0 && current.Size() > c.MaxFileSize {
+		return 0, SkipReasonTooBig, true, nil
+	}
+	return current.Size(), 0, false, nil
+}
+
+// fileReadError records why the file content could not be produced for an
+// upload. It is set by the goroutine that writes the form data.
+type fileReadError struct {
+	mutex sync.Mutex
+	err   error
+}
+
+func (e *fileReadError) set(err error) {
+	e.mutex.Lock()
+	e.err = err
+	e.mutex.Unlock()
+}
+
+func (e *fileReadError) get() error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	return e.err
+}
+
 // getFileContentAsFormData creates multipart form data from a file for HTTP upload.
-// Returns the Content-Type header value (including boundary) and a PipeReader for the form data.
-func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (string, *io.PipeReader) {
+// It sends exactly size bytes, the size checked after opening: a file that grows
+// meanwhile is sent up to that size, and a file that shrinks fails the upload.
+// Returns the Content-Type header value (including boundary), a PipeReader for
+// the form data and the place where a read error of the file is recorded.
+func (c *Collector) getFileContentAsFormData(f *os.File, filename string, size int64) (string, *io.PipeReader, *fileReadError) {
 	multipartReader, multipartWriter := io.Pipe()
 	w := multipart.NewWriter(multipartWriter)
+	readError := &fileReadError{}
 	abspath, err := filepath.Abs(filename)
 	if err != nil {
 		abspath = filename
@@ -649,7 +963,14 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 			multipartWriter.CloseWithError(fmt.Errorf("could not create form file: %v", err))
 			return
 		}
-		if _, err := io.Copy(fw, f); err != nil {
+		written, err := io.Copy(fw, &fileReader{io.LimitReader(f, size)})
+		if err == nil && written < size {
+			err = fileError{fmt.Errorf("the file shrank from %d to %d bytes while it was read", size, written)}
+		}
+		if err != nil {
+			if fileErr, isFileErr := err.(fileError); isFileErr {
+				readError.set(fileErr.err)
+			}
 			multipartWriter.CloseWithError(fmt.Errorf("could not copy file content: %v", err))
 			return
 		}
@@ -659,5 +980,28 @@ func (c *Collector) getFileContentAsFormData(f *os.File, filename string) (strin
 		}
 		multipartWriter.Close()
 	}()
-	return w.FormDataContentType(), multipartReader
+	return w.FormDataContentType(), multipartReader, readError
+}
+
+// fileError marks an error that came from reading the file, as opposed to
+// writing to the connection.
+type fileError struct {
+	err error
+}
+
+func (e fileError) Error() string {
+	return e.err.Error()
+}
+
+// fileReader wraps read errors of the file in fileError.
+type fileReader struct {
+	reader io.Reader
+}
+
+func (r *fileReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && err != io.EOF {
+		err = fileError{err}
+	}
+	return n, err
 }
