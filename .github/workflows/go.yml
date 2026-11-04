@@ -32,6 +32,24 @@ jobs:
         run: make test
         working-directory: ./go
 
+  test-windows:
+    # Paths, exclude globs and file handling differ on Windows, which most
+    # release binaries target. Go 1.10 builds those binaries; the tests run with
+    # stable Go in module mode.
+    name: Test on Windows (Go stable)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/go.sum
+      - name: Test with Go
+        run: go test -v ./...
+        working-directory: ./go
+
   build:
     runs-on: ubuntu-latest
     strategy:

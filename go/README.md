@@ -199,7 +199,11 @@ Start with a small collection and inspect server load and results before increas
 
 ### Filesystem Types
 
-Unless `--all-filesystems` is set, the collector does not walk directories on pseudo or network filesystems. Linux recognises them by the statfs magic number and macOS by the filesystem type name (`devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`). Other platforms, including Windows and FreeBSD, do not detect filesystem types; use `--exclude` for such paths. On those platforms the startup summary says so (`Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)`).
+Unless `--all-filesystems` is set, the collector does not walk directories on pseudo or network filesystems. Linux recognises them by the statfs magic number and macOS by the filesystem type name (`devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`). Other platforms, including Windows and FreeBSD, do not detect filesystem types; use `--exclude` for such paths. On Windows, `--exclude` accepts backslashes or forward slashes and ignores case, so `C:\tools\**`, `c:/Tools/**` and `**/node_modules/**` all match the walked paths. On those platforms the startup summary says so (`Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)`).
+
+### Scan Roots
+
+A scan root that is a symbolic link, such as `/etc` on macOS (a link to `/private/etc`) or `/bin` on systems with a merged `/usr`, is resolved and the target directory is walked; the log names both. Uploaded file names then carry the resolved path. Excludes written with the root as given still apply. A directory given more than once, also through a link, is walked once. A root link that cannot be resolved counts as an unreadable scan root and makes the run exit with status 1.
 
 ### File Filtering Logic
 

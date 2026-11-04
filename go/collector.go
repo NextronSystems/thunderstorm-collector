@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -391,12 +392,86 @@ func (r *eofNotifier) Read(p []byte) (int, error) {
 }
 
 func (c *Collector) Collect() {
+	walked := make(map[string]string)
 	for _, root := range c.CollectorConfig.RootPaths {
 		if c.collectionStopped() {
 			break
 		}
-		c.collectPath(root)
+		walkRoot, ok := c.resolveRoot(root)
+		if !ok {
+			continue
+		}
+		// Compare roots by their resolved form, so that a directory given twice,
+		// also once through a link, is walked once.
+		key := walkRoot
+		if resolved, err := filepath.EvalSymlinks(walkRoot); err == nil {
+			key = resolved
+		}
+		if earlier, seen := walked[key]; seen {
+			c.logger.Printf("Scan root '%s' is the same directory as '%s'; it is walked once", root, earlier)
+			continue
+		}
+		walked[key] = root
+		c.collectPath(walkRoot, root)
 	}
+}
+
+// resolveRoot returns the path to walk for a scan root. filepath.Walk does not
+// follow a root that is a symbolic link, so a root such as /etc on macOS (a link
+// to /private/etc) or /bin on systems with a merged /usr would otherwise yield a
+// single irregular file and nothing would be collected. A root link that cannot
+// be resolved fails the run like a missing root.
+func (c *Collector) resolveRoot(root string) (string, bool) {
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		// filepath.Walk reports a missing or unreadable root itself.
+		return filepath.Clean(root), true
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		atomic.AddInt64(&c.Statistics.rootErrors, 1)
+		c.logger.Printf("Could not resolve scan root '%s', a symbolic link: %v", root, err)
+		return "", false
+	}
+	c.logger.Printf("Scan root '%s' is a symbolic link to '%s'; walking '%s'", root, resolved, resolved)
+	return resolved, true
+}
+
+// matchExclude reports whether path matches an --exclude glob. Glob and path are
+// compared with '/' as the separator, because doublestar.Match splits on '/'
+// and reads a backslash as an escape character: on Windows, C:\tools\** and
+// **/node_modules/** must match the backslash paths of the walk. There, case is
+// ignored as well, like the filesystem does.
+func matchExclude(glob string, path string, separator byte, ignoreCase bool) bool {
+	if separator != '/' {
+		glob = strings.Replace(glob, string(separator), "/", -1)
+		path = strings.Replace(path, string(separator), "/", -1)
+	}
+	if ignoreCase {
+		glob = strings.ToLower(glob)
+		path = strings.ToLower(path)
+	}
+	match, _ := doublestar.Match(glob, path)
+	return match
+}
+
+// excludedBy returns the --exclude glob that matches path, or "". When a root
+// was given as a symbolic link, the path is also matched in the form that starts
+// with the root as given, so an exclude written for that form still applies.
+func (c *Collector) excludedBy(path string, walkRoot string, givenRoot string) string {
+	candidates := []string{path}
+	if walkRoot != givenRoot && strings.HasPrefix(path, walkRoot) {
+		candidates = append(candidates, filepath.Join(givenRoot, path[len(walkRoot):]))
+	}
+	ignoreCase := runtime.GOOS == "windows"
+	for _, glob := range c.ExcludeGlobs {
+		for _, candidate := range candidates {
+			if matchExclude(glob, candidate, os.PathSeparator, ignoreCase) {
+				return glob
+			}
+		}
+	}
+	return ""
 }
 
 // outageThreshold is the number of files in a row that must fail without an
@@ -509,7 +584,9 @@ func (c *Collector) reportWalkError(root string, path string, err error) {
 	c.logger.Printf("Could not read '%s' while walking '%s': %v", path, root, err)
 }
 
-func (c *Collector) collectPath(root string) {
+// collectPath walks root, which is givenRoot or, for a scan root given as a
+// symbolic link, the directory it resolves to.
+func (c *Collector) collectPath(root string, givenRoot string) {
 	c.logger.Printf("Walking through '%s' to find files to upload", root)
 	walkStart := time.Now()
 	var submissionWait time.Duration
@@ -521,18 +598,15 @@ func (c *Collector) collectPath(root string) {
 			c.reportWalkError(root, path, err)
 			return nil
 		}
-		for _, glob := range c.ExcludeGlobs {
-			if match, _ := doublestar.Match(glob, path); match {
-				if info.IsDir() {
-					c.debugf("Skipping directory '%s' due to exclusion rule %s", path, glob)
-					c.Statistics.incrementSkipReason(SkipReasonDirectory)
-					return filepath.SkipDir
-				} else {
-					c.debugf("Skipping file '%s' due to exclusion rule %s", path, glob)
-					c.Statistics.incrementSkipReason(SkipReasonExcluded)
-					return nil
-				}
+		if glob := c.excludedBy(path, root, givenRoot); glob != "" {
+			if info.IsDir() {
+				c.debugf("Skipping directory '%s' due to exclusion rule %s", path, glob)
+				c.Statistics.incrementSkipReason(SkipReasonDirectory)
+				return filepath.SkipDir
 			}
+			c.debugf("Skipping file '%s' due to exclusion rule %s", path, glob)
+			c.Statistics.incrementSkipReason(SkipReasonExcluded)
+			return nil
 		}
 		// Check directory first to reduce nesting
 		if info.Mode().IsDir() {
