@@ -162,6 +162,10 @@ class PowerShellRobustness(ScanRootAssertions):
         self.upload_body = b'{}'
         self.marker_body = {"scan_id": "scan + & /"}
         self.pause = False
+        self.drop_uploads = 0
+        self.status_codes = []
+        self.status_checks = 0
+        self.slow_read = False
         self.started = threading.Event()
         self.release = threading.Event()
         test = self
@@ -170,9 +174,40 @@ class PowerShellRobustness(ScanRootAssertions):
             def log_message(self, *args):
                 pass
 
-            def do_POST(self):
-                data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            def do_GET(self):
                 test.paths.append(self.path)
+                if self.path != "/api/status":
+                    self.send_error(404)
+                    return
+                test.status_checks += 1
+                status = test.status_codes.pop(0) if test.status_codes else 200
+                self.send_response(status)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+                self.close_connection = True
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                if test.slow_read:
+                    # A slow but steady link: never idle long, but slower than the old fixed deadline.
+                    chunks = []
+                    while length > 0:
+                        chunk = self.rfile.read(min(65536, length))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        length -= len(chunk)
+                        time.sleep(0.15)
+                    data = b"".join(chunks)
+                else:
+                    data = self.rfile.read(length)
+                test.paths.append(self.path)
+                if not self.path.startswith("/api/collection") and test.drop_uploads > 0:
+                    # Close without an HTTP answer: a transport failure for the client.
+                    test.drop_uploads -= 1
+                    self.close_connection = True
+                    return
                 if self.path.startswith("/api/collection"):
                     marker = json.loads(data.decode("utf-8"))
                     test.markers.append(marker)
@@ -226,7 +261,8 @@ class PowerShellRobustness(ScanRootAssertions):
                    "MaxAge": "0", "Retries": "1", "Source": "tests"}
         flags = ["AllExtensions", "NoProgress"]
         names = {"--port": "ThunderstormPort", "--source": "Source", "--max-age": "MaxAge",
-                 "--max-size-kb": "MaxSize", "--retries": "Retries", "--server": "ThunderstormServer"}
+                 "--max-size-kb": "MaxSize", "--retries": "Retries", "--server": "ThunderstormServer",
+                 "--server-wait": "ServerWait"}
         index = 0
         while index < len(extra):
             option = extra[index]
@@ -254,8 +290,63 @@ class PowerShellRobustness(ScanRootAssertions):
     def run_collector(self, *extra, **kwargs):
         process = subprocess.Popen(self.command(*extra, **kwargs), stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, cwd=self.root)
-        self.output = communicate_collector(process).decode("utf-8", "replace")
+        self.output = communicate_collector(process, kwargs.get("timeout", 45)).decode("utf-8", "replace")
         return process.returncode
+
+    def upload_attempts(self):
+        return [path for path in self.paths if path.startswith("/api/check")]
+
+    def test_server_that_stays_away_stops_the_collection(self):
+        # Every remaining file used to run through its full retry budget, hours to days
+        # for a large tree once the service was gone.
+        for index in range(6):
+            self.file("sample{}.bin".format(index))
+        self.drop_uploads = 100
+        self.status_codes = [503] * 100
+        self.assertEqual(self.run_collector("--server-wait", "3"), 1, self.output)
+        self.assertEqual(len(self.upload_attempts()), 3, self.paths)
+        self.assertGreaterEqual(self.status_checks, 1)
+        self.assertIn("did not accept 3 files in a row", self.output)
+        self.assertIn("stopping the collection", self.output)
+        self.assertNotIn("end", [marker["type"] for marker in self.markers])
+
+    def test_server_that_comes_back_resumes_the_collection(self):
+        for index in range(5):
+            self.file("sample{}.bin".format(index))
+        self.drop_uploads = 3
+        self.status_codes = [503]
+        self.assertEqual(self.run_collector("--server-wait", "60"), 1, self.output)
+        self.assertEqual(self.status_checks, 2)
+        self.assertEqual(len(self.uploads), 2, self.output)
+        self.assertIn("answers again", self.output)
+        self.assertNotIn("stopping the collection", self.output)
+
+    def test_zero_server_wait_stops_without_polling(self):
+        for index in range(4):
+            self.file("sample{}.bin".format(index))
+        self.drop_uploads = 100
+        self.assertEqual(self.run_collector("--server-wait", "0"), 1, self.output)
+        self.assertEqual(len(self.upload_attempts()), 3, self.paths)
+        self.assertEqual(self.status_checks, 0)
+
+    @unittest.skipUnless(os.environ.get("THUNDERSTORM_SLOW_TESTS") == "1", "slow test; set THUNDERSTORM_SLOW_TESTS=1")
+    def test_slow_but_steady_upload_is_not_cut_off(self):
+        # About 40 seconds for 16 MiB, never idle for long: a fixed 30-second deadline per
+        # attempt cut off every attempt of such a file.
+        self.file("large.bin", b"L" * (16 * 1048576))
+        self.slow_read = True
+        self.assertEqual(self.run_collector("--max-size-kb", "32", timeout=180), 0, self.output)
+        self.assertEqual(len(self.uploads), 1, self.output)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse points")
+    def test_compressed_wof_file_is_collected(self):
+        path = self.file("compressed.exe", b"MZ" + b"\x00" * 65536)
+        result = subprocess.run(["compact.exe", "/c", "/exe:xpress4k", path], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+        if result.returncode != 0 or not os.stat(path).st_file_attributes & 0x400:
+            self.skipTest("compact /exe did not leave a reparse point here")
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual(len(self.uploads), 1, self.output)
 
     def test_binary_empty_special_and_unicode_source(self):
         for name in ["normal", "semi;colon", "comma,name", "bracket[name]", "percent%PATH%", "bang!", u"unicode-\u00e4"]:

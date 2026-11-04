@@ -73,13 +73,14 @@ output; the collector does not create a separate log itself.
 | Runtime | cmd.exe + enabled Windows Script Host/JScript + FileSystemObject + ADODB.Stream. No PowerShell dependency in the collector. |
 | Upload tool | Trusted curl.exe 8.4+; explicit CURL_PATH preferred, then script directory, system directory, PATH. Never searched in the current working directory implicitly. |
 | Why curl 8.4+ | Earlier versions cannot bound unknown-length response downloads with max-filesize; see the official curl manual. Verify the binary supports the actual legacy Windows OS. |
-| Traversal | Recursive, literal filenames, skips reparse-point/junction entries and known cloud directory names. Not a filesystem sandbox. An entry that vanishes or cannot be read during the walk is counted on its own (a file as failed, a subdirectory as a scan error) and the rest of its directory is still processed. |
+| Traversal | Recursive, literal filenames, skips reparse-point/junction entries and known cloud directory names. FileSystemObject shows no reparse tag, so deduplicated (Data Deduplication) and compressed (CompactOS, `compact /exe`) files are skipped like links; the run ends with a warning that counts them. Use the PowerShell collector on such volumes. Not a filesystem sandbox. An entry that vanishes or cannot be read during the walk is counted on its own (a file as failed, a subdirectory as a scan error) and the rest of its directory is still processed. |
 | Filtering | MAX_AGE uses last modification time, days; default 30, 0 disables. COLLECT_MAX_SIZE is BYTES, inclusive, 1..209715200; default 2097152 (2 MiB). Extension list default .exe;.dll;.ps1;.bat;.txt; * includes all extensions. |
 | Upload | Binary/empty-file safe snapshots, one multipart file; async `/api/checkAsync` only. Source UTF-8 percent-encoded. |
 | Deliberately absent | Collection markers/scan_id, interrupted markers, result polling, deduplication, resume, custom insecure TLS mode, syslog, parallelism. |
 | TLS | curl certificate/hostname verification stays enabled; CURL_CA_BUNDLE is passed explicitly as --cacert, including Schannel builds. No machine trust changes. |
-| Retries | UPLOAD_ATTEMPTS 1..10 TOTAL attempts, default 3; 503 Retry-After integer capped at 120 seconds. Each curl attempt has connect 10s / total 30s limits plus 40s process watchdog. |
-| Exit | 0 completed transfer/selection run, 1 partial failures, 2 invalid config/no usable roots/missing dependency. WSH launch failures may use host-specific nonzero codes. |
+| Retries | UPLOAD_ATTEMPTS 1..10 TOTAL attempts, default 3; 503 Retry-After integer capped at 120 seconds. Each curl attempt has a 10s connect limit and a total limit of 30s plus the time to send the body at 64 KiB/s, ends below 1 KiB/s for 30s, and has a process watchdog 10s above its total limit. |
+| Server loss | After 3 files in a row got no answer other than 503 (busy), sending stops and `/api/status` is polled (2, 4, 8 ... up to 60 seconds apart) for up to SERVER_WAIT seconds, default 600, 0..86400. If the service answers, the run continues with the next file; otherwise it stops and exits 1. SERVER_WAIT=0 stops at once. |
+| Exit | 0 completed transfer/selection run, 1 partial failures or service unreachable for SERVER_WAIT, 2 invalid config/no usable roots/missing dependency. WSH launch failures may use host-specific nonzero codes. |
 | Temporary data | Exclusively created per-run directory under TEMP; contains copied sample payloads, removed on normal/error completion. Forced termination can leave it behind. |
 
 COLLECT_DIRS separates roots by semicolons; a ROOT containing a semicolon is not
@@ -187,12 +188,15 @@ do not establish source correctness. Wait for async analysis to finish separatel
 set "THUNDERSTORM_SERVER=127.0.0.1"
 set "THUNDERSTORM_PORT=1"
 set "SOURCE=manual-batch-offline-unique"
+set "SERVER_WAIT=0"
 thunderstorm-collector.bat
 echo exit_code=%ERRORLEVEL%
 ```
 
-Expected: exit 1, Failed equals eligible file count, Submitted 0, no uploads.
-With UPLOAD_ATTEMPTS=1 each sample has a bounded 30-second request; time the run.
+Expected: exit 1, Failed 3 (or the eligible file count if lower), Submitted 0, no
+uploads, and a message that the collection stops because the service is
+unreachable. Repeat with SERVER_WAIT=20: the run waits about 20 seconds before it
+stops.
 
 Repeat a LIVE run with CURL_PATH=C:\missing-curl.exe: exit 2 BEFORE network.
 Check blocked WSH fails nonzero on the target; do not bypass its security policy.

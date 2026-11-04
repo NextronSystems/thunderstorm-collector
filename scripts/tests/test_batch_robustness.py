@@ -106,7 +106,7 @@ class BatchRobustness(shared.PowerShellRobustness):
         self.environment["TEMP"] = self.environment["TMP"] = temporary
         names = {"--port": "THUNDERSTORM_PORT", "--source": "SOURCE", "--max-age": "MAX_AGE",
                  "--max-size-kb": "COLLECT_MAX_SIZE", "--retries": "UPLOAD_ATTEMPTS", "--server": "THUNDERSTORM_SERVER",
-                 "--ca-cert": "CURL_CA_BUNDLE"}
+                 "--ca-cert": "CURL_CA_BUNDLE", "--server-wait": "SERVER_WAIT"}
         index = 0
         while index < len(extra):
             option = extra[index]
@@ -129,7 +129,7 @@ class BatchRobustness(shared.PowerShellRobustness):
         command = self.command(*extra, **kwargs)
         process = subprocess.Popen(command, env=self.environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, cwd=self.root)
-        self.output = shared.communicate_collector(process).decode("utf-8", "replace")
+        self.output = shared.communicate_collector(process, kwargs.get("timeout", 45)).decode("utf-8", "replace")
         self.assertEqual(os.listdir(self.environment["TEMP"]), [], "temporary payloads were not removed")
         self.assertEqual(self.markers, [], "Batch profile must not send unsupported collection markers")
         return process.returncode
@@ -255,6 +255,18 @@ class BatchRobustness(shared.PowerShellRobustness):
 
     def test_ambient_certificate_callback_cannot_disable_default_verification(self):
         self.skipTest("PowerShell-only: Batch hands TLS to curl and does not use .NET certificate validation")
+
+    def test_compressed_wof_file_is_collected(self):
+        # FSO exposes no reparse tag, so Batch cannot tell a compressed or deduplicated
+        # file from a link; it skips all of them and says so at the end of the run.
+        path = self.file("compressed.exe", b"MZ" + b"\x00" * 65536)
+        result = subprocess.run(["compact.exe", "/c", "/exe:xpress4k", path], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+        if result.returncode != 0 or not os.stat(path).st_file_attributes & 0x400:
+            self.skipTest("compact /exe did not leave a reparse point here")
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual(self.uploads, [])
+        self.assertIn("reparse point", self.output)
 
     def test_custom_ca_accepts_a_chain_through_an_intermediate(self):
         self.skipTest("PowerShell-only: the chain check is PowerShell's own; curl with Schannel validates the CA itself")

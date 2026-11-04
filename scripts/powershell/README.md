@@ -65,7 +65,7 @@ selected roots. The collector does not create its own log file.
 | Item | Behavior / limitation |
 |---|---|
 | Runtime | Modern: PowerShell language 3+. Legacy: language 2.0, Add-Type and full .NET required. |
-| Selection | Recursive literal paths; no junctions/symlinks; built-in extension allowlist or explicit Extensions / AllExtensions. Known cloud folder names excluded. |
+| Selection | Recursive literal paths; no junctions/symlinks; built-in extension allowlist or explicit Extensions / AllExtensions. Known cloud folder names excluded. Files that are reparse points are skipped too, except Data Deduplication, Windows Overlay Filter (CompactOS, `compact /exe`) and Single Instance Storage files, whose content is ordinary file data and is read normally. |
 | Age | Default 30 days; last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
 | Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
 | Upload | Binary-safe multipart file; empty files included. Async `/api/checkAsync` only; does not poll analysis results. |
@@ -76,8 +76,9 @@ selected roots. The collector does not create its own log file.
 | Custom TLS | CACert (one PEM/DER public root) and Insecure need per-request callbacks, available on .NET 4.5+. Older CLR rejects these options; use OS trust instead. No global trust installation. |
 | Custom CA limits | Platform hostname check retained, chain anchored at the supplied root, validity/server-auth checked; revocation checking is not implemented for this custom-root mode. Intermediate certificates sent by the server are used to build the chain, which must still end at the supplied root. |
 | Retries | Retries 1..10 is TOTAL upload attempts, default 3. HTTP 503 integer Retry-After capped at 120 seconds; no independent second retry budget. |
-| Timeouts | 30-second request watchdog for uploads, 10 seconds for markers; begin retries once after 2 seconds. DNS/OS scheduling can add overhead. |
-| Exit | 0 = transfer/selection run completed, 1 = partial failures/interruption/end failure, 2 = invalid config/no usable roots/fatal begin. Parser/runtime launch errors can use the interpreter's code. |
+| Server loss | After 3 files in a row got no answer other than 503 (busy), sending stops and `/api/status` is polled (2, 4, 8 ... up to 60 seconds apart) for up to ServerWait seconds, default 600, 0..86400. If the service answers, the run continues with the next file; otherwise it stops, sends a best-effort interrupted marker and exits 1. ServerWait 0 stops at once. |
+| Timeouts | Each read or write may stall for at most 30 seconds. An upload attempt may take 30 seconds plus the time to send its body at 64 KiB/s, so a large file over a slow link is not cut off. Markers use 10 seconds; begin retries once after 2 seconds. DNS/OS scheduling can add overhead. |
+| Exit | 0 = transfer/selection run completed, 1 = partial failures/interruption/end failure/service unreachable for ServerWait, 2 = invalid config/no usable roots/fatal begin. Parser/runtime launch errors can use the interpreter's code. |
 | Logging | Console only; no self-generated scan log beside the collector to accidentally upload. Debugging adds marker diagnostics. NoProgress overrides Progress. |
 
 Snapshots are read before connecting, under a Windows read lock, then checked for
