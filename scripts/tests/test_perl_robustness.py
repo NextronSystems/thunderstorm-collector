@@ -30,6 +30,21 @@ except ImportError:
 MAJOR = sys.version_info[0]
 SCRIPT = os.environ.get("PERL_COLLECTOR") or os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "perl", "thunderstorm-collector.pl"))
+# Preloaded with -MLstatSpy: records every path the collector lstat()s and ends the run
+# with exit 42 at the first path two levels below the filesystem root.
+LSTAT_SPY = r'''package LstatSpy;
+BEGIN {
+    *CORE::GLOBAL::lstat = sub (;*) {
+        my $path = @_ ? $_[0] : $_;
+        open my $log, '>>', $ENV{LSTAT_SPY_LOG} or die "spy log: $!";
+        print $log "$path\n";
+        close $log;
+        CORE::exit(42) if !ref $path && $path =~ m{^/[^/]+/[^/]};
+        return CORE::lstat($path);
+    };
+}
+1;
+'''
 
 
 class Server(ThreadingMixIn, HTTPServer):
@@ -62,11 +77,29 @@ class PerlRobustness(unittest.TestCase):
         self.pause_begin = False
         self.started = threading.Event()
         self.release = threading.Event()
+        # Simulated outage: once outage_after files were accepted, uploads and status checks
+        # get no answer (the connection closes) for outage_seconds, or for good if None.
+        self.outage_after = None
+        self.outage_seconds = None
+        self.outage_started = None
+        self.status_polls = []
         test = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def do_GET(self):
+                test.status_polls.append(self.path)
+                if self.path != "/api/status" or test.unavailable():
+                    self.close_connection = True
+                    return
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                self.close_connection = True
 
             def do_POST(self):
                 data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
@@ -82,6 +115,9 @@ class PerlRobustness(unittest.TestCase):
                         test.started.set()
                         test.release.wait(8)
                 else:
+                    if test.unavailable():
+                        self.close_connection = True  # no status line at all: a transport failure
+                        return
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
                     header_block = data.split(b"\r\n\r\n", 1)[0]
                     declared = re.search(b'filename="([^"]*)"', header_block)
@@ -122,6 +158,13 @@ class PerlRobustness(unittest.TestCase):
         self.thread.join(5)
         shutil.rmtree(self.root)
         self.assertEqual(self.server.errors, [], "unexpected test-server exception")
+
+    def unavailable(self):
+        if self.outage_after is None or len(self.uploads) < self.outage_after:
+            return False
+        if self.outage_started is None:
+            self.outage_started = time.time()
+        return self.outage_seconds is None or time.time() - self.outage_started < self.outage_seconds
 
     def file(self, name="sample.bin", data=b"\x00\xffTHUNDER\n"):
         path = os.path.join(self.samples, name)
@@ -244,6 +287,92 @@ class PerlRobustness(unittest.TestCase):
             self.assertIn(b"Directory replaced", output)
         finally:
             self.release.set()
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    def test_excluded_mounts_below_the_filesystem_root_are_never_stat_ed(self):
+        # lstat() on the mount point of a dead hard NFS mount blocks in the kernel for good, where
+        # no signal handler runs: no marker, no exit. A walk of / must skip /proc, /dev, /sys,
+        # /run, /mnt and the other excluded mounts by path, before it stats them; /mnt is
+        # excluded as a whole tree, not only file by file. The spy ends the dry run two levels down.
+        with open(os.path.join(self.root, "LstatSpy.pm"), "w") as stream:
+            stream.write(LSTAT_SPY)
+        log = os.path.join(self.root, "lstat.log")
+        process = subprocess.run(
+            ["perl", "-I" + self.root, "-MLstatSpy", SCRIPT, "--server", "127.0.0.1", "--port", "1",
+             "--max-age", "0", "--no-progress", "--dry-run", "-d", "/"],
+            cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60,
+            env=dict(os.environ, LSTAT_SPY_LOG=log))
+        output = process.stdout.decode("utf-8", "replace")
+        self.assertEqual(process.returncode, 42, output)
+        with open(log) as stream:
+            statted = stream.read().splitlines()
+        excluded = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots", "/mnt"]
+        self.assertEqual([path for path in excluded if path in statted], [], statted)
+        self.assertTrue(any(path in statted for path in ("/usr", "/etc", "/bin")), statted)
+
+    def outage_files(self, count):
+        for index in range(count):
+            self.file("sample%d.bin" % index, ("payload%d" % index).encode("ascii"))
+
+    def test_lost_server_pauses_uploads_then_stops_after_the_wait(self):
+        # Without a run-level stop every remaining file paid its full retry budget, hours to
+        # days for a large tree, before a failing end marker.
+        self.outage_files(7)
+        self.outage_after = 1
+        started = time.time()
+        self.assertEqual(self.run_collector("--server-wait", "3"), 1, self.output)
+        elapsed = time.time() - started
+        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(self.output.count("[ERROR] Upload"), 3, self.output)
+        self.assertIn("did not accept 3 files in a row", self.output)
+        self.assertIn("unreachable for 3 seconds", self.output)
+        self.assertTrue(self.status_polls, self.output)
+        self.assertTrue(all(path == "/api/status" for path in self.status_polls), self.status_polls)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertEqual(self.markers[-1]["stats"]["failed"], 3)
+        self.assertTrue(elapsed < 15, elapsed)
+
+    def test_lost_server_that_returns_in_time_gets_the_remaining_files(self):
+        self.outage_files(6)
+        self.outage_after = 1
+        self.outage_seconds = 3
+        self.assertEqual(self.run_collector("--server-wait", "20"), 1, self.output)
+        self.assertIn("answers again after", self.output)
+        self.assertEqual(len(self.uploads), 3, self.output)  # one before the outage, two after it
+        self.assertEqual(self.output.count("[ERROR] Upload"), 3, self.output)
+        self.assertTrue(len(self.status_polls) >= 2, self.status_polls)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assertIn("Failed: 3", self.output)
+
+    def test_server_wait_zero_stops_at_once_and_dry_run_never_waits(self):
+        self.outage_files(5)
+        self.outage_after = 0
+        self.assertEqual(self.run_collector("--server-wait", "0"), 1, self.output)
+        self.assertEqual(self.output.count("[ERROR] Upload"), 3, self.output)
+        self.assertEqual(self.status_polls, [])
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.markers = []
+        self.assertEqual(self.run_collector("--server-wait", "0", "--dry-run"), 0, self.output)
+        self.assertEqual(self.output.count("[DRY-RUN] Would submit"), 5, self.output)
+        self.assertEqual(self.markers, [])
+
+    def test_sigterm_while_waiting_for_a_lost_server_sends_interrupted(self):
+        self.outage_files(5)
+        self.outage_after = 0
+        process = subprocess.Popen(self.command("--server-wait", "60"), stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT)
+        try:
+            deadline = time.time() + 15
+            while not self.status_polls and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(self.status_polls, "the collector did not start waiting")
+            process.send_signal(signal.SIGTERM)
+            output = process.communicate(timeout=15)[0]
+            self.assertEqual(process.returncode, 1, output)
+            self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        finally:
             if process.poll() is None:
                 process.kill()
                 process.communicate()
@@ -544,6 +673,7 @@ class PerlRobustness(unittest.TestCase):
         for flag, value in [("--port", "0"), ("--port", "65536"), ("--retries", "0"),
                             ("--retries", "11"), ("--max-age", "-1"),
                             ("--max-size-kb", "0"), ("--max-size-kb", "204801"),
+                            ("--server-wait", "-1"), ("--server-wait", "86401"),
                             ("--server", "http://localhost")]:
             self.assertEqual(self.run_collector(flag, value), 2, self.output)
         self.assertEqual(self.paths, [])

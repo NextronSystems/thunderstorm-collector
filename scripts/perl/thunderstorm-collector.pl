@@ -36,6 +36,8 @@ my $MAX_SIZE_KB = 2048;      # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact 
 # exclusions (including /mnt, .dat, .npm and .lck paths) still apply.
 
 my $RETRIES = 3;             # TOTAL upload attempts including the first, 1..10.
+my $SERVER_WAIT = 600;       # Seconds to wait for the server after 3 files in a row could not be
+                             # delivered, 0..86400; polls /api/status, then stops (exit 1). 0 = stop at once.
 my $DRY_RUN = 0;             # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
 my $DEBUG = 0;               # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
 # Progress is automatic on terminals; --progress / --no-progress overrides it.
@@ -112,6 +114,7 @@ my $ca = $CA_CERT;
 my $age = $MAX_AGE;
 my $size = $MAX_SIZE_KB;
 my $retries = $RETRIES;
+my $server_wait = $SERVER_WAIT;
 my $tls = $USE_TLS;
 my $insecure = $INSECURE;
 my $dry = $DRY_RUN;
@@ -127,6 +130,7 @@ GetOptions(
     'ca-cert=s' => \$ca, 'dry-run' => \$dry, 'no-dry-run' => sub { $dry = 0 },
     'async' => sub { },
     'max-age=i' => \$age, 'max-size-kb=i' => \$size, 'retries=i' => \$retries,
+    'server-wait=i' => \$server_wait,
     'progress' => sub { $progress = 1 }, 'no-progress' => sub { $progress = 0 },
     'debug' => \$debug, 'no-debug' => sub { $debug = 0 }, 'help|h' => \$help
 ) or exit 2;
@@ -134,6 +138,7 @@ if ($help) {
     print "Usage: perl thunderstorm-collector.pl --server HOST --port 8080 --dir PATH\n",
           "Repeat --dir; --max-age 0 disables age filtering; --max-size-kb uses KiB.\n",
           "--source TEXT --ssl [--ca-cert FILE|--insecure] --dry-run --retries 1..10\n",
+          "--server-wait 0..86400: seconds to wait for the server after 3 undeliverable files\n",
           "Override enabled header flags: --no-tls --verify-tls --no-dry-run --no-debug\n",
           "--async is accepted for compatibility; uploads are always asynchronous.\n";
     exit 0;
@@ -144,9 +149,10 @@ config_error('Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in 
     unless defined $server && length $server;
 config_error('Server must be a DNS/IPv4 name or bracketed IPv6 address')
     unless defined $server && $server =~ /^(?:[A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:.]+\])$/;
-config_error('port 1..65535, age 0..36500, size 1..204800 KiB, retries 1..10 required')
+config_error('port 1..65535, age 0..36500, size 1..204800 KiB, retries 1..10, server-wait 0..86400 required')
     unless $port >= 1 && $port <= 65535 && $age >= 0 && $age <= 36500 &&
-           $size >= 1 && $size <= 204800 && $retries >= 1 && $retries <= 10;
+           $size >= 1 && $size <= 204800 && $retries >= 1 && $retries <= 10 &&
+           $server_wait >= 0 && $server_wait <= 86400;
 config_error('--ca-cert/--insecure require --ssl') if !$tls && ($ca || $insecure);
 config_error('CA certificate file not found') if $ca && !-f $ca;
 $source = decode('UTF-8', $source, FB_DEFAULT);
@@ -155,8 +161,11 @@ my $base = ($tls ? 'https' : 'http') . "://$server:$port";
 my $json = JSON::PP->new->utf8->allow_nonref;
 my ($scanned, $submitted, $failed, $skipped, $scan_errors) = (0) x 5;
 my ($interrupted, $started, $scan_id) = (0, 0, '');
+my ($undelivered, $server_lost) = (0, 0);
 my $start = time;
-my @excluded = qw(/proc /dev /sys /run /snap /.snapshots);
+# Matched by path before anything is lstat()ed; /mnt holds WSL drives, removable media and
+# network shares.
+my @excluded = qw(/proc /dev /sys /run /snap /.snapshots /mnt);
 my %special = map { $_ => 1 } qw(nfs nfs4 cifs smbfs smb3 sshfs fuse.sshfs afp
     webdav davfs2 fuse.rclone fuse.s3fs proc procfs sysfs devtmpfs devpts cgroup
     cgroup2 pstore bpf tracefs debugfs securityfs hugetlbfs mqueue autofs fusectl
@@ -189,11 +198,16 @@ sub url_encode {
     $bytes =~ s/([^A-Za-z0-9_.~-])/sprintf("%%%02X", ord($1))/ge;
     return $bytes;
 }
-sub excluded {
+sub excluded_mount {
     my ($path) = @_;
     for my $root (@excluded) {
         return 1 if $path eq $root || index($path, "$root/") == 0;
     }
+    return 0;
+}
+sub excluded {
+    my ($path) = @_;
+    return 1 if excluded_mount($path);
     my $lower = lc $path;
     $lower =~ s{\\}{/}g;
     return 1 if $lower =~ m{/library/cloudstorage(?:/|$)};
@@ -212,6 +226,10 @@ sub request {
     my $req = HTTP::Request->new(POST => $url);
     $req->header('Content-Type' => $content_type, 'Content-Length' => length($body));
     $req->content($body);
+    return send_request($req, $timeout);
+}
+sub send_request {
+    my ($req, $timeout) = @_;
     my $old_timeout = $ua->timeout;
     $ua->timeout($timeout);
     my $resp = eval { $ua->request($req) };
@@ -316,10 +334,12 @@ sub upload {
                "Content-Type: application/octet-stream\r\n\r\n" . $data . "\r\n--$boundary--\r\n";
     my $endpoint = $base . '/api/checkAsync?source=' . url_encode($source);
     $endpoint .= '&scan_id=' . url_encode($scan_id) if length $scan_id;
+    my $answered = 0;    # some attempt got an HTTP status other than 503 (busy)
     for my $attempt (1 .. $retries) {
         last if $interrupted;
         my $resp = eval { request($endpoint, "multipart/form-data; boundary=$boundary", $body, 30) };
-        if ($resp && $resp->is_success) { $submitted++; return }
+        $answered = 1 if $resp && $resp->code != 503;
+        if ($resp && $resp->is_success) { $submitted++; $undelivered = 0; return }
         print STDERR "[ERROR] Upload $path: ", $@ || ($resp ? $resp->status_line : 'no response'), "\n";
         my $delay = 2 ** ($attempt - 1);
         $delay = 60 if $delay > 60;
@@ -330,11 +350,42 @@ sub upload {
         sleep $delay if $attempt < $retries && !$interrupted;
     }
     $failed++;
+    return if $interrupted;
+    if ($answered) { $undelivered = 0; return }
+    if (++$undelivered >= 3) {
+        $undelivered = 0;
+        $server_lost = 1 unless wait_for_server();
+    }
+}
+# After 3 undeliverable files in a row, stop sending and poll /api/status for up to
+# $server_wait seconds instead of running every remaining file through its retries.
+sub wait_for_server {
+    my $wait_start = time;
+    print STDERR "[WARN] Thunderstorm did not accept 3 files in a row; checking $base/api/status ",
+                 "for up to $server_wait seconds before sending more.\n";
+    my $delay = 2;
+    while (!$interrupted) {
+        my $remaining = $server_wait - (time - $wait_start);
+        last if $remaining <= 0;
+        sleep($delay < $remaining ? $delay : $remaining);    # a signal ends the sleep early
+        last if $interrupted;
+        my $resp = eval { send_request(HTTP::Request->new(GET => "$base/api/status"), 10) };
+        if ($resp && $resp->is_success) {
+            print STDERR "[INFO] Thunderstorm answers again after ", time - $wait_start,
+                         " seconds; continuing with the next file.\n";
+            return 1;
+        }
+        $delay = $delay * 2 > 60 ? 60 : $delay * 2;
+    }
+    return 1 if $interrupted;    # reported by the interruption handling instead
+    print STDERR "[ERROR] Thunderstorm unreachable for $server_wait seconds; stopping the collection. ",
+                 "Remaining files are not sent.\n";
+    return 0;
 }
 sub walk {
     my ($root) = @_;
     my @stack = ([$root]);
-    while (@stack && !$interrupted) {
+    while (@stack && !$interrupted && !$server_lost) {
         my $chain = pop @stack;
         my $directory = $chain->[-1][0];
         next if excluded($directory);
@@ -350,12 +401,15 @@ sub walk {
         my $closed = closedir $handle;
         if ($read_error || !$closed) { print STDERR "[ERROR] Directory read failed: $directory\n"; $scan_errors++ }
         for my $name (@names) {
-            last if $interrupted;
+            last if $interrupted || $server_lost;
             next if $name eq '.' || $name eq '..';
             if (!eval { check_directories($chain); 1 }) {
                 print STDERR "[ERROR] Cannot traverse $directory: $@"; $scan_errors++; last;
             }
             my $path = File::Spec->catfile($directory, $name);
+            # By path, before lstat: stat on the mount point of a dead hard NFS mount blocks
+            # in the kernel for good, where no signal handler can run.
+            next if excluded_mount($path);
             my @metadata = lstat $path;
             if (!@metadata) { print STDERR "[ERROR] Cannot stat $path: $!\n"; $failed++; next }
             next if S_ISLNK($metadata[2]);
@@ -365,7 +419,7 @@ sub walk {
             }
             next unless S_ISREG($metadata[2]);
             $scanned++;
-            if ($path =~ m{^/mnt(?:/|$)|\.dat$|\.npm|\.lck$} || !eligible(\@metadata)) { $skipped++; next }
+            if ($path =~ m{\.dat$|\.npm|\.lck$} || !eligible(\@metadata)) { $skipped++; next }
             upload($path, \@metadata, $chain);
             print STDERR "[$scanned examined]\n" if $progress;
         }
@@ -388,11 +442,21 @@ print STDERR "[INFO] Limits: max-age=$age days (0=disabled); max-size=$size KiB;
 my $begin_ok = marker('begin');
 $started = $begin_ok ? 1 : 0;
 exit 2 unless $begin_ok || $interrupted;
-if (!$interrupted) { walk($_) for @roots }
+for my $root (@roots) {
+    last if $interrupted || $server_lost;
+    walk($root);
+}
 if ($interrupted) {
     $SIG{INT} = $SIG{TERM} = 'IGNORE';
     marker('interrupted') if $started && !$dry;
     print STDERR "Thunderstorm Collector Run interrupted\n";
+    exit 1;
+}
+if ($server_lost) {
+    $SIG{INT} = $SIG{TERM} = 'IGNORE';
+    marker('interrupted');    # best effort; the server has not answered for a while
+    print STDERR "Thunderstorm Collector Run stopped, server unreachable (Checked: $scanned Submitted: $submitted " .
+                 "Failed: $failed Skipped: $skipped Scan errors: $scan_errors Seconds: " . (time - $start) . ")\n";
     exit 1;
 }
 my $end_ok = marker('end');
