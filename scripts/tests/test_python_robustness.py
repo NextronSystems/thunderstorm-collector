@@ -531,7 +531,7 @@ class PythonRobustness(unittest.TestCase):
         # Under the C locale Python 3 turns the UTF-8 bytes of an argument into lone surrogates.
         # The markers sent those (the server sees U+FFFD) while the upload query sent UTF-8.
         self.file()
-        source = u"müller-host"
+        source = u"m\u00fcller-host"
         self.assertEqual(self.run_collector("--source", source, env=C_LOCALE), 0, self.output)
         self.assertEqual([marker["source"] for marker in self.markers], [source, source])
         uploads = [path for path in self.paths if path.startswith("/api/check")]
