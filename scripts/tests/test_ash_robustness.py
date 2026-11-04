@@ -37,7 +37,11 @@ class AshRobustnessTests(unittest.TestCase):
         self.filenames = []
         self.part_types = []
         self.markers = []
+        # None drops the connection without any HTTP status (a lost server).
         self.upload_statuses = []
+        self.dropped = 0
+        self.status_statuses = []
+        self.status_polls = 0
         self.marker_status = 200
         self.end_status = 200
         self.diagnostic_header = False
@@ -56,6 +60,21 @@ class AshRobustnessTests(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
+            def do_GET(self):
+                test.requests.append(self.path)
+                self.close_connection = True
+                if not self.path.startswith("/api/status"):
+                    self.send_error(404)
+                    return
+                test.status_polls += 1
+                status = test.status_statuses.pop(0) if test.status_statuses else 200
+                if status is None:
+                    return
+                self.send_response(status)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
             def do_POST(self):
                 data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 test.requests.append(self.path)
@@ -70,6 +89,10 @@ class AshRobustnessTests(unittest.TestCase):
                 else:
                     response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    if status is None:
+                        test.dropped += 1
+                        self.close_connection = True
+                        return
                     header_block = data.split(b"\r\n\r\n", 1)[0]
                     declared = re.search(b'filename="([^"]*)"', header_block)
                     test.filenames.append(declared.group(1) if declared else None)
@@ -112,8 +135,24 @@ class AshRobustnessTests(unittest.TestCase):
         self.server.server_close()
         thread.join(timeout=5)
 
-    def run_collector(self, *args, env=None, roots=None, log_file=None):
-        command = SHELL + [str(COLLECTOR), "--server", "127.0.0.1", "--port",
+    def configured_collector(self, mounts=None, **header):
+        """A copy of the collector with USER CONFIGURATION values replaced.
+
+        A name the script does not define is left alone, so a test still runs (and
+        fails on behaviour) against an older script. ``mounts`` replaces the path of
+        the kernel mount table."""
+        source = COLLECTOR.read_text()
+        for name, value in header.items():
+            source = re.sub(r"^%s=\S*" % name, lambda match: "%s=%s" % (name, value),
+                            source, count=1, flags=re.M)
+        if mounts is not None:
+            source = source.replace("/proc/mounts", str(mounts))
+        path = self.root / "configured-collector.sh"
+        path.write_text(source)
+        return path
+
+    def run_collector(self, *args, env=None, roots=None, log_file=None, script=None):
+        command = SHELL + [str(script or COLLECTOR), "--server", "127.0.0.1", "--port",
                            str(self.server.server_port), "--no-progress", "--max-age", "365",
                            "--retries", "1"]
         command.extend(["--log-file", str(log_file)] if log_file else ["--no-log-file"])
@@ -707,6 +746,7 @@ exec "$REAL_FIND" "$@"
 
     def test_configuration_bounds_fail_before_network(self):
         for option, value in [("--port", "65536"), ("--retries", "11"),
+                              ("--server-wait", "86401"), ("--server-wait", "-1"),
                               ("--max-age", "999999999999999999999"),
                               ("--max-size-kb", "0"), ("--dir", "line\nbreak")]:
             with self.subTest(option=option, value=value):
@@ -816,24 +856,37 @@ exec "$REAL_FIND" "$@"
                 self.release_upload.clear()
                 self.interruption_cleans_workspace(number)
 
-    def interruption_cleans_workspace(self, number):
+    def test_console_closed_before_an_interrupt_still_reports_and_cleans(self):
+        # "collector | tee" stopped with Ctrl-C: tee exits first, so the interruption
+        # message is written to a closed pipe and raises SIGPIPE in the handler.
+        self.interruption_cleans_workspace(signal.SIGINT, close_console=True)
+
+    def interruption_cleans_workspace(self, number, close_console=False):
         # A runner that was started as a background job or under nohup passes "ignored" for INT, QUIT or
         # HUP on to its children, and a shell cannot trap a signal that was ignored on entry.
         for ignored in (signal.SIGHUP, signal.SIGQUIT):
             self.addCleanup(signal.signal, ignored, signal.signal(ignored, signal.SIG_DFL))
         (self.samples / "real.txt").write_bytes(b"readable")
         self.pause_upload = True
+        log = self.root / "interrupt.log"
         command = SHELL + [str(COLLECTOR), "--server", "127.0.0.1", "--port",
                            str(self.server.server_port), "--dir", str(self.samples),
-                           "--no-log-file", "--no-progress", "--max-age", "0"]
+                           "--no-progress", "--max-age", "0"]
+        command += ["--log-file", str(log)] if close_console else ["--no-log-file"]
         process = subprocess.Popen(command, cwd=self.root,
                                    env={**os.environ, "TMPDIR": str(self.root)},
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             self.assertTrue(self.upload_started.wait(timeout=10), "upload did not start")
+            if close_console:
+                process.stdout.close()
             process.send_signal(number)
             self.release_upload.set()
-            output, _ = process.communicate(timeout=15)
+            if close_console:
+                process.wait(timeout=15)
+                output = log.read_text() if log.exists() else ""
+            else:
+                output, _ = process.communicate(timeout=15)
         finally:
             self.release_upload.set()
             if process.poll() is None:
@@ -843,7 +896,244 @@ exec "$REAL_FIND" "$@"
         self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
         self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
 
+    def test_closed_console_does_not_kill_the_run(self):
+        # ssh without a tty, or a pipe reader that went away: the first console message
+        # raised SIGPIPE, which killed the shell before any marker and left the workspace.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        log = self.root / "collector.log"
+        read_end, write_end = os.pipe()
+        os.close(read_end)
+        command = SHELL + [str(COLLECTOR), "--server", "127.0.0.1", "--port",
+                           str(self.server.server_port), "--dir", str(self.samples),
+                           "--log-file", str(log), "--progress", "--max-age", "0"]
+        try:
+            result = subprocess.run(command, cwd=self.root, stdin=subprocess.DEVNULL,
+                                    stdout=write_end, stderr=write_end, timeout=40,
+                                    env={**os.environ, "TMPDIR": str(self.root)})
+        finally:
+            os.close(write_end)
+        text = self.output = log.read_text() if log.exists() else ""
+        self.assertEqual(result.returncode, 0, text)
+        self.assert_payloads([b"readable"])
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assertIn("Run completed", text)
+        self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+        # Bytes a failed console write left in a shell's output buffer must not leak
+        # into later command substitutions such as the scan ID.
+        upload = next(path for path in self.requests if path.startswith("/api/check"))
+        self.assertEqual(parse_qs(urlsplit(upload).query)["scan_id"], [self.scan_id])
+        self.assertEqual(self.markers[-1]["scan_id"], self.scan_id)
 
+    def test_mount_exclusions_never_touch_mount_points(self):
+        # A stat of a stale hard NFS/CIFS/sshfs mount point never returns. Mount points are
+        # matched as strings under the scan root, never stat'ed (not even outside the
+        # roots), and the mount table is read before the begin marker.
+        (self.samples / "local.txt").write_bytes(b"local")
+        outside = self.root / "outside-share"
+        outside.mkdir()
+        network = self.samples / "net share"
+        network.mkdir()
+        (network / "remote.txt").write_bytes(b"remote")
+        file_mount = self.samples / "file-mount.bin"   # not a directory: a stat-gated prune skips it
+        file_mount.write_bytes(b"file mount")
+        disk = self.samples / "disk"
+        disk.mkdir()
+        (disk / "kept.txt").write_bytes(b"kept")
+        table = "".join("%s %s %s rw 0 0\n" % (device, str(point).replace(" ", "\\040"), kind)
+                        for device, point, kind in [
+                            ("server:/a", outside, "nfs"), ("server:/b", network, "nfs4"),
+                            ("//server/c", file_mount, "cifs"), ("/dev/sda1", disk, "ext4"),
+                            ("proc", self.samples / "missing-proc", "proc")])
+        mounts = self.root / "mounts"
+        os.mkfifo(str(mounts))
+        markers_when_read = []
+
+        def feed_mount_table():
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    fd = os.open(str(mounts), os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:   # ENXIO until the collector opens the table
+                    time.sleep(0.01)
+                    continue
+                markers_when_read.append(len(self.markers))
+                os.set_blocking(fd, True)
+                os.write(fd, table.encode())
+                os.close(fd)
+                return
+
+        writer = threading.Thread(target=feed_mount_table, daemon=True)
+        writer.start()
+        find_args = self.root / "find.args"
+        path = self.real_tool_path("curl", find='#!/bin/sh\nprintf "%s\\n" "$@" >> "$FIND_ARGS"\n'
+                                                'exec "$REAL_FIND" "$@"\n')
+        result = self.run_collector(script=self.configured_collector(mounts=mounts),
+                                    env={"PATH": path, "FIND_ARGS": str(find_args),
+                                         "REAL_FIND": shutil.which("find")})
+        writer.join(timeout=5)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertEqual(markers_when_read, [0], "mount table must be read before the begin marker")
+        self.assert_payloads([b"local", b"kept"])
+        arguments = find_args.read_text().splitlines()
+        self.assertNotIn(str(outside), arguments)
+        self.assertIn(str(file_mount), arguments)
+
+    def upload_files(self, count):
+        for index in range(count):
+            (self.samples / ("file-%d.txt" % index)).write_bytes(b"payload-%d" % index)
+
+    def test_lost_server_pauses_then_stops_after_the_outage_window(self):
+        # Without a run-level stop, every remaining file paid its full retry budget.
+        self.upload_files(6)
+        self.upload_statuses = [None] * 20
+        self.status_statuses = [None] * 20
+        log = self.root / "outage.log"
+        result = self.run_collector(script=self.configured_collector(SERVER_WAIT="3"), log_file=log)
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertEqual(self.dropped, 3, self.output)
+        # Polls after 2 s and at 3 s; whole-second clock reads can merge the two.
+        self.assertIn(self.status_polls, (1, 2), self.output)
+        self.assertRegex(self.output, r"Server unreachable for [34]s, stopping \(3 listed files in "
+                                      r"the current root and 0 further roots not attempted\)")
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertEqual(self.markers[-1]["stats"]["failed"], 3)
+        self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+        self.assertIn("Run stopped:", log.read_text())
+
+    def test_server_recovery_resumes_with_the_next_file(self):
+        # A 503 budget used up counts like a missing answer; failed files stay failed.
+        self.upload_files(6)
+        self.upload_statuses = [None, 503, None]
+        self.status_statuses = [503]
+        result = self.run_collector(script=self.configured_collector(SERVER_WAIT="60"))
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertIn("submitted=3", self.output)
+        self.assertIn("failed=3", self.output)
+        self.assertEqual(self.status_polls, 2, self.output)
+        self.assertIn("Server reachable again after", self.output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assertEqual(len(self.uploads), 3)
+
+    def test_server_wait_zero_stops_without_polling(self):
+        self.upload_files(5)
+        self.upload_statuses = [None] * 20
+        result = self.run_collector("--server-wait", "0")
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertEqual(self.dropped, 3, self.output)
+        self.assertEqual(self.status_polls, 0)
+        self.assertIn("Server unreachable for 0s, stopping", self.output)
+
+    def test_http_errors_do_not_count_as_a_lost_server(self):
+        # A server that answers, even with errors, is alive: no pause, every file is tried.
+        self.upload_files(4)
+        self.upload_statuses = [500, 500, 400, 500]
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertIn("failed=4", self.output)
+        self.assertEqual(self.status_polls, 0)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+
+    @unittest.skipUnless(shutil.which("nc") and shutil.which("timeout"), "nc and timeout required")
+    def test_nc_transport_waits_for_a_lost_server(self):
+        self.upload_files(4)
+        self.upload_statuses = [None, None, None]
+        result = self.run_collector(script=self.configured_collector(SERVER_WAIT="60"),
+                                    env={"PATH": self.real_tool_path("nc")})
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertEqual(self.status_polls, 1, self.output)
+        self.assertIn("Server reachable again after", self.output)
+        self.assertIn("submitted=1", self.output)
+        self.assertEqual(self.markers, [])
+
+    def test_ca_cert_implies_tls(self):
+        # Without this, --ca-cert alone (or a header CA_CERT) sent samples over plain HTTP.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        cert = self.root / "ca.pem"
+        cert.write_text("not a real certificate; the recording tool never connects\n")
+        args = self.root / "curl.args"
+        path = self.tool_path(curl=self.recording_tool())
+        env = {"PATH": path, "ARGS_FILE": str(args)}
+        configured = self.configured_collector(CA_CERT=shlex.quote(str(cert)))
+        for name, options, script in (("cli", ["--ca-cert", str(cert)], None),
+                                      ("header", [], configured)):
+            with self.subTest(source=name):
+                if args.exists():
+                    args.unlink()
+                result = self.run_collector(*options, env=env, script=script)
+                # The recording curl fails every request, so the begin marker is fatal.
+                self.assertEqual(result.returncode, 2, self.output)
+                urls = [line[4:] for line in args.read_text().splitlines() if line.startswith("ARG http")]
+                self.assertTrue(urls, self.output)
+                for url in urls:
+                    self.assertTrue(url.startswith("https://"), url)
+        for name, options, script in (("cli after", ["--ca-cert", str(cert), "--no-ssl"], None),
+                                      ("cli before", ["--no-ssl", "--ca-cert", str(cert)], None),
+                                      ("header", ["--no-ssl"], configured)):
+            with self.subTest(conflict=name):
+                if args.exists():
+                    args.unlink()
+                result = self.run_collector(*options, env=env, script=script)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("--no-ssl conflicts with the CA certificate", self.output)
+                self.assertFalse(args.exists(), "no request may be attempted")
+        self.assertEqual(self.requests, [])
+
+    def test_ca_cert_never_selects_the_plain_nc_transport(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        cert = self.root / "ca.pem"
+        cert.write_text("placeholder\n")
+        calls = self.root / "nc.calls"
+        path = self.tool_path(nc='#!/bin/sh\n: >> "$NC_CALLS"\ncat >/dev/null\nexit 0\n')
+        result = self.run_collector("--ca-cert", str(cert), env={"PATH": path, "NC_CALLS": str(calls)})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("does not support TLS", self.output)
+        self.assertFalse(calls.exists())
+        self.assertEqual(self.requests, [])
+
+    def test_od_without_type_options_fails_before_any_request(self):
+        # BusyBox od without CONFIG_DESKTOP has no -A/-t: the source silently became empty.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        busybox_od = ('#!/bin/sh\necho "od: invalid option -- \'A\'" >&2\n'
+                      'echo "Usage: od [-aBbcDdeFfHhIiLlOovXx] [FILE]" >&2\nexit 1\n')
+        result = self.run_collector(env={"PATH": self.real_tool_path("curl", od=busybox_od)})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("od -v -An -tx1", self.output)
+        self.assertEqual(self.requests, [])
+        # An od that passes the startup check and fails later never yields an empty value.
+        shutil.rmtree(self.root / "tools")
+        flaky_od = ('#!/bin/sh\nif [ -e "$OD_STATE" ]; then exit 1; fi\n: > "$OD_STATE"\n'
+                    'exec "$REAL_OD" "$@"\n')
+        result = self.run_collector(env={"PATH": self.real_tool_path("curl", od=flaky_od),
+                                         "OD_STATE": str(self.root / "od.state"),
+                                         "REAL_OD": shutil.which("od")})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("Cannot percent-encode the source", self.output)
+        self.assertEqual(self.requests, [])
+
+    def test_head_without_byte_count_fails_before_any_request(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        head = ('#!/bin/sh\ncase "$1" in -c*) echo "head: invalid option -- \'c\'" >&2; exit 1 ;; esac\n'
+                'exec "$REAL_HEAD" "$@"\n')
+        result = self.run_collector(env={"PATH": self.real_tool_path("curl", head=head),
+                                         "REAL_HEAD": shutil.which("head")})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("head -c", self.output)
+        self.assertEqual(self.requests, [])
+
+    def test_old_busybox_timeout_syntax_disables_nc_before_any_request(self):
+        # BusyBox timeout before 1.30 only knows "timeout -t SECS PROG", so every
+        # "timeout 60 nc ..." upload failed.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        old_timeout = ('#!/bin/sh\nif [ "$1" = -t ]; then shift 2; exec "$@"; fi\n'
+                       'echo "timeout: can\'t execute \'$1\': No such file or directory" >&2\nexit 127\n')
+        calls = self.root / "nc.calls"
+        path = self.tool_path(timeout=old_timeout,
+                              nc='#!/bin/sh\n: >> "$NC_CALLS"\ncat >/dev/null\nexit 0\n')
+        result = self.run_collector(env={"PATH": path, "NC_CALLS": str(calls)})
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("BusyBox timeout before 1.30", self.output)
+        self.assertFalse(calls.exists())
+        self.assertEqual(self.requests, [])
 
     def test_missing_header_server_is_actionable(self):
         result = subprocess.run(SHELL + [str(COLLECTOR), "--dry-run", "--no-log-file",

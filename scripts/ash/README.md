@@ -17,6 +17,7 @@ The script uses POSIX shell syntax and is tested with dash and BusyBox ash. Test
 | Requirement | Detail |
 |---|---|
 | Utilities | `sh`, `find`, `awk`, `sed`, `grep`, `tr`, `wc`, `od`, `cat`, `date`, `head`, `tail`, `rm`, `mktemp`, `dirname`, `basename`, `uname` |
+| Utility features | `od -v -An -tx1` and `head -c BYTES`. BusyBox `od` built without `CONFIG_DESKTOP` has no `-A`/`-t`; a startup self-test exits 2 before any request instead of sending empty source names |
 | Temporary storage | Writable `TMPDIR` (default `/tmp`); `mktemp -d TEMPLATE` must work |
 | Size metadata | GNU/BSD/BusyBox `stat` when available; otherwise `wc -c` reads the file to measure it |
 | Optional tools | `hostname`, `id`, `logger` for hostname discovery, privilege warnings, syslog |
@@ -35,7 +36,7 @@ Curl/wget configuration files and proxy environment settings are ignored, so
 they cannot silently disable TLS verification or redirect uploads. GNU wget must
 support `--no-config`.
 
-Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SECONDS COMMAND`. Its minimal HTTP/1.0 client requires a complete header section, exactly one `Content-Length`, no `Transfer-Encoding`, and the exact declared body length. Chunked, close-delimited, informational, malformed and incomplete responses fail. Prefer curl/GNU wget if your backend needs those features. HTTP is unencrypted; use an appropriately isolated network.
+Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SECONDS COMMAND`. BusyBox `timeout` before 1.30 only accepts `timeout -t SECONDS`; the collector runs `timeout 5 sh -c :` before choosing nc and, if that fails, warns and does not use nc (exit 2 when no other transport exists). Its minimal HTTP/1.0 client requires a complete header section, exactly one `Content-Length`, no `Transfer-Encoding`, and the exact declared body length. Chunked, close-delimited, informational, malformed and incomplete responses fail. Prefer curl/GNU wget if your backend needs those features. HTTP is unencrypted; use an appropriately isolated network.
 
 ## Configuration and Startup Output
 
@@ -46,13 +47,18 @@ per line inside the quotes; spaces within a line belong to that path. Review the
 broad shipped Linux roots before running. The first `--dir` replaces the header
 list; further `--dir` options add roots. Other CLI values override their header
 defaults. `--no-ssl`, `--verify-tls`, `--no-dry-run` and `--no-debug` disable
-corresponding header choices.
+corresponding header choices. A CA certificate (`--ca-cert` or `CA_CERT`) turns
+on HTTPS; `--no-ssl` together with a CA certificate, in either order, exits 2
+before any request.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
 files are not collected. The console and enabled file/syslog destinations print
 one line per root and the effective limits before scanning, including in dry-run.
 Start with `--dry-run` to check the scope. `--quiet` deliberately suppresses console
 output. Keep externally captured logs outside the input directories.
+If the console goes away during a run (an SSH session without a terminal, or a
+`| tee` ended with Ctrl-C), console output stops and the run continues with file
+and syslog logging; markers and workspace cleanup are unaffected.
 
 ## Capabilities
 
@@ -62,6 +68,7 @@ output. Keep externally captured logs outside the input directories.
 - Age: `--max-age 0..36500`, default 30. Zero disables filtering; positive values use `find -mtime -N` (24-hour buckets, not calendar dates).
 - Size: `--max-size-kb 1..1048576`, default 2048. One unit is 1024 bytes; the exact limit is included. Empty files are eligible, subject to backend support.
 - Known cloud-folder paths are skipped. `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots` and detected Linux network/special mounts are excluded. These are best-effort exclusions, not a security boundary.
+- Mount exclusions come from the text of `/proc/mounts`, read once before the begin marker. Mount points are compared as strings with each resolved root and never accessed, so a stale hard NFS/CIFS/sshfs mount outside the roots cannot hang the run. Inside a root, `find` itself may still block on a stale mount point before pruning it, and a root that itself lies on such a mount is still traversed.
 - Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
 - A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
 - Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and every control character (CR, LF, TAB, ESC, DEL, ...) with underscores; a strict multipart parser rejects control characters in a part header and the file would never be collected.
@@ -71,6 +78,7 @@ output. Keep externally captured logs outside the input directories.
 - Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
 - Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID and a warning is emitted. This bounds parser work on older awk runtimes.
 - `--retries 1..10` bounds total attempts per file, including HTTP 503. Retry-After integer seconds cap at 120; otherwise backoff starts at two seconds and caps at 60. A lost response can cause duplicates; no deduplication or resume.
+- Server loss: after 3 files in a row whose every attempt got no HTTP status (or only 503), uploads pause and `GET /api/status` is polled after 2, 4, 8 ... seconds (capped at 60) for up to `--server-wait` seconds (header `SERVER_WAIT`, 0..86400, default 600). A 2xx answer resumes with the next file; files that already failed stay failed. Any other HTTP status, including 4xx and 500, means the server is up and does not count. When the window runs out the collector logs `Server unreachable for Ns, stopping`, sends a best-effort `interrupted` marker and exits 1; the remaining files are not attempted and not counted. `--server-wait 0` stops at once without polling. Dry-run never waits.
 - Dry-run needs no upload tool and never contacts the server. CLI, file and optional syslog logging are supported.
 
 ## Limits and Exit Codes
@@ -85,10 +93,10 @@ Only the first 4096 bytes of traversal diagnostics are retained and logged per r
 | Exit | Meaning |
 |---|---|
 | 0 | All eligible supported files submitted, or successful dry-run; intentional filter skips allowed |
-| 1 | Partial/incomplete run, interruption, failed file, scan error, or failed end marker |
-| 2 | Invalid configuration, missing dependencies, workspace failure, or failed begin after retry |
+| 1 | Partial/incomplete run, interruption, failed file, scan error, failed end marker, or server unreachable for the whole server wait |
+| 2 | Invalid configuration, missing dependencies or utility features, workspace failure, or failed begin after retry |
 
-An empty existing root can succeed with zero files; missing roots cannot. Netcat has no begin connectivity check, so an unreachable service fails per-file with exit 1 rather than curl/GNU wget's begin-stage exit 2. Logging failures disable file logging with a warning; they do not alone fail uploads.
+An empty existing root can succeed with zero files; missing roots cannot. Netcat has no begin connectivity check, so an unreachable service fails the first three files, then waits up to `--server-wait` seconds and exits 1, rather than curl/GNU wget's begin-stage exit 2. Logging failures disable file logging with a warning; they do not alone fail uploads.
 
 Curl attempts have a 10-second connect timeout and 60-second total timeout. GNU wget uses one internal attempt, no redirects, a 10-second connect timeout and 60-second idle-read timeout; this is not a total wall-clock deadline. Netcat attempts are wrapped in a 60-second timeout. Finite attempts do not imply a fixed deadline for the whole scan.
 
@@ -190,7 +198,7 @@ collect --dir "$ROOT/input" --server 127.0.0.1 --port 1 --dry-run
 collect --dir "$ROOT/input" --server 127.0.0.1 --port 1
 ```
 
-Dry-run: exit 0, eight would-submit messages, **no requests**. Unreachable: no uploads, visible error, exit 2 with curl/GNU wget or exit 1 with netcat. No indefinite hang. Server-side absence of requests is stronger evidence than a client summary alone.
+Dry-run: exit 0, eight would-submit messages, **no requests**. Unreachable: no uploads, visible error, exit 2 with curl/GNU wget or exit 1 with netcat. With netcat, three files fail before the collector polls `/api/status` for the server wait (default 600 s); add `--server-wait 0` to end this case at once. No indefinite hang. Server-side absence of requests is stronger evidence than a client summary alone.
 
 ### 5. Missing and Unreadable Paths
 
@@ -287,5 +295,9 @@ THUNDERSTORM_TEST_COLLECTORS=ash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
   scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
-CI runs under dash and BusyBox ash; validate the actual appliance shell,
-utilities and selected transport separately. Run permission cases as non-root.
+CI runs the suite under dash, under BusyBox ash with Ubuntu utilities, and
+under BusyBox ash with a BusyBox-first `PATH` (`busybox --install -s DIR`), in
+which every utility the collector uses is a BusyBox applet; curl and GNU wget
+still come from Ubuntu there. BusyBox features are compile-time options, so
+validate the actual appliance shell, utilities and selected transport separately.
+Run permission cases as non-root.

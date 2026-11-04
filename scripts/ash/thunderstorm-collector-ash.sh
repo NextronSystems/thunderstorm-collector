@@ -22,9 +22,9 @@ VERSION="0.5.0"
 
 THUNDERSTORM_SERVER=""       # Required hostname/IPv4, e.g. "192.0.2.10"; no http://, port or path.
 THUNDERSTORM_PORT=8080        # TCP port, 1..65535; independent of USE_SSL.
-USE_SSL=0                    # 0 = HTTP; 1 = HTTPS (curl/GNU wget required).
+USE_SSL=0                    # 0 = HTTP; 1 = HTTPS (curl/GNU wget required). A set CA_CERT implies 1.
 INSECURE=0                   # Keep 0: verify TLS certificates. 1 is for explicit testing only.
-CA_CERT=""                  # Empty = system trust; otherwise PEM CA file for HTTPS.
+CA_CERT=""                  # Empty = system trust; otherwise PEM CA file for HTTPS (turns HTTPS on).
 SOURCE_NAME=""              # Empty = detected hostname; otherwise an inventory/incident label.
 
 # Recursive scan roots: ONE DIRECTORY PER LINE inside the quotes, including spaces.
@@ -41,6 +41,7 @@ MAX_FILE_SIZE_KB=2048         # KiB (1024 bytes), 1..1048576; 2048 = 2 MiB, incl
 # Links, special/network filesystems and cloud directories remain excluded.
 
 RETRIES=3                    # TOTAL upload attempts including the first, 1..10.
+SERVER_WAIT=600              # Seconds to wait for a lost server (polls /api/status), 0..86400; 0 = stop at once.
 DRY_RUN=0                    # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
 DEBUG=0                      # 1 = additional diagnostics (--debug / --no-debug).
 
@@ -58,6 +59,12 @@ WORK_DIR=""
 LOG_PATH=""
 CA_DIR=""         # empty directory that makes --ca-cert the only trust anchor
 SCAN_DIRS_SET=0   # 1 once the user has overridden via --dir
+NO_SSL_SET=0      # 1 when --no-ssl was the last TLS choice on the command line
+ATTEMPT_CLASS=""  # last upload attempt: ok, http (server answered), busy (503), transport, local
+SUBMIT_OUTAGE=0   # 1 when every attempt for the last file got no HTTP status or 503
+OUTAGE_FILES=3    # consecutive outage files before uploads pause and /api/status is polled
+SERVER_LOST=0     # 1 once the outage window ran out
+OUTAGE_WAITED=0   # seconds the last outage wait lasted
 
 FILES_SCANNED=0
 FILES_SUBMITTED=0
@@ -86,7 +93,8 @@ CLOUD_DIR_NAMES="onedrive dropbox .dropbox googledrive nextcloud owncloud mega m
 # space-separated CLOUD_DIR_NAMES list cannot hold them.
 CLOUD_DIR_NAMES_SPACED="google drive|icloud drive"
 
-# get_excluded_mounts: parse /proc/mounts, return mount points for network/special FS
+# get_excluded_mounts: parse /proc/mounts, return mount points for network/special FS.
+# Only the text is read: a stat of a stale hard NFS/CIFS/sshfs mount blocks forever.
 get_excluded_mounts() {
     [ -r /proc/mounts ] || return 0
     while IFS=' ' read -r _gem_dev _gem_mp _gem_fs _gem_rest; do
@@ -94,6 +102,17 @@ get_excluded_mounts() {
             *" $_gem_fs "*) printf '%b\n' "$_gem_mp" ;;
         esac
     done < /proc/mounts
+}
+
+# path_is_under PATH ROOT: string comparison only, never a filesystem call.
+path_is_under() {
+    case "$2" in
+        /) case "$1" in /*) return 0 ;; esac; return 1 ;;
+    esac
+    case "$1" in
+        "$2"|"$2"/*) return 0 ;;
+    esac
+    return 1
 }
 
 # is_cloud_path: check directory components, never the regular-file leaf name.
@@ -156,11 +175,22 @@ on_signal() {
     exit 1
 }
 
+console_lost() {
+    LOG_TO_CMDLINE=0
+    PROGRESS=0
+    PROGRESS_ACTIVE=0
+}
+
 trap on_exit 0
 # dash and BusyBox ash do not run the EXIT trap when an untrapped signal kills the
 # shell, so a closed terminal (HUP) or QUIT would leave the workspace, which holds a
 # copy of the in-flight sample, behind. The next run over /tmp would then upload it.
 trap on_signal INT TERM HUP QUIT
+# A closed console (ssh without a tty, "| tee" ended by Ctrl-C) would otherwise kill
+# the run with SIGPIPE on the next message: no end or interrupted marker, workspace
+# left behind. Console output stops; file and syslog logging continue. A handler,
+# not '' (ignore), so that child processes keep the default SIGPIPE action.
+trap console_lost PIPE
 
 log_msg() {
     _lm_level="$1"
@@ -177,7 +207,7 @@ log_msg() {
         if ! printf "%s %s %s\n" "$_lm_ts" "$_lm_level" "$_lm_clean" >> "$LOGFILE" 2>/dev/null; then
             LOG_TO_FILE=0
             printf "%s warn Could not write to log file '%s'; disabling file logging\n" \
-                "$_lm_ts" "$LOGFILE" >&2
+                "$_lm_ts" "$LOGFILE" >&2 || console_lost
         fi
     fi
 
@@ -193,20 +223,11 @@ log_msg() {
     fi
 
     if [ "$LOG_TO_CMDLINE" -eq 1 ]; then
-        case "$_lm_level" in
-            error|warn)
-                if [ "$PROGRESS_ACTIVE" -eq 1 ]; then
-                    printf '\r%80s\r' '' >&2
-                fi
-                printf "[%s] %s\n" "$_lm_level" "$_lm_clean" >&2
-                ;;
-            *)
-                if [ "$PROGRESS_ACTIVE" -eq 1 ]; then
-                    printf '\r%80s\r' '' >&2
-                fi
-                printf "[%s] %s\n" "$_lm_level" "$_lm_clean" >&2
-                ;;
-        esac
+        if [ "$PROGRESS_ACTIVE" -eq 1 ]; then
+            printf '\r%80s\r' '' >&2 2>/dev/null || console_lost
+        fi
+        # A failed write means the console is gone; stop writing to it.
+        printf "[%s] %s\n" "$_lm_level" "$_lm_clean" >&2 2>/dev/null || console_lost
     fi
 }
 
@@ -243,9 +264,11 @@ Options:
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
-  --ca-cert <path>           Path to custom CA certificate bundle for TLS
+  --ca-cert <path>           Path to custom CA certificate bundle for TLS (implies --ssl)
   --async                    Accepted for compatibility; uploads are always asynchronous
   --retries <num>            Total attempts per file, 1..10 (default: 3)
+  --server-wait <sec>        After 3 files in a row get no answer, poll /api/status for up
+                             to this long before stopping, 0..86400 (default: 600)
   --dry-run                  Do not upload, only show what would be submitted
   --debug                    Enable debug log messages
   --log-file <path>          Log file path (default: ./thunderstorm.log)
@@ -293,6 +316,7 @@ detect_source_name() {
 urlencode() {
     # POSIX-safe urlencode: no bash C-style for loop or ${var:i:1}
     # Process od hex output word by word via set --
+    _ue_input="$1"
     _ue_hex="$(printf '%s' "$1" | od -v -An -tx1 | tr -d '\n')"
     # shellcheck disable=SC2086
     set -- $_ue_hex
@@ -318,11 +342,15 @@ urlencode() {
             _ue_result="${_ue_result}%$(printf '%02X' "$_ue_dec")"
         fi
     done
+    # A broken od yields nothing; never pass that off as an encoded value.
+    [ -z "$_ue_input" ] || [ -n "$_ue_result" ] || return 1
     printf '%s' "$_ue_result"
 }
 
 build_query_source() {
-    [ -n "$1" ] && printf "?source=%s" "$(urlencode "$1")"
+    [ -n "$1" ] || return 0
+    _bqs_value="$(urlencode "$1")" || return 1
+    printf "?source=%s" "$_bqs_value"
 }
 
 sanitize_filename_for_multipart() {
@@ -500,8 +528,13 @@ detect_upload_tool() {
         return 0
     fi
     if [ "$USE_SSL" -eq 0 ] && command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-        UPLOAD_TOOL="nc"
-        return 0
+        # BusyBox timeout before 1.30 only knows "timeout -t SECONDS COMMAND", so every
+        # "timeout 60 nc ..." would fail. Use nc only if the current syntax works.
+        if timeout 5 sh -c : >/dev/null 2>&1; then
+            UPLOAD_TOOL="nc"
+            return 0
+        fi
+        log_msg warn "'timeout SECONDS COMMAND' does not work (BusyBox timeout before 1.30 needs -t); the nc transport is unavailable"
     fi
     if command -v wget >/dev/null 2>&1; then
         log_msg warn "Only GNU wget is supported for multipart uploads; BusyBox/unknown wget is refused"
@@ -516,7 +549,10 @@ upload_with_curl() {
     _uc_safe_name="$(sanitize_filename_for_multipart "$_uc_filename")"
     _uc_resp="$WORK_DIR/upload.response"
     _uc_hdr="$WORK_DIR/upload.headers"
-    : > "$_uc_hdr" || return 91
+    ATTEMPT_CLASS=local
+    # curl creates -o only when data arrives; an empty file keeps a refused
+    # connection apart from an oversized response.
+    : > "$_uc_hdr" && : > "$_uc_resp" || return 91
 
     # Build TLS arguments safely to avoid word-splitting on paths with spaces
     set -- -sS -X POST --connect-timeout 10 --max-time 60 -o "$_uc_resp" -D "$_uc_hdr" -w '%{http_code}'
@@ -530,9 +566,15 @@ upload_with_curl() {
     # Use -w to capture HTTP status code; do NOT use --fail so we can inspect 503
     _uc_http_code="$(run_http curl --disable --noproxy '*' --globoff "$@" < "$_uc_filepath" 2>"${_uc_resp}.err")"
     _uc_code=$?
+    ATTEMPT_CLASS=http
     response_is_bounded "$_uc_resp" "$_uc_hdr" || return 97
 
     if [ "$_uc_code" -ne 0 ]; then
+        case "$_uc_http_code" in
+            503) ATTEMPT_CLASS=busy ;;
+            [1-5][0-9][0-9]) ;;
+            *) ATTEMPT_CLASS=transport ;;
+        esac
         _uc_err="$(head -c 4096 "${_uc_resp}.err" 2>/dev/null | tr '\r\n' '  ')"
         log_msg debug "curl error (code $_uc_code) for '$_uc_filepath': $_uc_err"
         return "$_uc_code"
@@ -548,6 +590,7 @@ upload_with_curl() {
             RETRY_AFTER="$_uc_ra"
         fi
         log_msg warn "Server returned 503 for '$_uc_filepath'"
+        ATTEMPT_CLASS=busy
         return 103
     fi
 
@@ -561,6 +604,7 @@ upload_with_curl() {
             ;;
     esac
 
+    ATTEMPT_CLASS=ok
     return 0
 }
 
@@ -599,10 +643,12 @@ upload_with_wget() {
     _uw_filepath="$2"
     _uw_filename="$3"
     _uw_safe_name="$(sanitize_filename_for_multipart "$_uw_filename")"
+    ATTEMPT_CLASS=local
     _uw_boundary="$(generate_safe_boundary "$_uw_filepath")" || return 95
     _uw_body="$WORK_DIR/upload.body"
     _uw_resp="$WORK_DIR/upload.response"
     _uw_hdr="$WORK_DIR/upload.headers"
+    : > "$_uw_resp" || return 95
 
     {
         printf -- "--%s\r\n" "$_uw_boundary"
@@ -624,12 +670,18 @@ upload_with_wget() {
 
     run_http wget --no-config --no-proxy "$@" 2>"$_uw_hdr"
     _uw_code=$?
+    ATTEMPT_CLASS=http
     response_is_bounded "$_uw_resp" "$_uw_hdr" || return 97
 
     # Parse HTTP status code from wget's server response output
     # wget -S prints "  HTTP/1.1 200 OK" lines to stderr
     # Only real status lines count, never HTTP-looking diagnostic headers.
     _uw_http_code="$(http_status "$_uw_hdr")"
+    case "$_uw_http_code" in
+        503) ATTEMPT_CLASS=busy ;;
+        [1-5][0-9][0-9]) ;;
+        *) ATTEMPT_CLASS=transport ;;
+    esac
 
     # An incomplete 2xx transport is not a successful upload.
     if [ "$_uw_code" -ne 0 ] && [ "$_uw_http_code" != 503 ]; then
@@ -655,6 +707,7 @@ upload_with_wget() {
         *) log_msg error "Server returned HTTP ${_uw_http_code:-unknown} for '$_uw_filepath'"; return 92 ;;
     esac
 
+    ATTEMPT_CLASS=ok
     return 0
 }
 
@@ -663,6 +716,7 @@ upload_with_nc() {
     # Used as a fallback when only BusyBox wget + nc are available.
     # WARNING: nc does not support TLS — only works with plain HTTP.
     _nc_endpoint="$1"    # full URL: http://host:port/path?query
+    ATTEMPT_CLASS=local
     case "$_nc_endpoint" in
         https://*) log_msg error "nc (netcat) does not support HTTPS; use curl or wget"; return 99 ;;
     esac
@@ -709,11 +763,13 @@ upload_with_nc() {
     } > "$_nc_request" || return 98
     run_http timeout 60 nc -w 30 "$_nc_host" "$_nc_port" < "$_nc_request" > "$_nc_resp_file" 2>/dev/null
     _nc_rc=$?
+    ATTEMPT_CLASS=http
     response_is_bounded "$_nc_resp_file" || return 97
 
     # No response or connection failure
     if [ "$_nc_rc" -ne 0 ] || [ ! -s "$_nc_resp_file" ]; then
         log_msg error "Incomplete nc transport (code $_nc_rc) for '$_nc_filepath'"
+        ATTEMPT_CLASS=transport
         return 1
     fi
 
@@ -771,12 +827,14 @@ upload_with_nc() {
             RETRY_AFTER="$_nc_ra"
         fi
         log_msg warn "Server returned 503 for '$_nc_filepath'"
+        ATTEMPT_CLASS=busy
         return 103
     fi
 
     # Accept 2xx as success
     case "$_nc_http_code" in
         2[0-9][0-9])
+            ATTEMPT_CLASS=ok
             return 0
             ;;
     esac
@@ -790,6 +848,7 @@ upload_with_nc() {
 # Handles backslash, double-quote, and all control characters (0x00-0x1F)
 # Uses od + byte-by-byte rebuild for full POSIX portability
 json_escape() {
+    _je_input="$1"
     _je_hex="$(printf '%s' "$1" | od -v -An -tx1 | tr -d '\n')"
     _je_result=""
     # shellcheck disable=SC2086
@@ -820,6 +879,7 @@ json_escape() {
             _je_result="${_je_result}$(printf "\\$(printf '%03o' "$_je_dec")")"
         fi
     done
+    [ -z "$_je_input" ] || [ -n "$_je_result" ] || return 1
     printf '%s' "$_je_result"
 }
 
@@ -840,14 +900,19 @@ collection_marker() {
     _cm_resp="$WORK_DIR/marker.response"
     _cm_hdr="$WORK_DIR/marker.headers"
 
-    _cm_safe_source="$(json_escape "$SOURCE_NAME")"
+    _cm_hostname="$(uname -n 2>/dev/null || echo unknown)"
+    if ! _cm_safe_source="$(json_escape "$SOURCE_NAME")" ||
+        ! _cm_safe_hostname="$(json_escape "$_cm_hostname")" ||
+        ! _cm_safe_id="$(json_escape "$_cm_scan_id")"; then
+        log_msg error "Cannot JSON-encode the collection marker fields (od failed)"
+        return 1
+    fi
     _cm_body="{\"type\":\"${_cm_type}\""
-    _cm_safe_hostname="$(json_escape "$(uname -n 2>/dev/null || echo unknown)")"
     _cm_body="${_cm_body},\"source\":\"${_cm_safe_source}\""
     _cm_body="${_cm_body},\"hostname\":\"${_cm_safe_hostname}\""
     _cm_body="${_cm_body},\"collector\":\"ash/${VERSION}\""
     _cm_body="${_cm_body},\"timestamp\":\"$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u)\""
-    [ -n "$_cm_scan_id" ] && _cm_body="${_cm_body},\"scan_id\":\"$(json_escape "$_cm_scan_id")\""
+    [ -n "$_cm_scan_id" ] && _cm_body="${_cm_body},\"scan_id\":\"${_cm_safe_id}\""
     [ -n "$_cm_stats"   ] && _cm_body="${_cm_body},${_cm_stats}"
     _cm_body="${_cm_body}}"
 
@@ -907,7 +972,9 @@ submit_file() {
     _sf_try=1
     _sf_rc=1
     _sf_wait=2
+    _sf_answered=0
     RETRY_AFTER=""
+    SUBMIT_OUTAGE=0
 
     if [ "$DRY_RUN" -eq 1 ]; then
         log_msg info "DRY-RUN: would submit '$_sf_filepath'"
@@ -916,6 +983,7 @@ submit_file() {
 
     while [ "$_sf_try" -le "$RETRIES" ]; do
         RETRY_AFTER=""
+        ATTEMPT_CLASS=local
 
         case "$UPLOAD_TOOL" in
             curl)
@@ -930,6 +998,11 @@ submit_file() {
         esac
 
         [ "$_sf_rc" -eq 0 ] && return 0
+        # Only an attempt without any HTTP status, or a 503, looks like a lost server.
+        case "$ATTEMPT_CLASS" in
+            transport|busy) ;;
+            *) _sf_answered=1 ;;
+        esac
 
         log_msg warn "Upload failed for '$_sf_filepath' (attempt ${_sf_try}/${RETRIES}, code ${_sf_rc})"
         if [ "$_sf_try" -lt "$RETRIES" ]; then
@@ -946,7 +1019,88 @@ submit_file() {
         _sf_try=$((_sf_try + 1))
     done
 
+    [ "$_sf_answered" -eq 1 ] || SUBMIT_OUTAGE=1
     return "$_sf_rc"
+}
+
+# server_status_ok BASE_URL: 0 when GET /api/status answers 2xx.
+server_status_ok() {
+    _ss_url="${1%/}/api/status"
+    _ss_resp="$WORK_DIR/status.response"
+    _ss_hdr="$WORK_DIR/status.headers"
+    _ss_code=""
+    : > "$_ss_resp" && : > "$_ss_hdr" || return 1
+    case "$UPLOAD_TOOL" in
+        curl)
+            set -- -sS -o "$_ss_resp" -w '%{http_code}' --connect-timeout 5 --max-time 10
+            [ "$INSECURE" -eq 1 ] && set -- "$@" -k
+            [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT" --capath "$CA_DIR"
+            _ss_code="$(run_http curl --disable --noproxy '*' --globoff "$@" "$_ss_url" 2>/dev/null)" || return 1
+            ;;
+        wget)
+            set -- -O "$_ss_resp" -S --tries=1 --max-redirect=0 --timeout=10
+            [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
+            [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT" "--ca-directory=$CA_DIR"
+            run_http wget --no-config --no-proxy "$@" "$_ss_url" 2>"$_ss_hdr" || return 1
+            _ss_code="$(http_status "$_ss_hdr")"
+            ;;
+        nc)
+            printf 'GET /api/status HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' \
+                "$THUNDERSTORM_SERVER" "$THUNDERSTORM_PORT" > "$WORK_DIR/status.request" || return 1
+            run_http timeout 15 nc -w 10 "$THUNDERSTORM_SERVER" "$THUNDERSTORM_PORT" \
+                < "$WORK_DIR/status.request" > "$_ss_resp" 2>/dev/null
+            # Liveness only: a 2xx status line is enough, the body is not used.
+            _ss_code="$(head -1 "$_ss_resp" | tr -d '\r' | awk \
+                '$1 ~ /^HTTP\/1\.[01]$/ && $2 ~ /^[0-9][0-9][0-9]$/ {print $2}')"
+            ;;
+        *) return 1 ;;
+    esac
+    case "$_ss_code" in
+        2[0-9][0-9]) return 0 ;;
+    esac
+    return 1
+}
+
+# wait_for_server BASE_URL: pause uploads after OUTAGE_FILES files in a row got no
+# answer, and poll /api/status with capped backoff for up to SERVER_WAIT seconds.
+# Returns 0 once the server answers, 1 when the window ran out; OUTAGE_WAITED
+# holds the seconds waited.
+wait_for_server() {
+    _wfs_start="$(date +%s 2>/dev/null)"
+    is_integer "$_wfs_start" || _wfs_start=""
+    _wfs_waited=0
+    _wfs_slept=0
+    _wfs_delay=2
+    if [ "$SERVER_WAIT" -eq 0 ]; then
+        log_msg warn "No server response for $OUTAGE_FILES files in a row; server wait is 0"
+    else
+        log_msg warn "No server response for $OUTAGE_FILES files in a row; pausing uploads and polling ${1%/}/api/status for up to ${SERVER_WAIT}s"
+    fi
+    while [ "$_wfs_waited" -lt "$SERVER_WAIT" ]; do
+        _wfs_sleep=$((SERVER_WAIT - _wfs_waited))
+        [ "$_wfs_sleep" -gt "$_wfs_delay" ] && _wfs_sleep="$_wfs_delay"
+        sleep "$_wfs_sleep"
+        _wfs_slept=$((_wfs_slept + _wfs_sleep))
+        _wfs_waited="$_wfs_slept"
+        # Prefer the wall clock: each poll can take up to its own timeout. The
+        # sleeps alone are a lower bound if date +%s is missing or jumps back.
+        if [ -n "$_wfs_start" ]; then
+            _wfs_now="$(date +%s 2>/dev/null)"
+            if is_integer "$_wfs_now" && [ $((_wfs_now - _wfs_start)) -gt "$_wfs_waited" ]; then
+                _wfs_waited=$((_wfs_now - _wfs_start))
+            fi
+        fi
+        OUTAGE_WAITED="$_wfs_waited"
+        if server_status_ok "$1"; then
+            log_msg info "Server reachable again after ${_wfs_waited}s; resuming with the next file"
+            return 0
+        fi
+        log_msg debug "Server still unreachable after ${_wfs_waited}s"
+        _wfs_delay=$((_wfs_delay * 2))
+        [ "$_wfs_delay" -gt 60 ] && _wfs_delay=60
+    done
+    OUTAGE_WAITED="$_wfs_waited"
+    return 1
 }
 
 parse_args() {
@@ -989,8 +1143,12 @@ parse_args() {
                 ;;
             --ssl)
                 USE_SSL=1
+                NO_SSL_SET=0
                 ;;
-            --no-ssl) USE_SSL=0 ;;
+            --no-ssl)
+                USE_SSL=0
+                NO_SSL_SET=1
+                ;;
             --verify-tls) INSECURE=0 ;;
             -k|--insecure)
                 INSECURE=1
@@ -1006,6 +1164,11 @@ parse_args() {
             --retries)
                 [ -n "$2" ] || die "Missing value for $_pa_arg"
                 RETRIES="$2"
+                shift
+                ;;
+            --server-wait)
+                [ -n "$2" ] || die "Missing value for $_pa_arg"
+                SERVER_WAIT="$2"
                 shift
                 ;;
             --dry-run)
@@ -1084,11 +1247,16 @@ validate_config() {
     MAX_AGE="$(normalize_uint "$MAX_AGE" 0 36500 max-age)" || exit 2
     MAX_FILE_SIZE_KB="$(normalize_uint "$MAX_FILE_SIZE_KB" 1 1048576 max-size-kb)" || exit 2
     RETRIES="$(normalize_uint "$RETRIES" 1 10 retries)" || exit 2
+    SERVER_WAIT="$(normalize_uint "$SERVER_WAIT" 0 86400 server-wait)" || exit 2
     case "$THUNDERSTORM_SERVER" in
         ''|-*|*[!a-zA-Z0-9._-]*) die "Server must be an IPv4 address or DNS hostname, without a scheme or path" ;;
     esac
     [ -n "$SCAN_DIRS" ]              || die "At least one directory is required"
     if [ -n "$CA_CERT" ]; then
+        # A CA certificate only makes sense with TLS; never send samples over plain
+        # HTTP (or pick the TLS-less nc transport) because --ssl was forgotten.
+        [ "$NO_SSL_SET" -eq 0 ] || die "--no-ssl conflicts with the CA certificate '$CA_CERT' (--ca-cert or CA_CERT); a CA certificate requires HTTPS"
+        USE_SSL=1
         [ -f "$CA_CERT" ] && [ -r "$CA_CERT" ] || die "CA certificate file is missing or unreadable"
     fi
     if [ "$INSECURE" -eq 1 ]; then
@@ -1116,6 +1284,12 @@ main() {
             exit 2
         }
     done
+    # Presence is not enough on BusyBox. Its od without CONFIG_DESKTOP has no -A/-t,
+    # so every source and marker field would silently become an empty string.
+    [ "$(printf A | od -v -An -tx1 2>/dev/null | tr -d ' \n')" = 41 ] ||
+        die "od does not support 'od -v -An -tx1' (BusyBox built without CONFIG_DESKTOP?); a full od is required"
+    [ "$(printf xy | head -c 1 2>/dev/null)" = x ] ||
+        die "head does not support 'head -c BYTES'; a head with -c is required"
     WORK_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/thunderstorm.XXXXXX")" ||
         die "Cannot create private temporary directory"
     resolve_directory "$WORK_DIR" || die "Cannot access temporary directory or unsupported newline path"
@@ -1145,7 +1319,8 @@ main() {
             die "Cannot create a CA directory in the private temporary directory"
     fi
 
-    _query_source="$(build_query_source "$SOURCE_NAME")"
+    _query_source="$(build_query_source "$SOURCE_NAME")" ||
+        die "Cannot percent-encode the source name (od failed)"
     _base_url="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
     _api_endpoint="${_base_url}/api/checkAsync${_query_source}"
     log_msg debug "Base URL: $_base_url"
@@ -1170,6 +1345,7 @@ main() {
     log_msg info "Max age (days): $MAX_AGE"
     log_msg info "Max size (KiB): $MAX_FILE_SIZE_KB"
     log_msg info "Source: $SOURCE_NAME"
+    log_msg debug "Server wait (s): $SERVER_WAIT"
     log_msg info "Scan roots (recursive; exclusions apply):"
     while IFS= read -r _root; do
         log_msg info "  Scan root: $_root"
@@ -1190,6 +1366,16 @@ EOF
     # Store in globals for signal handler access
     _GLOBAL_BASE_URL="$_base_url"
     _GLOBAL_SCAN_ID=""
+
+    # Read the mount table before the begin marker and never stat its entries:
+    # a stale hard NFS/CIFS/sshfs mount anywhere would block that stat forever.
+    get_excluded_mounts > "$WORK_DIR/mounts.list" || die "Cannot write excluded mount list"
+    # Older BusyBox find builds may not implement batching. Probe once and
+    # retain the one-file fallback rather than raising the runtime requirement.
+    _find_exec_end=';'
+    if find "$WORK_DIR" -prune -exec sh -c ':' sh '{}' + >/dev/null 2>&1; then
+        _find_exec_end=+
+    fi
 
     # Send collection begin marker; capture scan_id if server returns one
     # Retry once after 2s on initial connection failure
@@ -1215,9 +1401,10 @@ EOF
             log_msg info "Collection scan_id: $_SCAN_ID"
             _GLOBAL_SCAN_ID="$_SCAN_ID"
             # Check if endpoint already has query params
+            _scan_id_query="$(urlencode "$_SCAN_ID")" || die "Cannot percent-encode the scan_id (od failed)"
             case "$_api_endpoint" in
-                *"?"*) _api_endpoint="${_api_endpoint}&scan_id=$(urlencode "$_SCAN_ID")" ;;
-                *)     _api_endpoint="${_api_endpoint}?scan_id=$(urlencode "$_SCAN_ID")" ;;
+                *"?"*) _api_endpoint="${_api_endpoint}&scan_id=${_scan_id_query}" ;;
+                *)     _api_endpoint="${_api_endpoint}?scan_id=${_scan_id_query}" ;;
             esac
             log_msg debug "API endpoint (with scan_id): $_api_endpoint"
         else
@@ -1228,13 +1415,8 @@ EOF
     # Write the newline-separated directory list to a temp file so the while
     # loop runs in the current shell (not a subshell). A pipe would lose all
     # counter increments (FILES_SCANNED etc.) due to POSIX subshell semantics.
-    get_excluded_mounts > "$WORK_DIR/mounts.list" || die "Cannot write excluded mount list"
-    # Older BusyBox find builds may not implement batching. Probe once and
-    # retain the one-file fallback rather than raising the runtime requirement.
-    _find_exec_end=';'
-    if find "$WORK_DIR" -prune -exec sh -c ':' sh '{}' + >/dev/null 2>&1; then
-        _find_exec_end=+
-    fi
+    _outage_files=0
+    _not_attempted=0
     _dirs_file="$WORK_DIR/directories.list"
     printf '%s\n' "$SCAN_DIRS" > "$_dirs_file" || die "Cannot write directory list"
 
@@ -1267,11 +1449,14 @@ EOF
             set -- "$_scandir"
             set -- "$@" -path "$(escape_find_path "$WORK_DIR")" -prune -o
             [ -n "$LOG_PATH" ] && set -- "$@" -path "$(escape_find_path "$LOG_PATH")" -prune -o
+            # Only exclusions under this root matter. Compare strings: a stat of a
+            # stale network mount point would hang the run.
             for _ep in $EXCLUDE_PATHS; do
-                [ -d "$_ep" ] && set -- "$@" -path "$_ep" -prune -o
+                path_is_under "$_ep" "$_scandir" && set -- "$@" -path "$_ep" -prune -o
             done
             while IFS= read -r _ep; do
-                [ -n "$_ep" ] && [ -d "$_ep" ] && set -- "$@" -path "$(escape_find_path "$_ep")" -prune -o
+                [ -n "$_ep" ] && path_is_under "$_ep" "$_scandir" &&
+                    set -- "$@" -path "$(escape_find_path "$_ep")" -prune -o
             done < "$WORK_DIR/mounts.list"
             set -- "$@" -type f
             [ "$MAX_AGE" -gt 0 ] && set -- "$@" -mtime "-${MAX_AGE}"
@@ -1318,8 +1503,11 @@ EOF
             # Progress reporting (based on lines consumed, not files processed)
             if [ "$PROGRESS" -eq 1 ] && [ "$_total_in_dir" -gt 0 ]; then
                 _pct=$(( _current_in_dir * 100 / _total_in_dir ))
-                printf '\r[%d/%d] %d%% - %s' "$_current_in_dir" "$_total_in_dir" "$_pct" "$_scandir" >&2
-                PROGRESS_ACTIVE=1
+                if printf '\r[%d/%d] %d%% - %s' "$_current_in_dir" "$_total_in_dir" "$_pct" "$_scandir" >&2 2>/dev/null; then
+                    PROGRESS_ACTIVE=1
+                else
+                    console_lost
+                fi
             fi
 
             FILES_SCANNED=$((FILES_SCANNED + 1))
@@ -1352,23 +1540,60 @@ EOF
             log_msg debug "Submitting '$_file_path'"
             if submit_file "$_api_endpoint" "$_file_path"; then
                 FILES_SUBMITTED=$((FILES_SUBMITTED + 1))
+                _outage_files=0
             else
                 FILES_FAILED=$((FILES_FAILED + 1))
                 log_msg error "Could not upload '$_file_path'"
+                if [ "$SUBMIT_OUTAGE" -eq 0 ]; then
+                    _outage_files=0
+                else
+                    _outage_files=$((_outage_files + 1))
+                    if [ "$_outage_files" -ge "$OUTAGE_FILES" ]; then
+                        if wait_for_server "$_base_url"; then
+                            _outage_files=0
+                        else
+                            SERVER_LOST=1
+                            _not_attempted=$((_total_in_dir - _current_in_dir))
+                            break
+                        fi
+                    fi
+                fi
             fi
         done
         exec 4<&-
         # Clear progress line
         if [ "$PROGRESS" -eq 1 ] && [ "$_total_in_dir" -gt 0 ]; then
-            printf '\r%80s\r' '' >&2
+            printf '\r%80s\r' '' >&2 2>/dev/null || console_lost
             PROGRESS_ACTIVE=0
         fi
+        [ "$SERVER_LOST" -eq 1 ] && break
     done
+    # Roots after the one in progress were never listed.
+    _roots_left=0
+    if [ "$SERVER_LOST" -eq 1 ]; then
+        while IFS= read -r _scandir <&3; do
+            [ -n "$_scandir" ] && _roots_left=$((_roots_left + 1))
+        done
+    fi
     exec 3<&-
 
     if [ "$START_TS" -gt 0 ] 2>/dev/null; then
         _elapsed=$(( $(date +%s 2>/dev/null || echo "$START_TS") - START_TS ))
         [ "$_elapsed" -lt 0 ] && _elapsed=0
+    fi
+
+    if [ "$SERVER_LOST" -eq 1 ]; then
+        # Later roots are not listed yet, so only the current root's files can be counted.
+        # The files not attempted stay out of every counter.
+        log_msg error "Server unreachable for ${OUTAGE_WAITED}s, stopping ($_not_attempted listed files in the current root and $_roots_left further roots not attempted)"
+        log_msg info "Run stopped: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$_elapsed"
+        if [ "${_begin_ok:-0}" -eq 1 ]; then
+            # Best effort: the server was just found unreachable.
+            _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_elapsed}}"
+            collection_marker "$_base_url" "interrupted" "$_SCAN_ID" "$_stats" >/dev/null ||
+                log_msg warn "Interrupted collection marker could not be sent"
+        fi
+        return 1
     fi
 
     log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$_elapsed"
