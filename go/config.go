@@ -27,6 +27,8 @@ type Config struct {
 	MagicHeaders     []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
 	AllFilesystems   bool     `yaml:"all-filesystems" description:"Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type."`
 	UploadsPerMinute int      `yaml:"uploads-per-minute" description:"Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays."`
+	ResponseTimeout  int      `yaml:"response-timeout" description:"Seconds to wait for Thunderstorm's answer once a request has been sent. Zero selects the default: 120 seconds, or 1800 seconds with --upload-synchronous, where Thunderstorm scans the file before it answers."`
+	ServerWait       int      `yaml:"server-wait" description:"Seconds to wait for Thunderstorm to come back after 3 files in a row could not be delivered. Meanwhile the collector polls /api/status; when the time runs out it stops and exits with status 1. Zero stops at once."`
 	DryRun           bool     `yaml:"dry-run" description:"Collect files without actually sending them to Thunderstorm. Useful for testing and previewing what would be collected. Server connection is not required in dry-run mode."`
 	Template         string   `flag:"template" description:"Process default scan parameters from this YAML file." shorthand:"t"`
 	Help             bool     `flag:"help" description:"Show this help." shorthand:"h"`
@@ -36,6 +38,7 @@ var DefaultConfig = Config{
 	Threads:       1,
 	MaxFileSizeMB: 100,
 	Port:          8080,
+	ServerWait:    600,
 	RootPaths:     []string{getRootPath()},
 	Source:        HostnameOrBlank(),
 	Template:      defaultConfigFile,
