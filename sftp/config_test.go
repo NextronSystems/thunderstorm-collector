@@ -60,7 +60,12 @@ func TestResponseTimeoutDefaultsAndValidation(t *testing.T) {
 	if settings, err = validateConfig(explicit); err != nil || settings.ResponseTimeout.Seconds() != 90 {
 		t.Errorf("explicit: %v, %v; want 90s", settings.ResponseTimeout, err)
 	}
-	for _, value := range []string{"90", "-5s", "soon"} {
+	// A plain number is seconds, as in the Go collector's config.yml.
+	explicit.ResponseTimeout = "90"
+	if settings, err = validateConfig(explicit); err != nil || settings.ResponseTimeout.Seconds() != 90 {
+		t.Errorf("plain seconds: %v, %v; want 90s", settings.ResponseTimeout, err)
+	}
+	for _, value := range []string{"0", "-5", "-5s", "soon"} {
 		invalid := base
 		invalid.ResponseTimeout = value
 		if _, err := validateConfig(invalid); err == nil {

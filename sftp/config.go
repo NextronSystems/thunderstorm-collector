@@ -46,6 +46,8 @@ type Config struct {
 
 	// ResponseTimeout bounds the wait for Thunderstorm's answer to an upload.
 	ResponseTimeout string `yaml:"response-timeout"`
+	SFTPTimeout     string `yaml:"sftp-timeout"`
+	ServerWait      int    `yaml:"server-wait"`
 
 	Threads     int    `yaml:"threads"`
 	WalkThreads int    `yaml:"walk-threads"`
@@ -64,6 +66,7 @@ func defaultConfig() Config {
 		Port:          8080,
 		Threads:       4,
 		WalkThreads:   4,
+		ServerWait:    600,
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		config.KnownHosts = filepath.Join(home, ".ssh", "known_hosts")
@@ -95,7 +98,9 @@ func newFlagSet(config *Config, template *string, help *bool) *pflag.FlagSet {
 	flags.BoolVar(&config.Insecure, "insecure", config.Insecure, "Don't verify the Thunderstorm HTTPS certificate.")
 	flags.StringVarP(&config.Source, "source", "o", config.Source, "Source name reported to Thunderstorm (default: the SFTP host).")
 	flags.BoolVar(&config.Sync, "upload-synchronous", config.Sync, "Use /api/check and log each result instead of /api/checkAsync.")
-	flags.StringVar(&config.ResponseTimeout, "response-timeout", config.ResponseTimeout, "How long to wait for Thunderstorm's answer after an upload, e.g. 90s or 5m (default: 2m, or 30m with --upload-synchronous).")
+	flags.StringVar(&config.ResponseTimeout, "response-timeout", config.ResponseTimeout, "How long to wait for Thunderstorm's answer after an upload, e.g. 90s or 5m; a plain number is seconds (default: 2m, or 30m with --upload-synchronous).")
+	flags.StringVar(&config.SFTPTimeout, "sftp-timeout", config.SFTPTimeout, "Close the connection when the source has not answered a pending SFTP request for this long, e.g. 90s or 10m; a plain number is seconds (default: 5m).")
+	flags.IntVar(&config.ServerWait, "server-wait", config.ServerWait, "Seconds to wait for Thunderstorm to come back after 3 files in a row could not be delivered; /api/status is polled meanwhile. When the time runs out, the run stops with exit status 1. 0 stops at once.")
 	flags.IntVarP(&config.Threads, "threads", "r", config.Threads, "Parallel header checks and uploads.")
 	flags.IntVar(&config.WalkThreads, "walk-threads", config.WalkThreads, "Parallel directory listings.")
 	flags.BoolVar(&config.DryRun, "dry-run", config.DryRun, "Select files but upload nothing.")
@@ -161,6 +166,8 @@ type Settings struct {
 	Debug           bool
 	Sync            bool
 	ResponseTimeout time.Duration
+	SFTPTimeout     time.Duration
+	ServerWait      time.Duration
 	UploadURL       string
 	StatusURL       string
 }
@@ -190,12 +197,24 @@ func validateConfig(config Config) (Settings, error) {
 		settings.ResponseTimeout = 30 * time.Minute
 	}
 	if config.ResponseTimeout != "" {
-		timeout, err := time.ParseDuration(config.ResponseTimeout)
-		if err != nil || timeout <= 0 {
-			return settings, fmt.Errorf("response-timeout: %q is not a positive duration such as 90s or 5m", config.ResponseTimeout)
+		timeout, err := parseTimeout(config.ResponseTimeout)
+		if err != nil {
+			return settings, fmt.Errorf("response-timeout: %v", err)
 		}
 		settings.ResponseTimeout = timeout
 	}
+	settings.SFTPTimeout = 5 * time.Minute
+	if config.SFTPTimeout != "" {
+		timeout, err := parseTimeout(config.SFTPTimeout)
+		if err != nil {
+			return settings, fmt.Errorf("sftp-timeout: %v", err)
+		}
+		settings.SFTPTimeout = timeout
+	}
+	if config.ServerWait < 0 {
+		return settings, errors.New("server-wait: must be >= 0")
+	}
+	settings.ServerWait = time.Duration(config.ServerWait) * time.Second
 	if config.MaxAge != "" {
 		threshold, err := parseMaxAge(config.MaxAge)
 		if err != nil {
@@ -239,6 +258,23 @@ func validateConfig(config Config) (Settings, error) {
 
 // parseMaxAge follows the Go collector: a number with an optional s, m, h or d
 // suffix, in days without one.
+// parseTimeout reads a positive duration such as 90s or 5m. A plain number is
+// seconds, which is what the Go collector's response-timeout key holds, so one
+// config.yml serves both collectors.
+func parseTimeout(value string) (time.Duration, error) {
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0, fmt.Errorf("%q is not positive", value)
+		}
+		return time.Duration(seconds) * time.Second, nil
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return 0, fmt.Errorf("%q is not a positive duration such as 90s or 5m", value)
+	}
+	return timeout, nil
+}
+
 func parseMaxAge(value string) (time.Time, error) {
 	units := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour}
 	suffix := value[len(value)-1]
