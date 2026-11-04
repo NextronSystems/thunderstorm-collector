@@ -69,7 +69,7 @@ skip conditions.
 | Collector | Main tests | Representative coverage |
 |---|---|---|
 | Bash | [Integration suite](../scripts/tests/run_tests.sh), [robustness tests](../scripts/tests/test_bash_robustness.py) | Async uploads, binary and unusual filenames, exact size and age filters, missing/unreadable roots, dry-run, curl/GNU wget, partial responses, redirects, marker JSON limits, workspace/log exclusion, mount-path decoding, platform defaults, and Retry-After parsing. |
-| POSIX sh / ASH | [Compatibility checks](../scripts/tests/run_ash_regression_tests.sh), [robustness tests](../scripts/tests/test_ash_robustness.py) | dash/BusyBox-shell execution, curl/GNU wget/netcat behavior, rejection of unsafe fallbacks, newline-path refusal, cloud-directory matching, bounded diagnostics, batched and legacy traversal, retry limits, interruption, and cleanup. |
+| POSIX sh / ASH | [Compatibility checks](../scripts/tests/run_ash_regression_tests.sh), [robustness tests](../scripts/tests/test_ash_robustness.py) | dash/BusyBox-shell execution, BusyBox utility self-tests, curl/GNU wget/netcat behavior, rejection of unsafe fallbacks, newline-path refusal, cloud-directory matching, string-only mount exclusions, bounded diagnostics, batched and legacy traversal, retry limits, server-loss wait, closed console, interruption, and cleanup. |
 | Python 3 and 2 | [Small regression checks](../scripts/tests/run_python_regression_tests.sh), [robustness tests](../scripts/tests/test_python_robustness.py) | Payloads and source encoding, filtering, symlinks/FIFOs, missing/unreadable paths, changed-file snapshots, retries, incomplete responses, interruption, no-network dry-run reporting, and drift between the two standalone implementations. Includes simulated absence of legacy TLS verification APIs. |
 | Perl | [Robustness tests](../scripts/tests/test_perl_robustness.py), [large-file integration](../scripts/tests/test_perl_large.sh), [large-file harness controls](../scripts/tests/test_perl_large_harness.py) | LWP behavior, complete chunked HTTP/HTTPS framing, retries, marker handling, source alias compatibility, directory replacement, interruption during begin/upload, and a current-run large payload verified by size and SHA-256. Negative controls reject stale records and hidden collector failures. |
 | PowerShell, both files | [Robustness tests](../scripts/tests/test_powershell_robustness.py) | Payloads, filters, optional markers, incomplete/oversized responses, TLS trust versus hostname validation, redirects, file access failures, script drift, and explicit timeout failures. Windows runs also test locked files. |
@@ -95,12 +95,13 @@ that a stale `SYNC` environment variable does not change the endpoint.
 The source of truth is
 [script-collectors.yml](../.github/workflows/script-collectors.yml).
 It runs on relevant script/Makefile/workflow changes and can also be started
-manually. Linux and Windows jobs each have a 30-minute job limit. A docs-only
+manually. Linux and Windows jobs each have a 30-minute job limit, the BusyBox job 20 minutes. A docs-only
 change under `docs/` does not trigger this workflow through its path filter.
 
 | CI host | Configured execution |
 |---|---|
 | Ubuntu | Shared harness checks, release-asset tests, selected collectors against the stub, and available collector-specific suites. ASH runs under dash and BusyBox ash. Bash and Perl use the runner's installed runtimes. |
+| Ubuntu, BusyBox job | The ASH robustness suite under BusyBox ash with a BusyBox-first `PATH` (`busybox --install -s DIR`): every utility the collector uses is an Ubuntu BusyBox applet; curl and GNU wget still come from Ubuntu. |
 | Ubuntu with Docker | The Python robustness suite also runs under actual Python 2.7.18 and Python 3.4.10 in digest-pinned images, as a non-root user with read-only source mounts. |
 | Windows | Both PowerShell files run under **Windows PowerShell 5.1**. Batch runs under native cmd, Windows Script Host, and curl. Selected Windows collectors also upload fixtures to a Windows-built stub. |
 
@@ -308,8 +309,10 @@ them; record that explicitly.
 - A skip is not a pass. Distinguish **NOT SUPPORTED** for an intentional profile
   limitation from **NOT TESTED** for a missing runtime, tool, permission, or
   observable backend result. Supported failures are **FAIL**.
-- BusyBox ash on Ubuntu still uses many Ubuntu utilities. Test the actual
-  appliance userspace as well. A modern Perl run does not certify Perl 5.8.1 and
+- The main Ubuntu job runs BusyBox ash with Ubuntu utilities. The BusyBox job
+  replaces them with Ubuntu's BusyBox build, but BusyBox features are compile-time
+  options and curl/GNU wget still come from Ubuntu. Test the actual appliance
+  userspace as well. A modern Perl run does not certify Perl 5.8.1 and
   old LWP/SSL combinations; modern PowerShell does not certify PS2/old .NET.
 - Permission tests run as root cannot prove non-root behavior. Windows lock
   tests do not cover every ACL/reparse-point configuration. Verify the deployed
