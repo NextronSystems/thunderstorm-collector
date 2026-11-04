@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import ssl
 import subprocess
 import tempfile
@@ -44,6 +45,12 @@ class BashRobustnessTests(unittest.TestCase):
         self.upload_response = b'{}'
         self.redirect = False
         self.markers = []
+        # None in upload_statuses or status_plan closes the connection without a response.
+        self.status_plan = []
+        self.status_requests = []
+        self.pause_upload = False
+        self.upload_started = threading.Event()
+        self.release_upload = threading.Event()
         test = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -62,6 +69,9 @@ class BashRobustnessTests(unittest.TestCase):
                 else:
                     response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
+                    if status is None:
+                        self.close_connection = True
+                        return
                     header_block = data.split(b"\r\n\r\n", 1)[0]
                     declared = re.search(b'filename="([^"]*)"', header_block)
                     test.filenames.append(declared.group(1) if declared else None)
@@ -75,6 +85,9 @@ class BashRobustnessTests(unittest.TestCase):
                         # None records a part that carries no Content-Type header at all.
                         test.part_types.extend(None if part["Content-Type"] is None else str(part["Content-Type"])
                                                for part in parts)
+                    if test.pause_upload:
+                        test.upload_started.set()
+                        test.release_upload.wait(timeout=10)
                 self.send_response(status)
                 if test.redirect:
                     self.send_header("Location", "/unapproved-sink")
@@ -89,6 +102,19 @@ class BashRobustnessTests(unittest.TestCase):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
+            def do_GET(self):
+                test.requests.append(self.path)
+                test.status_requests.append(time.monotonic())
+                status = test.status_plan.pop(0) if test.status_plan else 200
+                if status is None:
+                    self.close_connection = True
+                    return
+                response = b'{"status":"ok"}'
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
@@ -99,8 +125,8 @@ class BashRobustnessTests(unittest.TestCase):
         self.server.server_close()
         thread.join(timeout=5)
 
-    def run_collector(self, *args, env=None, roots=None, log_file=None):
-        command = [BASH, str(COLLECTOR), "--server", "127.0.0.1", "--port",
+    def run_collector(self, *args, env=None, roots=None, log_file=None, script=None):
+        command = [BASH, str(script or COLLECTOR), "--server", "127.0.0.1", "--port",
                    str(self.server.server_port), "--no-progress",
                    "--max-age", "0", "--retries", "1"]
         command.extend(["--log-file", str(log_file)] if log_file else ["--no-log-file"])
@@ -787,6 +813,226 @@ exit "${CURL_EXIT:-18}"
         self.assertIn("Max size (KiB): 1", output)
         self.assertEqual(len(self.uploads), 1)
         self.assertTrue(any("source=cli-source" in path for path in self.requests))
+
+    def collector_copy(self, *changes):
+        source = COLLECTOR.read_text()
+        for pattern, value in changes:
+            source, count = re.subn(pattern, lambda match: value, source, count=1, flags=re.M)
+            self.assertEqual(count, 1, pattern)
+        copy = self.root / "configured.sh"
+        copy.write_text(source)
+        return copy
+
+    def start_paused_collector(self, stdout=subprocess.PIPE):
+        # A runner that was started as a background job or under nohup passes "ignored" for
+        # INT, QUIT or HUP on to its children, and a shell cannot trap a signal that was
+        # ignored on entry.
+        for number in (signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+            self.addCleanup(signal.signal, number, signal.signal(number, signal.SIG_DFL))
+        self.markers.clear()
+        self.upload_started.clear()
+        self.release_upload.clear()
+        self.pause_upload = True
+        command = [BASH, str(COLLECTOR), "--server", "127.0.0.1", "--port",
+                   str(self.server.server_port), "--dir", str(self.samples),
+                   "--no-log-file", "--no-progress", "--max-age", "0"]
+        process = subprocess.Popen(command, cwd=self.root,
+                                   env={**os.environ, "TMPDIR": str(self.root)},
+                                   stdout=stdout, stderr=subprocess.STDOUT)
+        self.addCleanup(self.stop_process, process)
+        self.assertTrue(self.upload_started.wait(timeout=10), "upload did not start")
+        return process
+
+    def stop_process(self, process):
+        self.release_upload.set()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        if process.stdout and not process.stdout.closed:
+            process.stdout.close()
+
+    def interruption_cleans_workspace(self, number):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        process = self.start_paused_collector()
+        process.send_signal(number)
+        self.release_upload.set()
+        output, _ = process.communicate(timeout=15)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+
+    def test_sigint_and_sigterm_report_interruption_and_clean_workspace(self):
+        for number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=number):
+                self.interruption_cleans_workspace(number)
+
+    def test_sighup_and_sigquit_report_interruption_and_clean_workspace(self):
+        # A closed terminal (SSH disconnect) sends HUP. Without a trap, QUIT kills Bash
+        # without running the EXIT trap, leaving the workspace with a copy of the sample.
+        for number in (signal.SIGHUP, signal.SIGQUIT):
+            with self.subTest(signal=number):
+                self.interruption_cleans_workspace(number)
+
+    def test_closed_console_neither_ends_the_run_nor_leaves_the_workspace(self):
+        # ssh without a tty whose link drops, or "| tee log" and Ctrl-C: the console reader
+        # goes away. The next console write raised SIGPIPE and Bash died with 141, without
+        # end or interrupted marker; after a signal the workspace stayed behind.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        # The interrupted file is still in flight when the signal handler runs.
+        for action, code, last, submitted in (("continue", 0, "end", 1), ("SIGINT", 1, "interrupted", 0)):
+            with self.subTest(action=action):
+                process = self.start_paused_collector()
+                process.stdout.close()
+                if action == "SIGINT":
+                    process.send_signal(signal.SIGINT)
+                self.release_upload.set()
+                self.assertEqual(process.wait(timeout=15), code)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", last])
+                self.assertEqual(self.markers[-1]["stats"]["submitted"], submitted)
+                self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+
+    def test_mount_points_are_pruned_without_being_accessed(self):
+        # A stat on the mount point of a stale hard NFS/CIFS/sshfs mount blocks forever,
+        # even for mounts outside every scan root. A mount point inside a 000-mode
+        # directory makes every stat fail instead, so the prune list must not depend on one.
+        blocked = self.samples / "blocked"
+        inside = blocked / "share"
+        inside.mkdir(parents=True)
+        outside = self.root / "elsewhere" / "nfs"
+        outside.mkdir(parents=True)
+        (self.samples / "real.txt").write_bytes(b"readable")
+        table = self.root / "mounts"
+        table.write_text("server:/a %s nfs rw 0 0\nserver:/b %s cifs rw 0 0\n"
+                         "proc /proc proc rw 0 0\n" % (inside, outside))
+        self.addCleanup(blocked.chmod, 0o700)
+        blocked.chmod(0)
+        copy = self.collector_copy((r"\$\{1:-/proc/mounts\}", "${1:-" + str(table) + "}"))
+        recorded = self.root / "find.args"
+        path = self.tool_path(find='#!/bin/sh\nprintf "%s\\n" "$@" > "$FIND_ARGS"\nexec "$FIND_REAL" "$@"\n')
+        (Path(path) / "curl").symlink_to(shutil.which("curl"))
+        self.run_collector(script=copy, env={"PATH": path, "FIND_ARGS": str(recorded),
+                                             "FIND_REAL": shutil.which("find")})
+        args = recorded.read_text().split("\n")
+        prunes = [args[i + 1] for i in range(len(args) - 2) if args[i] == "-path" and args[i + 2] == "-prune"]
+        self.assertIn(str(inside), prunes, self.output)
+        self.assertNotIn(str(outside), prunes)
+        self.assertNotIn("/proc", prunes)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assert_payloads([b"readable"])
+
+    def test_header_ca_certificate_implies_https(self):
+        # The CLI --ca-cert always selected HTTPS; a CA_CERT in the header did not, so the
+        # samples went out over plain HTTP.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        cert = self.root / "ca.pem"
+        cert.write_text("not a real certificate; the recording tool never connects\n")
+        copy = self.collector_copy((r'^CA_CERT=""', "CA_CERT=" + shlex.quote(str(cert))))
+        args = self.root / "curl.args"
+        path = self.tool_path(curl=self.recording_tool("curl"))
+        result = self.run_collector(script=copy, env={"PATH": path, "ARGS_FILE": str(args)})
+        self.assertEqual(result.returncode, 2, self.output)
+        urls = [line for line in args.read_text().splitlines() if line.startswith("ARG http")]
+        self.assertEqual(len(urls), 1, urls)
+        self.assertTrue(urls[0].startswith("ARG https://"), urls)
+        self.assertIn("ARG --cacert", args.read_text().splitlines())
+
+    def test_no_ssl_conflicts_with_a_ca_certificate(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        cert = self.root / "ca.pem"
+        cert.write_text("not a real certificate; the recording tool never connects\n")
+        header = self.collector_copy((r'^CA_CERT=""', "CA_CERT=" + shlex.quote(str(cert))))
+        args = self.root / "curl.args"
+        path = self.tool_path(curl=self.recording_tool("curl"))
+        for script, options in ((header, ["--no-ssl"]),
+                                (COLLECTOR, ["--ca-cert", str(cert), "--no-ssl"]),
+                                (COLLECTOR, ["--no-ssl", "--ca-cert", str(cert)])):
+            with self.subTest(script=script.name, options=options):
+                result = self.run_collector(*options, script=script,
+                                            env={"PATH": path, "ARGS_FILE": str(args)})
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("--no-ssl conflicts with the CA certificate", self.output)
+                self.assertFalse(args.exists())
+                self.assertEqual(self.requests, [])
+
+    def six_files(self):
+        for name in "abcdef":
+            (self.samples / name).write_bytes(name.encode())
+
+    def test_lost_server_stops_after_the_wait_window(self):
+        # Without a run-level stop every remaining file paid its full retry budget, from
+        # seconds (refused) to minutes (blackholed) each, so large runs took days.
+        self.six_files()
+        for variant, uploads, window, probes in (("no response", [200, None, None, None], "7", 3),
+                                                 ("busy", [200] + [503] * 15, "3", 2)):
+            with self.subTest(variant=variant):
+                self.requests.clear()
+                self.markers.clear()
+                del self.status_requests[:]
+                self.upload_statuses = list(uploads)
+                self.status_plan = [None, 503, None]
+                result = self.run_collector("--server-wait", window)
+                self.assertEqual(result.returncode, 1, self.output)
+                self.assertRegex(self.output, r"pausing uploads and polling http://127\.0\.0\.1:\d+/api/status "
+                                              r"for up to %ss" % window)
+                self.assertRegex(self.output, r"Server unreachable for (%s|%d)s, stopping \(2 of 6 candidate "
+                                              r"files not attempted\)" % (window, int(window) + 1))
+                self.assertEqual(sum(p.startswith("/api/check") for p in self.requests), len(uploads))
+                self.assertEqual(len(self.status_requests), probes)
+                if probes == 3:
+                    # The first gap is the doubled 4 s delay, the second the 1 s left of the window.
+                    gaps = [b - a for a, b in zip(self.status_requests, self.status_requests[1:])]
+                    self.assertGreater(gaps[0], 3.5, gaps)
+                    self.assertLess(gaps[1], 2.5, gaps)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+                stats = self.markers[-1]["stats"]
+                self.assertEqual((stats["scanned"], stats["submitted"], stats["failed"]), (4, 1, 3))
+                self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+
+    def test_server_recovery_resumes_with_the_next_file(self):
+        self.six_files()
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        for transport, env in transports:
+            with self.subTest(transport=transport):
+                self.requests.clear()
+                self.markers.clear()
+                self.uploads.clear()
+                del self.status_requests[:]
+                self.upload_statuses = [200, None, None, None]
+                self.status_plan = [200]
+                result = self.run_collector(env=env)
+                self.assertEqual(result.returncode, 1, self.output)
+                self.assertRegex(self.output, r"Server reachable again after [23]s; resuming with the next file")
+                self.assertEqual(len(self.status_requests), 1)
+                self.assertEqual(sum(p.startswith("/api/check") for p in self.requests), 6)
+                self.assertEqual(len(self.uploads), 3)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+                stats = self.markers[-1]["stats"]
+                self.assertEqual((stats["scanned"], stats["submitted"], stats["failed"]), (6, 3, 3))
+
+    def test_http_answer_resets_the_outage_count(self):
+        self.six_files()
+        self.upload_statuses = [None, None, 500, None, None, 200]
+        result = self.run_collector("--server-wait", "1")
+        self.assertEqual(result.returncode, 1, self.output)
+        self.assertNotIn("pausing uploads", self.output)
+        self.assertEqual(self.status_requests, [])
+        self.assertEqual(sum(p.startswith("/api/check") for p in self.requests), 6)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+
+    def test_server_wait_is_validated(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        for value in ("-1", "abc", "86401", "999999999999999999999"):
+            with self.subTest(value=value):
+                result = self.run_collector("--server-wait", value)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("server-wait must be", self.output)
+                self.assertEqual(self.requests, [])
+        result = self.run_collector("--server-wait", "0600", "--dry-run")
+        self.assertEqual(result.returncode, 0, self.output)
 
 
 class BashHelperTests(unittest.TestCase):
