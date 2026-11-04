@@ -863,9 +863,13 @@ exec "$REAL_FIND" "$@"
 
     def interruption_cleans_workspace(self, number, close_console=False):
         # A runner that was started as a background job or under nohup passes "ignored" for INT, QUIT or
-        # HUP on to its children, and a shell cannot trap a signal that was ignored on entry.
+        # HUP on to its children, and a shell cannot trap a signal that was ignored on entry. ("&" in a
+        # non-interactive shell ignores INT and QUIT.) Python's own SIGINT handler keeps Ctrl-C working
+        # here; like SIG_DFL, it becomes the default action in the child at exec.
         for ignored in (signal.SIGHUP, signal.SIGQUIT):
             self.addCleanup(signal.signal, ignored, signal.signal(ignored, signal.SIG_DFL))
+        self.addCleanup(signal.signal, signal.SIGINT,
+                        signal.signal(signal.SIGINT, signal.default_int_handler))
         (self.samples / "real.txt").write_bytes(b"readable")
         self.pause_upload = True
         log = self.root / "interrupt.log"
