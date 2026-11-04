@@ -256,8 +256,6 @@ func validateConfig(config Config) (Settings, error) {
 	return settings, nil
 }
 
-// parseMaxAge follows the Go collector: a number with an optional s, m, h or d
-// suffix, in days without one.
 // parseTimeout reads a positive duration such as 90s or 5m. A plain number is
 // seconds, which is what the Go collector's response-timeout key holds, so one
 // config.yml serves both collectors.
@@ -275,6 +273,8 @@ func parseTimeout(value string) (time.Duration, error) {
 	return timeout, nil
 }
 
+// parseMaxAge follows the Go collector: a number with an optional s, m, h or d
+// suffix, in days without one.
 func parseMaxAge(value string) (time.Time, error) {
 	units := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour}
 	suffix := value[len(value)-1]
