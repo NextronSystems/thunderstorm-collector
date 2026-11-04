@@ -29,6 +29,31 @@ MAJOR = sys.version_info[0]
 SCRIPT = os.environ.get("PYTHON_COLLECTOR") or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python",
                                      "thunderstorm-collector-py2.py" if MAJOR == 2 else
                                      "thunderstorm-collector.py"))
+# The locale of cron, systemd units and many ssh sessions. Python 3.7+ would otherwise
+# switch itself to UTF-8 (PEP 538 coercion, PEP 540 UTF-8 mode); 3.4 to 3.6 cannot.
+C_LOCALE = {"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+# Loads the collector, points its /proc/mounts at argv[2] and compares what it excludes
+# with what os.listdir would name the same directories in this locale.
+MOUNTS_DRIVER = r'''
+import os, sys
+try:
+    from importlib.util import module_from_spec, spec_from_file_location
+    spec = spec_from_file_location("collector_mounts", sys.argv[1])
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+except ImportError:
+    import imp
+    module = imp.load_source("collector_mounts", sys.argv[1])
+builtin_open = open
+def redirect(path, *args, **kwargs):
+    return builtin_open(sys.argv[2] if path == "/proc/mounts" else path, *args, **kwargs)
+module.open = redirect
+expected = [b"/mnt/m\xc3\xbcller share", b"/proc", b"/srv/tab\tdir", b"/media/caf\xe9"]
+if sys.version_info[0] == 3:
+    expected = [os.fsdecode(path) for path in expected]
+result = module.get_excluded_mounts()
+sys.stdout.write("OK\n" if result == expected else "MISMATCH %r\n" % (result,))
+'''
 
 
 class Server(ThreadingMixIn, HTTPServer):
@@ -59,11 +84,29 @@ class PythonRobustness(unittest.TestCase):
         self.pause = False
         self.started = threading.Event()
         self.release = threading.Event()
+        # Simulated outage: once outage_after files were accepted, uploads and status checks
+        # get no answer (the connection closes) for outage_seconds, or for good if None.
+        self.outage_after = None
+        self.outage_seconds = None
+        self.outage_started = None
+        self.status_polls = []
         test = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
+
+            def do_GET(self):
+                test.status_polls.append(self.path)
+                if self.path != "/api/status" or test.unavailable():
+                    self.close_connection = True
+                    return
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                self.close_connection = True
 
             def do_POST(self):
                 data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
@@ -75,6 +118,9 @@ class PythonRobustness(unittest.TestCase):
                     body = json.dumps(test.marker_body).encode("utf-8") if test.marker_raw is None else test.marker_raw
                     partial = test.partial_marker
                 else:
+                    if test.unavailable():
+                        self.close_connection = True  # no status line at all: a transport failure
+                        return
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
                     declared = re.search(b'filename="([^"]*)"', data.split(b"\r\n\r\n", 1)[0])
                     test.filenames.append(declared.group(1) if declared else None)
@@ -111,6 +157,13 @@ class PythonRobustness(unittest.TestCase):
         shutil.rmtree(self.root)
         self.assertEqual(self.server.errors, [], "unexpected test-server exception")
 
+    def unavailable(self):
+        if self.outage_after is None or len(self.uploads) < self.outage_after:
+            return False
+        if self.outage_started is None:
+            self.outage_started = time.time()
+        return self.outage_seconds is None or time.time() - self.outage_started < self.outage_seconds
+
     def file(self, name="sample.bin", data=b"\x00\xffTHUNDER\n"):
         path = os.path.join(self.samples, name)
         with open(path, "wb") as stream:
@@ -130,7 +183,8 @@ class PythonRobustness(unittest.TestCase):
 
     def run_collector(self, *extra, **kwargs):
         process = subprocess.Popen(self.command(*extra, **kwargs), stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, cwd=self.root)
+                                   stderr=subprocess.STDOUT, cwd=self.root,
+                                   env=dict(os.environ, **kwargs.get("env", {})))
         timer = threading.Timer(25, process.kill)
         timer.start()
         try:
@@ -389,6 +443,170 @@ class PythonRobustness(unittest.TestCase):
         self.assertEqual(len(seen), 1, seen)
         self.assertEqual((collector.scan_errors, collector.failed), (0, 0))
 
+    def dry_run_collector(self, module, source):
+        args = type("Args", (object,), dict(
+            tls=False, insecure=False, ca_cert=None, dry_run=True, retries=1, server_wait=0,
+            server="127.0.0.1", port=1, source=source, max_size_kb=2048, max_age=0, progress=False))()
+        return module.Collector(args)
+
+    def test_excluded_mount_points_and_link_targets_are_never_stat_ed(self):
+        # stat() on the mount point of a dead hard NFS mount blocks in the kernel for good, where
+        # neither SIGINT nor SIGTERM can end it: no marker, no exit. Excluded mounts are known by
+        # path, so they must be skipped before anything stats them, and a symlink, whose target
+        # may be on such a mount, is never followed.
+        module = self.load_collector("collector_no_stat")
+        mount = os.path.join(self.samples, "stale-nfs")
+        os.mkdir(mount)
+        with open(os.path.join(mount, "remote.bin"), "wb") as stream:
+            stream.write(b"remote")
+        self.file("local.bin")
+        link = os.path.join(self.samples, "into-the-mount")
+        os.symlink(mount, link)
+        module.hard_skips.append(os.path.normpath(mount))  # as run() adds one from /proc/mounts
+        collector = self.dry_run_collector(module, "no-stat")
+        calls = []
+        real_lstat, real_stat = os.lstat, os.stat
+
+        def lstat(path):
+            calls.append(("lstat", path))
+            return real_lstat(path)
+
+        def follow(path, *args, **kwargs):
+            calls.append(("stat", path))
+            return real_stat(path, *args, **kwargs)
+        os.lstat, os.stat = lstat, follow
+        try:
+            seen = [path for path, metadata, error in collector.entries(self.samples)]
+        finally:
+            os.lstat, os.stat = real_lstat, real_stat
+        self.assertEqual([call for call in calls if call[1] == mount], [])
+        self.assertEqual([call for call in calls if call[0] == "stat"], [])
+        self.assertNotIn(os.path.join(mount, "remote.bin"), seen)
+        self.assertIn(os.path.join(self.samples, "local.bin"), seen)
+
+    def test_mnt_and_special_trees_below_the_filesystem_root_are_not_stat_ed(self):
+        # /mnt was excluded file by file only, so WSL drives and cluster filesystems below it
+        # were walked in full. Simulated root listing: nothing real is touched.
+        module = self.load_collector("collector_root_listing")
+        collector = self.dry_run_collector(module, "root-listing")
+        directory = os.lstat(self.samples)
+        calls = []
+        real_lstat, real_listdir = os.lstat, os.listdir
+
+        def lstat(path):
+            calls.append(path)
+            return directory  # every entry looks like a directory
+
+        def listdir(path):
+            return ["mnt", "proc", "srv"] if path == "/" else []
+        os.lstat, os.listdir = lstat, listdir
+        try:
+            list(collector.entries("/"))
+        finally:
+            os.lstat, os.listdir = real_lstat, real_listdir
+        self.assertNotIn("/mnt", calls)
+        self.assertNotIn("/proc", calls)
+        self.assertIn("/srv", calls)
+
+    def test_proc_mounts_with_non_ascii_paths_under_the_c_locale(self):
+        # Read as text with the locale codec, one non-ASCII mount point made Python 3 raise
+        # UnicodeDecodeError, a ValueError that ended the run with exit 2 before any scanning.
+        mounts = os.path.join(self.root, "mounts")
+        with open(mounts, "wb") as stream:
+            stream.write(b"server:/export /mnt/m\xc3\xbcller\\040share nfs4 rw,relatime 0 0\n"
+                         b"proc /proc proc rw,nosuid 0 0\n"
+                         b"/dev/sda1 /data ext4 rw 0 0\n"
+                         b"//nas/x /srv/tab\\011dir cifs rw 0 0\n"
+                         b"//nas/y /media/caf\xe9 smb3 rw 0 0\n")
+        driver = os.path.join(self.root, "mounts_driver.py")
+        with open(driver, "w") as stream:
+            stream.write(MOUNTS_DRIVER)
+        process = subprocess.Popen([sys.executable, "-B", driver, SCRIPT, mounts], cwd=self.root,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   env=dict(os.environ, **C_LOCALE))
+        output = process.communicate()[0].decode("utf-8", "replace")
+        self.assertEqual((process.returncode, output.strip()), (0, "OK"), output)
+
+    def test_c_locale_sends_one_non_ascii_source_in_markers_and_uploads(self):
+        # Under the C locale Python 3 turns the UTF-8 bytes of an argument into lone surrogates.
+        # The markers sent those (the server sees U+FFFD) while the upload query sent UTF-8.
+        self.file()
+        source = u"müller-host"
+        self.assertEqual(self.run_collector("--source", source, env=C_LOCALE), 0, self.output)
+        self.assertEqual([marker["source"] for marker in self.markers], [source, source])
+        uploads = [path for path in self.paths if path.startswith("/api/check")]
+        self.assertEqual(len(uploads), 1, self.paths)
+        expected = source.encode("utf-8") if MAJOR == 2 else source
+        self.assertEqual(parse_qs(urlsplit(uploads[0]).query)["source"], [expected])
+
+    def outage_files(self, count):
+        for index in range(count):
+            self.file("sample%d.bin" % index, ("payload%d" % index).encode("ascii"))
+
+    def test_lost_server_pauses_uploads_then_stops_after_the_wait(self):
+        # Without a run-level stop every remaining file paid its full retry budget, hours to
+        # days for a large tree, before a failing end marker.
+        self.outage_files(7)
+        self.outage_after = 1
+        started = time.time()
+        self.assertEqual(self.run_collector("--server-wait", "3"), 1, self.output)
+        elapsed = time.time() - started
+        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(self.output.count("[ERROR] Upload"), 3, self.output)
+        self.assertIn("did not accept 3 files in a row", self.output)
+        self.assertIn("unreachable for 3 seconds", self.output)
+        self.assertTrue(self.status_polls, self.output)
+        self.assertTrue(all(path == "/api/status" for path in self.status_polls), self.status_polls)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertEqual(self.markers[-1]["stats"]["failed"], 3)
+        self.assertTrue(elapsed < 15, elapsed)
+
+    def test_lost_server_that_returns_in_time_gets_the_remaining_files(self):
+        self.outage_files(6)
+        self.outage_after = 1
+        self.outage_seconds = 3
+        self.assertEqual(self.run_collector("--server-wait", "20"), 1, self.output)
+        self.assertIn("answers again after", self.output)
+        self.assertEqual(len(self.uploads), 3, self.output)  # one before the outage, two after it
+        self.assertEqual(self.output.count("[ERROR] Upload"), 3, self.output)
+        self.assertTrue(len(self.status_polls) >= 2, self.status_polls)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assertIn("Failed: 3", self.output)
+
+    def test_server_wait_zero_stops_at_once_and_dry_run_never_waits(self):
+        self.outage_files(5)
+        self.outage_after = 0
+        self.assertEqual(self.run_collector("--server-wait", "0"), 1, self.output)
+        self.assertEqual(self.output.count("[ERROR] Upload"), 3, self.output)
+        self.assertEqual(self.status_polls, [])
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        del self.markers[:]
+        self.assertEqual(self.run_collector("--server-wait", "0", "--dry-run"), 0, self.output)
+        self.assertIn("Would submit: 5", self.output)
+        self.assertEqual(self.markers, [])
+
+    def test_sigterm_while_waiting_for_a_lost_server_sends_interrupted(self):
+        self.outage_files(5)
+        self.outage_after = 0
+        process = subprocess.Popen(self.command("--server-wait", "60"), stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT)
+        try:
+            deadline = time.time() + 15
+            while not self.status_polls and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(self.status_polls, "the collector did not start waiting")
+            process.send_signal(signal.SIGTERM)
+            timer = threading.Timer(15, process.kill)
+            timer.start()
+            output = process.communicate()[0]
+            timer.cancel()
+            self.assertEqual(process.returncode, 1, output)
+            self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
     def test_symlinks_and_fifo_not_uploaded(self):
         path = self.file()
         os.symlink(path, self.samples + "/link")
@@ -526,6 +744,7 @@ class PythonRobustness(unittest.TestCase):
         for flag, value in [("--port", "0"), ("--port", "65536"), ("--retries", "0"),
                             ("--retries", "11"), ("--max-age", "-1"),
                             ("--max-size-kb", "0"), ("--max-size-kb", "204801"),
+                            ("--server-wait", "-1"), ("--server-wait", "86401"),
                             ("--server", "http://localhost")]:
             self.assertEqual(self.run_collector(flag, value), 2, self.output)
         self.assertEqual(self.paths, [])

@@ -57,6 +57,8 @@ Always select explicit roots. CLI values override header values. `--dirs`,
 `--dir` and `-d` are aliases: supplying any of them replaces the header root
 list, and repeated options accumulate. `--no-tls`, `--verify-tls`,
 `--no-dry-run` and `--no-debug` disable corresponding enabled header flags.
+`SERVER_WAIT` (`--server-wait`) bounds how long a run waits for a lost server; see
+the capability profile below.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**. Older/larger
 files are intentionally excluded. The console log on stderr shows resolved roots
@@ -72,10 +74,21 @@ by the collector itself. Always review a dry-run before collecting real data.
   cannot hit the recursion limit; symlink entries/special files are skipped, and a
   directory is checked again right before it is listed, so one replaced by a symlink
   in the meantime is skipped too (`[SKIP] No longer a directory`). Explicit roots
-  resolve physically. All extensions except built-in exclusions: `/mnt`
-  trees, `.dat`, `.npm`, and VM artifacts ending in `.vmdk`, `.vswp`, `.nvram`,
-  `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts are best-effort
-  exclusions, not a security boundary. Explicit excluded roots remain excluded.
+  resolve physically. All extensions except built-in exclusions: `/proc`, `/dev`,
+  `/sys`, `/run`, `/snap`, `/.snapshots` and `/mnt` trees (WSL drives and mounted
+  shares often live below `/mnt`), `.dat`, `.npm`, and VM artifacts ending in `.vmdk`,
+  `.vswp`, `.nvram`, `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts
+  are best-effort exclusions, not a security boundary. Explicit excluded roots remain
+  excluded.
+- Excluded trees and the network/special mounts listed in `/proc/mounts` are
+  skipped by path, before anything is stat()ed, and symlinks are never followed.
+  A stat on the mount point of an unresponsive hard NFS mount would block in the
+  kernel, where not even SIGINT/SIGTERM can end the run. Filesystem types outside
+  the built-in network/special list (for example `ceph` or `glusterfs`), and every
+  mount on systems without `/proc/mounts`, are walked like local directories.
+  `/proc/mounts` is read as bytes, so a non-ASCII mount path also works
+  under the C/POSIX locale of cron jobs, systemd units and many SSH sessions; there
+  a non-ASCII `--source` is sent as the same UTF-8 text in markers and uploads.
 - Age defaults to 30 days; `--max-age 0..36500`, zero disables filtering.
   Positive values compare mtime to run start minus N times 86400 seconds.
 - Size defaults to 2048 KiB; `--max-size-kb 1..204800`, exact limit included.
@@ -98,6 +111,14 @@ by the collector itself. Always review a dry-run before collecting real data.
 - `--retries 1..10` counts total attempts, including first. 503 Retry-After
   integer seconds clamp to 0..120; other exponential delays cap at 60 seconds.
   Lost responses/retries can duplicate samples.
+- Lost server: when 3 files in a row could not be delivered (no attempt got an HTTP
+  answer other than 503), the collector stops sending and checks `GET /api/status`
+  after 2, 4, 8 ... up to 60 seconds, for at most `SERVER_WAIT` seconds
+  (`--server-wait 0..86400`, default 600; 0 stops at once). When the server
+  answers 2xx, it continues with the next file; the files that failed stay failed.
+  When the time runs out, it logs `Thunderstorm unreachable for N seconds`, sends a
+  best-effort interrupted marker, does not send the remaining files and exits 1.
+  Dry-run never waits.
 - Socket idle-I/O timeouts: uploads 30 seconds, markers 10. **Not whole-attempt
   or run deadlines**: the sample is sent in 64 KiB chunks, so a slow but steady
   link is not cut off after 30 seconds. Responses over 1 MiB, incomplete responses
@@ -112,7 +133,7 @@ by the collector itself. Always review a dry-run before collecting real data.
 | Exit | Meaning |
 |---|---|
 | 0 | All eligible files accepted, or successful dry-run; intentional skips allowed |
-| 1 | Failed files, traversal/partial-root errors, interruption or failed end marker |
+| 1 | Failed files, traversal/partial-root errors, interruption, server unreachable for `SERVER_WAIT` or failed end marker |
 | 2 | Invalid config/TLS setup, no valid roots or failed begin |
 
 Unreadable directories count as `Scan errors`; unreadable selected files as
@@ -260,7 +281,8 @@ globally; remove private keys afterwards.
 Interrupt a slow run: exit 1, no normal end marker, best-effort interrupted
 marker if supported. Do not disrupt a shared real service for failure injection.
 The isolated regression suite covers 503 bounds, end HTTP 500, incomplete 2xx,
-malformed marker JSON and SIGTERM on the actual interpreters:
+malformed marker JSON, a lost server (wait, resume, stop) and SIGTERM on the
+actual interpreters:
 
 ```sh
 python3 -B ../tests/test_python_robustness.py
