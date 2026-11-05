@@ -34,6 +34,9 @@ param(
     [switch]$DryRun = $false,             # True = preview only; False = real uploads.
     # TOTAL upload attempts including the first, 1..10.
     [int]$Retries = 3,
+    # Seconds to wait for the service after 3 files in a row could not be delivered,
+    # 0..86400; the run polls /api/status meanwhile, then stops (exit 1). 0 = stop at once.
+    [int]$ServerWait = 600,
     [Alias("D")][switch]$Debugging = $false, # Additional marker diagnostics.
     # Progress is off by default; -Progress enables counts. NoProgress wins.
     [switch]$Progress,
@@ -71,6 +74,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace ThunderstormCollector {
     public class Reply {
@@ -131,6 +135,29 @@ namespace ThunderstormCollector {
             if (request != null) request.Abort();
         }
         private static void Expire(object state) { ((HttpWebRequest)state).Abort(); }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct FindData {
+            public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
+            public uint SizeHigh, SizeLow, ReparseTag, Reserved;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)] public string ShortName;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr FindFirstFileW(string name, out FindData data);
+        [DllImport("kernel32.dll")]
+        private static extern bool FindClose(IntPtr handle);
+        // Reparse points whose content is ordinary file data: Data Deduplication, Windows
+        // Overlay Filter (CompactOS, compact /exe) and Single Instance Storage files. Links,
+        // junctions, cloud placeholders, HSM and other tags stay skipped.
+        public static bool IsContentReparsePoint(string path) {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT) return false;
+            FindData data;
+            IntPtr handle = FindFirstFileW(path, out data);
+            if (handle == new IntPtr(-1)) return false;
+            FindClose(handle);
+            if ((data.Attributes & 0x400) == 0) return false;
+            return data.ReparseTag == 0x80000013 || data.ReparseTag == 0x80000017 || data.ReparseTag == 0x80000007;
+        }
         public static void Configure(string certificate, bool skipVerification) {
             ca = null;
             insecure = skipVerification;
@@ -182,7 +209,8 @@ namespace ThunderstormCollector {
         }
         public static byte[] Snapshot(string path, long limit, DateTime cutoff) {
             FileAttributes attributes = File.GetAttributes(path);
-            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+            FileAttributes reparse = attributes & FileAttributes.ReparsePoint;
+            if ((attributes & FileAttributes.Directory) != 0 || (reparse != 0 && !IsContentReparsePoint(path)))
                 throw new IOException("File became a link or directory.");
             DateTime stamp = File.GetLastWriteTimeUtc(path);
             if (stamp < cutoff) return null;
@@ -197,7 +225,7 @@ namespace ThunderstormCollector {
                         if (data.Length > limit || Interrupted) throw new IOException("File grew or collection was interrupted.");
                     }
                     if (data.Length != length || file.Length != length || File.GetLastWriteTimeUtc(path) != stamp ||
-                        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != reparse)
                         throw new IOException("File changed while being read.");
                     return data.ToArray();
                 }
@@ -215,29 +243,41 @@ namespace ThunderstormCollector {
                 return body.ToArray();
             }
         }
+        public static Reply Get(string url, int timeout) { return Request("GET", url, null, null, timeout); }
         public static Reply Send(string url, string contentType, byte[] data, int timeout) {
+            return Request("POST", url, contentType, data, timeout);
+        }
+        // timeout is the idle limit for each read or write. The whole request may take
+        // timeout plus the time to send the body at 64 KiB/s, so a large upload over a
+        // slow link is not cut off while it makes progress.
+        private static Reply Request(string method, string url, string contentType, byte[] data, int timeout) {
             Reply result = new Reply();
             HttpWebRequest request = null;
             HttpWebResponse response = null;
             System.Threading.Timer deadline = null;
+            long length = data == null ? 0 : data.Length;
+            int budget = (int)Math.Min(int.MaxValue, timeout + length * 1000 / 65536);
             try {
                 tlsError = "";
                 request = (HttpWebRequest)WebRequest.Create(url);
-                request.Method = "POST";
+                request.Method = method;
                 request.Proxy = null;
                 request.AllowAutoRedirect = false;
-                request.Timeout = timeout;
+                request.Timeout = budget;
                 request.ReadWriteTimeout = timeout;
-                request.ContentType = contentType;
-                request.ContentLength = data.Length;
-                request.AllowWriteStreamBuffering = true;
+                if (data != null) {
+                    request.ContentType = contentType;
+                    request.ContentLength = data.Length;
+                    request.AllowWriteStreamBuffering = true;
+                }
                 if (ca != null || insecure) {
                     PropertyInfo callback = typeof(HttpWebRequest).GetProperty("ServerCertificateValidationCallback");
                     callback.SetValue(request, new RemoteCertificateValidationCallback(Validate), null);
                 }
                 active = request;
-                deadline = new System.Threading.Timer(new System.Threading.TimerCallback(Expire), request, timeout, System.Threading.Timeout.Infinite);
-                using (Stream output = request.GetRequestStream()) output.Write(data, 0, data.Length);
+                deadline = new System.Threading.Timer(new System.Threading.TimerCallback(Expire), request, budget, System.Threading.Timeout.Infinite);
+                if (data != null)
+                    using (Stream output = request.GetRequestStream()) output.Write(data, 0, data.Length);
                 try { response = (HttpWebResponse)request.GetResponse(); }
                 catch (WebException error) {
                     response = error.Response as HttpWebResponse;
@@ -345,10 +385,14 @@ function Submit-File($file) {
         if ($null -eq $data) { $stats.skipped++; return }
         $boundary = "thunderstorm-" + [Guid]::NewGuid().ToString("N")
         $body = [ThunderstormCollector.Transport]::Multipart($file.FullName, $boundary, $data)
+        # Undeliverable: no attempt got an HTTP answer other than 503 (busy).
+        $undeliverable = $true
         for ($attempt = 1; $attempt -le $Retries; $attempt++) {
             if ([ThunderstormCollector.Transport]::Interrupted) { break }
             $reply = [ThunderstormCollector.Transport]::Send($uploadUrl, "multipart/form-data; boundary=$boundary", $body, 30000)
+            if ($reply.Code -gt 0 -and $reply.Code -ne 503) { $undeliverable = $false }
             if (-not $reply.Error -and $reply.Code -ge 200 -and $reply.Code -lt 300) {
+                $script:undelivered = 0
                 $stats.submitted++
                 if ($Progress -and -not $NoProgress) { Write-Host "Submitted: $($stats.submitted)" }
                 return
@@ -362,12 +406,45 @@ function Submit-File($file) {
             if ($attempt -lt $Retries -and -not [ThunderstormCollector.Transport]::Interrupted) { Start-Sleep -Seconds $delay }
         }
         $stats.failed++
+        if ($undeliverable) { Register-Undeliverable } else { $script:undelivered = 0 }
     } catch { $stats.failed++; Write-Host "[ERROR] Cannot read/submit $($file.FullName): $($_.Exception.Message)" }
+}
+# After 3 undeliverable files in a row, stop sending and poll /api/status for up to
+# ServerWait seconds instead of running every remaining file through its retries.
+function Register-Undeliverable {
+    if ([ThunderstormCollector.Transport]::Interrupted) { return }
+    $script:undelivered++
+    if ($script:undelivered -lt 3) { return }
+    $script:undelivered = 0
+    if (-not (Wait-ForThunderstorm)) { $script:serverLost = $true }
+}
+function Wait-ForThunderstorm {
+    $waitStart = [DateTime]::UtcNow
+    Write-Host "[WARN] Thunderstorm did not accept 3 files in a row; checking $baseUrl/api/status for up to $ServerWait seconds before sending more."
+    $delay = 2
+    while (-not [ThunderstormCollector.Transport]::Interrupted) {
+        $remaining = $ServerWait - ([DateTime]::UtcNow - $waitStart).TotalSeconds
+        if ($remaining -le 0) { break }
+        $until = [DateTime]::UtcNow.AddSeconds([Math]::Min([double]$delay, $remaining))
+        while ([DateTime]::UtcNow -lt $until -and -not [ThunderstormCollector.Transport]::Interrupted) { Start-Sleep -Milliseconds 200 }
+        if ([ThunderstormCollector.Transport]::Interrupted) { break }
+        $reply = [ThunderstormCollector.Transport]::Get($baseUrl + "/api/status", 10000)
+        if (-not $reply.Error -and $reply.Code -ge 200 -and $reply.Code -lt 300) {
+            Write-Host ("[INFO] Thunderstorm answers again after " + [int]([DateTime]::UtcNow - $waitStart).TotalSeconds + " seconds; continuing with the next file.")
+            return $true
+        }
+        if ($Debugging) { Write-Host "[DEBUG] Status check returned HTTP $($reply.Code) $($reply.Error)" }
+        $delay = [Math]::Min(60, $delay * 2)
+    }
+    # An interruption is reported by the interruption handling instead.
+    if ([ThunderstormCollector.Transport]::Interrupted) { return $true }
+    Write-Host "[ERROR] Thunderstorm unreachable for $ServerWait seconds; stopping the collection. Remaining files are not sent."
+    return $false
 }
 function Walk([string]$root) {
     $stack = New-Object 'Collections.Generic.Stack[string]'
     $stack.Push($root)
-    while ($stack.Count -gt 0 -and -not [ThunderstormCollector.Transport]::Interrupted) {
+    while ($stack.Count -gt 0 -and -not [ThunderstormCollector.Transport]::Interrupted -and -not $script:serverLost) {
         $directory = $stack.Pop()
         if (Is-Excluded $directory) { continue }
         try {
@@ -376,8 +453,12 @@ function Walk([string]$root) {
             $children = @(Get-ChildItem -LiteralPath $directory -Force)
         } catch { $stats.scan_errors++; Write-Host "[ERROR] Cannot traverse $directory"; continue }
         foreach ($file in $children) {
-            if ([ThunderstormCollector.Transport]::Interrupted) { break }
-            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $stats.skipped++; continue }
+            if ([ThunderstormCollector.Transport]::Interrupted -or $script:serverLost) { break }
+            # Deduplicated and compressed (WOF) files are reparse points with ordinary content.
+            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and
+                ($file.PSIsContainer -or -not [ThunderstormCollector.Transport]::IsContentReparsePoint($file.FullName))) {
+                $stats.skipped++; continue
+            }
             if ($file.PSIsContainer) { if (-not (Is-Excluded $file.FullName)) { $stack.Push($file.FullName) } }
             else { Submit-File $file }
         }
@@ -390,8 +471,8 @@ try {
     }
     if ($ThunderstormServer -notmatch '^([A-Za-z0-9][A-Za-z0-9.-]*|\[[0-9a-fA-F:.]+\])$' -or
         $ThunderstormPort -lt 1 -or $ThunderstormPort -gt 65535 -or $MaxAge -lt 0 -or $MaxAge -gt 36500 -or
-        $MaxSize -lt 1 -or $MaxSize -gt 200 -or $Retries -lt 1 -or $Retries -gt 10) {
-        throw "Invalid server/port, MaxAge (0..36500), MaxSize (1..200 MiB) or Retries (1..10 total attempts)."
+        $MaxSize -lt 1 -or $MaxSize -gt 200 -or $Retries -lt 1 -or $Retries -gt 10 -or $ServerWait -lt 0 -or $ServerWait -gt 86400) {
+        throw "Invalid server/port, MaxAge (0..36500), MaxSize (1..200 MiB), Retries (1..10 total attempts) or ServerWait (0..86400)."
     }
     if (($CACert -or $Insecure) -and -not $UseSSL) { throw "CACert/Insecure require UseSSL." }
     if ($CACert -and $Insecure) { throw "CACert and Insecure are mutually exclusive." }
@@ -450,13 +531,18 @@ try {
             Write-Host "[WARN] JSON parser unavailable (.NET 3.5 System.Web.Extensions required on PS2); no collection markers."
         }
     }
+    $script:undelivered = 0
+    $script:serverLost = $false
     if (-not (Send-Marker "begin")) { throw "Cannot begin collection." }
     $started = -not $DryRun
     $uploadUrl = $baseUrl + $endpoint + "?source=" + [Uri]::EscapeDataString($Source)
     if ($scanId) { $uploadUrl += "&scan_id=" + [Uri]::EscapeDataString($scanId) }
-    foreach ($root in $roots) { Walk $root }
+    foreach ($root in $roots) { if (-not $script:serverLost) { Walk $root } }
     if ([ThunderstormCollector.Transport]::Interrupted) {
         $exitCode = 1
+    } elseif ($script:serverLost) {
+        $exitCode = 1
+        [void](Send-Marker "interrupted")
     } elseif (-not (Send-Marker "end")) { $exitCode = 1 }
     if ($stats.failed -gt 0 -or $stats.scan_errors -gt 0) { $exitCode = 1 }
 } catch {

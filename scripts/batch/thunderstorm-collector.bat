@@ -27,6 +27,8 @@ var COLLECT_MAX_SIZE = 2097152; // BYTES, 1..209715200; 2097152 = 2048 KiB = 2 M
 var RELEVANT_EXTENSIONS = ".exe;.dll;.ps1;.bat;.txt"; // Literal suffixes; "*" = all extensions.
 
 var UPLOAD_ATTEMPTS = 3;     // TOTAL upload attempts including the first, 1..10.
+var SERVER_WAIT = 600;       // Seconds to wait for the service after 3 files in a row could not be
+                             // delivered, 0..86400; polls /api/status, then stops (exit 1). 0 = stop at once.
 var DRY_RUN = 0;            // 1 = preview, no HTTP requests; 0 = real uploads.
 var CURL_PATH = "";         // Empty = discover curl.exe; otherwise trusted path to curl 8.4+.
 // Console logs include roots and limits. Redirect output to a file OUTSIDE the
@@ -36,6 +38,7 @@ var CURL_PATH = "";         // Empty = discover curl.exe; otherwise trusted path
 // INTERNAL IMPLEMENTATION - no user settings below this line ------------------
 var fso, shell, environment, workspace = "", exitCode = 0;
 var stats = {scanned: 0, submitted: 0, failed: 0, skipped: 0, scan_errors: 0};
+var reparseFiles = 0, undelivered = 0, serverLost = false;
 function log(text) { WScript.Echo(text); }
 function setting(name, fallback) {
     var value = environment(name);
@@ -57,12 +60,13 @@ function quote(text) {
     if (/["%\r\n\x00]/.test(text)) throw new Error("Invalid process path (quotes, percent signs or controls).");
     return '"' + text + '"';
 }
-function execute(command) {
-    var process = shell.Exec(command), deadline = new Date().getTime() + 40000;
+function execute(command, limit) {
+    if (!limit) limit = 40000;
+    var process = shell.Exec(command), deadline = new Date().getTime() + limit;
     while (process.Status === 0) {
         if (new Date().getTime() > deadline) {
             process.Terminate();
-            throw new Error("curl exceeded its 40-second watchdog.");
+            throw new Error("curl exceeded its " + Math.round(limit / 1000) + "-second watchdog.");
         }
         WScript.Sleep(50);
     }
@@ -153,17 +157,24 @@ function upload(file) {
         var config = fso.BuildPath(workspace, "request.cfg");
         var configFile = fso.CreateTextFile(config, true, false);
         try { configFile.WriteLine('url = "' + url + '"'); } finally { configFile.Close(); }
+        // 30 seconds plus the time to send the body at 64 KiB/s, so a large file over a slow
+        // link is not cut off; a transfer below 1 KiB/s for 30 seconds still ends.
+        var maxTime = 30 + Math.ceil(Number(fso.GetFile(fso.BuildPath(workspace, "body.bin")).Size) / 65536);
         var command = quote(curl) + ' --disable --silent --show-error --globoff --noproxy "*" --connect-timeout 10' +
-            ' --max-time 30 --max-filesize 1048576 --proto "=http,https" --output ' + quote(response) +
+            " --max-time " + maxTime + " --speed-limit 1024 --speed-time 30" +
+            ' --max-filesize 1048576 --proto "=http,https" --output ' + quote(response) +
             " --dump-header " + quote(headers) + ' --write-out "%{http_code}" --header ' +
             quote("Content-Type: multipart/form-data; boundary=" + boundary) +
             " --data-binary " + quote("@" + fso.BuildPath(workspace, "body.bin")) + " --config " + quote(config);
         if (caBundle) command += " --cacert " + quote(caBundle);
+        // Undeliverable: no attempt got an HTTP answer other than 503 (busy).
+        var undeliverable = true;
         for (var attempt = 1; attempt <= attempts; attempt++) {
-            var result = execute(command), status = result.output.replace(/^\s+|\s+$/g, "");
+            var result = execute(command, (maxTime + 10) * 1000), status = result.output.replace(/^\s+|\s+$/g, "");
+            if (/^\d{3}$/.test(status) && status !== "000" && status !== "503") undeliverable = false;
             if (result.code === 0 && /^2\d\d$/.test(status) && fso.FileExists(response) &&
                 Number(fso.GetFile(response).Size) <= 1048576) {
-                stats.submitted++; return;
+                undelivered = 0; stats.submitted++; return;
             }
             log("[ERROR] Upload " + file.Path + ": HTTP " + status + " curl " + result.code);
             if (result.error) log("[ERROR] " + result.error.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 1024));
@@ -181,11 +192,45 @@ function upload(file) {
             if (attempt < attempts) WScript.Sleep(delay * 1000);
         }
         stats.failed++;
+        if (undeliverable) registerUndeliverable(); else undelivered = 0;
     } catch (error) { stats.failed++; log("[ERROR] Cannot read/upload " + file.Path + ": " + error.message); }
+}
+// After 3 undeliverable files in a row, stop sending and poll /api/status for up to
+// SERVER_WAIT seconds instead of running every remaining file through its retries.
+function registerUndeliverable() {
+    if (++undelivered < 3) return;
+    undelivered = 0;
+    if (!waitForThunderstorm()) serverLost = true;
+}
+function waitForThunderstorm() {
+    var start = new Date().getTime(), delay = 2;
+    log("[WARN] Thunderstorm did not accept 3 files in a row; checking " + baseUrl + "/api/status for up to " +
+        serverWait + " seconds before sending more.");
+    var config = fso.BuildPath(workspace, "status.cfg"), response = fso.BuildPath(workspace, "status.txt");
+    var configFile = fso.CreateTextFile(config, true, false);
+    try { configFile.WriteLine('url = "' + baseUrl + '/api/status"'); } finally { configFile.Close(); }
+    var command = quote(curl) + ' --disable --silent --globoff --noproxy "*" --connect-timeout 10 --max-time 20' +
+        ' --max-filesize 1048576 --proto "=http,https" --output ' + quote(response) +
+        ' --write-out "%{http_code}" --config ' + quote(config);
+    if (caBundle) command += " --cacert " + quote(caBundle);
+    for (;;) {
+        var remaining = serverWait * 1000 - (new Date().getTime() - start);
+        if (remaining <= 0) break;
+        WScript.Sleep(Math.min(delay * 1000, remaining));
+        var result = execute(command), status = result.output.replace(/^\s+|\s+$/g, "");
+        if (result.code === 0 && /^2\d\d$/.test(status)) {
+            log("[INFO] Thunderstorm answers again after " + Math.round((new Date().getTime() - start) / 1000) +
+                " seconds; continuing with the next file.");
+            return true;
+        }
+        delay = Math.min(60, delay * 2);
+    }
+    log("[ERROR] Thunderstorm unreachable for " + serverWait + " seconds; stopping the collection. Remaining files are not sent.");
+    return false;
 }
 function walk(root) {
     var stack = [root];
-    while (stack.length) {
+    while (stack.length && !serverLost) {
         var path = stack.pop();
         if (excluded(path)) continue;
         try {
@@ -202,10 +247,12 @@ function walk(root) {
                 } catch (error) { stats.scan_errors++; log("[ERROR] Cannot inspect a subdirectory of " + path + ": " + error.message); }
             }
             var files = new Enumerator(directory.Files);
-            for (; !files.atEnd(); files.moveNext()) {
+            for (; !files.atEnd() && !serverLost; files.moveNext()) {
                 try {
                     var file = files.item();
-                    if ((file.Attributes & 1024) !== 0) { stats.skipped++; continue; }
+                    // FSO exposes no reparse tag: links, deduplicated, compressed (WOF) and cloud
+                    // placeholder files all look the same here and are skipped.
+                    if ((file.Attributes & 1024) !== 0) { stats.skipped++; reparseFiles++; continue; }
                     upload(file);
                 } catch (error) { stats.failed++; log("[ERROR] Cannot examine a file in " + path + ": " + error.message); }
             }
@@ -225,6 +272,7 @@ try {
     var maxSize = number("COLLECT_MAX_SIZE", COLLECT_MAX_SIZE, 1, 209715200);
     var maxAge = number("MAX_AGE", MAX_AGE, 0, 36500);
     var attempts = number("UPLOAD_ATTEMPTS", UPLOAD_ATTEMPTS, 1, 10);
+    var serverWait = number("SERVER_WAIT", SERVER_WAIT, 0, 86400);
     var dryRun = flag("DRY_RUN", DRY_RUN);
     var caBundle = scheme === "https" ? setting("CURL_CA_BUNDLE", CURL_CA_BUNDLE) : "";
     if (caBundle && !dryRun) {
@@ -234,8 +282,8 @@ try {
     }
     var cutoff = new Date().getTime() - maxAge * 86400000;
     var source = setting("SOURCE", SOURCE || shell.ExpandEnvironmentStrings("%COMPUTERNAME%"));
-    var url = scheme + "://" + server + ":" + port + "/api/checkAsync" +
-        "?source=" + encodeURIComponent(source);
+    var baseUrl = scheme + "://" + server + ":" + port;
+    var url = baseUrl + "/api/checkAsync" + "?source=" + encodeURIComponent(source);
     var selected = setting("RELEVANT_EXTENSIONS", RELEVANT_EXTENSIONS).split(";");
     var allExtensions = selected.length === 1 && selected[0] === "*", extensions = {};
     for (var i = 0; i < selected.length && !allExtensions; i++) {
@@ -260,8 +308,12 @@ try {
     if (environment("PROCESSOR_ARCHITEW6432"))
         log("[WARN] 32-bit process on 64-bit Windows: file-system redirection shows %SystemRoot%\\SysWOW64 as %SystemRoot%\\System32, so the real System32 is not collected. Start the script from a 64-bit command prompt (%SystemRoot%\\SysNative\\cmd.exe from a 32-bit host) to scan it.");
     if (!dryRun) { var curl = resolveCurl(); createWorkspace(); }
-    for (var i = 0; i < roots.length; i++) walk(roots[i]);
-    if (stats.failed || stats.scan_errors) exitCode = 1;
+    for (var i = 0; i < roots.length && !serverLost; i++) walk(roots[i]);
+    if (reparseFiles)
+        log("[WARN] " + reparseFiles + " reparse point file(s) skipped: links, deduplicated, compressed (WOF) or cloud " +
+            "placeholder files cannot be told apart by this collector. The PowerShell collector reads deduplicated " +
+            "and compressed files.");
+    if (stats.failed || stats.scan_errors || serverLost) exitCode = 1;
 } catch (error) { log("[ERROR] " + error.message); exitCode = 2; }
 finally {
     if (workspace) {
