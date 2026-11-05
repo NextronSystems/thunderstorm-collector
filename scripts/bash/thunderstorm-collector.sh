@@ -25,7 +25,7 @@ THUNDERSTORM_SERVER=""       # Required: e.g. "192.0.2.10" or "scanner.example.o
 THUNDERSTORM_PORT=8080        # TCP port, 1..65535; independent of USE_SSL.
 USE_SSL=0                    # 0 = HTTP; 1 = HTTPS (--ssl / --no-ssl).
 INSECURE=0                   # Keep 0: verify TLS certificates. 1 is for explicit testing only.
-CA_CERT=""                  # Empty = system trust; otherwise PEM CA file for HTTPS.
+CA_CERT=""                  # Empty = system trust; otherwise PEM CA file, implies HTTPS.
 SOURCE_NAME=""              # Empty = detected hostname; otherwise an inventory/incident label.
 
 # Search recursively. Example: SCAN_FOLDERS=("/var/www" "/home/alice")
@@ -38,6 +38,7 @@ MAX_AGE=30                   # Days since last modification; 0 = no age filter (
 MAX_FILE_SIZE_KB=2048         # KiB (1024 bytes); 2048 = 2 MiB. Exact limit included; >0 required.
 
 RETRIES=3                    # Total normal upload attempts, 1..10; HTTP 503 has a separate budget.
+SERVER_WAIT=600              # Seconds to wait for a lost server before stopping, 0..86400; 0 = stop at once.
 DRY_RUN=0                    # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
 DEBUG=0                      # 1 = additional diagnostics (--debug / --no-debug).
 PROGRESS_MODE=""            # Empty = automatic on a terminal; "on" or "off" forces it.
@@ -53,6 +54,13 @@ SYSLOG_FACILITY="user"       # Syslog facility used only when LOG_TO_SYSLOG=1.
 
 UPLOAD_TOOL=""
 WORK_DIR=""
+NO_SSL_REQUESTED=0
+declare -a SCAN_ROOTS=()
+# Server loss: after OUTAGE_FILES files in a row without a server answer, wait_for_server.
+OUTAGE_FILES=3
+OUTAGE_WAITED=0
+UPLOAD_STATUS=""
+SUBMIT_OUTCOME=""
 declare -a CURL_EXTRA_OPTS=()
 declare -a WGET_EXTRA_OPTS=()
 
@@ -178,6 +186,18 @@ cleanup_tmp_files() {
 
 INTERRUPTED=0
 
+# A console write failed: the terminal, SSH session or pipe reader is gone. Stop
+# console output and keep collecting; the log file and syslog still record the run.
+# Bash 3.2 keeps the unwritten bytes in its stdout buffer and prepends them to the
+# next builtin output, even inside a command substitution or a redirected function
+# (the scan ID), so flush them into /dev/null.
+console_lost() {
+    LOG_TO_CMDLINE=0
+    SHOW_PROGRESS=0
+    printf '%s' '' > /dev/null 2>&1
+    return 0
+}
+
 send_interrupted_marker() {
     if [ "$DRY_RUN" -eq 0 ] && [ -n "$WORK_DIR" ] && [ -n "$UPLOAD_TOOL" ]; then
         local _elapsed=0
@@ -198,7 +218,7 @@ send_interrupted_marker() {
 
 on_signal() {
     # Prevent recursive signal handling
-    trap '' INT TERM
+    trap '' INT TERM HUP QUIT
     INTERRUPTED=1
     log_msg warn "Received signal, sending interrupted marker and exiting..."
     send_interrupted_marker
@@ -207,12 +227,18 @@ on_signal() {
     exit 1
 }
 
+# Unconditional and idempotent: the workspace can hold a copy of a sample, and a
+# later run over the temporary directory would upload it.
 on_exit() {
-    [ "$INTERRUPTED" -eq 0 ] && cleanup_tmp_files
+    cleanup_tmp_files
 }
 
 trap on_exit EXIT
-trap on_signal INT TERM
+# HUP: closed terminal or SSH disconnect. QUIT: Ctrl-\. Without a trap QUIT kills
+# Bash without running the EXIT trap.
+trap on_signal INT TERM HUP QUIT
+# A handler, not '': an ignored SIGPIPE would be inherited by curl, wget and find.
+trap console_lost PIPE
 
 log_msg() {
     local level="$1"
@@ -232,7 +258,10 @@ log_msg() {
     if [ "$LOG_TO_FILE" -eq 1 ]; then
         if ! printf "%s %s %s\n" "$ts" "$level" "$clean" >> "$LOGFILE" 2>/dev/null; then
             LOG_TO_FILE=0
-            printf "%s warn Could not write to log file '%s'; disabling file logging\n" "$ts" "$LOGFILE" >&2
+            # The failed write left its bytes in Bash 3.2's stdout buffer as well.
+            printf '%s' '' > /dev/null 2>&1
+            printf "%s warn Could not write to log file '%s'; disabling file logging\n" "$ts" "$LOGFILE" >&2 2>/dev/null ||
+                console_lost
         fi
     fi
 
@@ -249,14 +278,16 @@ log_msg() {
     if [ "$LOG_TO_CMDLINE" -eq 1 ]; then
         # Clear progress line before printing log messages to avoid interleaving
         if [ "$SHOW_PROGRESS" -eq 1 ]; then
-            printf '\r\033[K' >&2
+            printf '\r\033[K' >&2 2>/dev/null || { console_lost; return 0; }
         fi
+        # A closed console must not end the run: SIGPIPE is trapped, and when it was
+        # ignored on entry (systemd services), the failed write is caught here.
         case "$level" in
             error|warn)
-                printf "[%s] %s\n" "$level" "$clean" >&2
+                printf "[%s] %s\n" "$level" "$clean" >&2 2>/dev/null || console_lost
                 ;;
             *)
-                printf "[%s] %s\n" "$level" "$clean"
+                printf "[%s] %s\n" "$level" "$clean" 2>/dev/null || console_lost
                 ;;
         esac
     fi
@@ -295,9 +326,11 @@ Options:
   --source <name>            Source identifier (default: hostname)
   --ssl                      Use HTTPS
   -k, --insecure             Skip TLS certificate verification
-  --ca-cert <path>           Path to custom CA certificate bundle for TLS
+  --ca-cert <path>           CA certificate bundle for TLS; implies --ssl
   --async                    Accepted for compatibility; uploads are always asynchronous
   --retries <num>            Normal attempts per file, 1..10 (default: 3)
+  --server-wait <sec>        After 3 files in a row get no server response, wait up to
+                             this long for the server, then stop (default: 600; 0 = stop)
   --dry-run                  Do not upload or contact the server; only show what would be submitted
   --progress                 Force progress reporting
   --no-progress              Disable progress reporting
@@ -407,6 +440,22 @@ escape_find_path() {
     path="${path//\?/\\?}"
     path="${path//\[/\\[}"
     printf '%s' "$path"
+}
+
+# path_under_roots: true when PATH is one of the resolved SCAN_ROOTS or lies below
+# one. A string comparison only: a stat on a mount point of a stale hard NFS, CIFS
+# or sshfs mount blocks forever in uninterruptible sleep, so mount points are never
+# accessed. find only visits paths below its start points, so a -prune for any other
+# path could never match.
+path_under_roots() {
+    local root
+    for root in "${SCAN_ROOTS[@]}"; do
+        case "$root" in
+            /) case "$1" in /*) return 0 ;; esac ;;
+            *) case "$1" in "$root"|"$root"/*) return 0 ;; esac ;;
+        esac
+    done
+    return 1
 }
 
 # The sentinel preserves trailing newlines; command substitution alone does not.
@@ -606,7 +655,8 @@ upload_with_curl() {
         -F "$form_arg" \
         < "$filepath" > "$resp_file" 2>"$err_file"
     code=$?
-    response_is_bounded "$resp_file" "$header_file" || return 97
+    UPLOAD_STATUS="none"
+    response_is_bounded "$resp_file" "$header_file" || { UPLOAD_STATUS="oversized"; return 97; }
 
     if [ $code -ne 0 ]; then
         local _curl_err
@@ -616,6 +666,7 @@ upload_with_curl() {
 
     # Extract HTTP status code from headers
     http_code="$(grep -oE '^HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+    [ -z "$http_code" ] || UPLOAD_STATUS="$http_code"
 
     # Handle 503 back-pressure
     if [ "$http_code" = "503" ]; then
@@ -700,11 +751,13 @@ upload_with_wget() {
         --post-file="$body_file" \
         "$endpoint" 2>"$header_file"
     code=$?
-    response_is_bounded "$resp_file" "$header_file" || return 97
+    UPLOAD_STATUS="none"
+    response_is_bounded "$resp_file" "$header_file" || { UPLOAD_STATUS="oversized"; return 97; }
 
     # Extract HTTP status code from headers (wget -S writes headers to stderr with leading spaces)
     local http_code
     http_code="$(grep -oE '^[[:space:]]*HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+    [ -z "$http_code" ] || UPLOAD_STATUS="$http_code"
 
     # Handle 503 back-pressure
     if [ "$http_code" = "503" ]; then
@@ -867,9 +920,12 @@ submit_file() {
     local wait=2
     local max_503_retries=5
     local _503_count=0
+    local _answered=0
+    local _local_error=0
 
     # Preserve client-side path in multipart filename for server-side audit logs.
     filename="$filepath"
+    SUBMIT_OUTCOME="ok"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         log_msg info "DRY-RUN: would submit '$filepath'"
@@ -877,6 +933,8 @@ submit_file() {
     fi
 
     while [ "$try" -le "$RETRIES" ]; do
+        # Empty after the call: a local error before any request was sent.
+        UPLOAD_STATUS=""
         if [ "$UPLOAD_TOOL" = "curl" ]; then
             upload_with_curl "$endpoint" "$filepath" "$filename"
             rc=$?
@@ -888,6 +946,11 @@ submit_file() {
         if [ "$rc" -eq 0 ]; then
             return 0
         fi
+        case "$UPLOAD_STATUS" in
+            none|503) ;;
+            '') _local_error=1 ;;
+            *) _answered=1 ;;
+        esac
 
         # 503 back-pressure: sleep already happened in upload function,
         # retry without counting against the normal retry budget (up to a cap)
@@ -898,7 +961,7 @@ submit_file() {
                 continue
             fi
             log_msg warn "Too many 503 responses for '$filepath', giving up"
-            return "$rc"
+            break
         fi
 
         log_msg warn "Upload failed for '$filepath' (attempt ${try}/${RETRIES}, code ${rc})"
@@ -911,7 +974,73 @@ submit_file() {
         try=$((try + 1))
     done
 
+    # "outage": no attempt got an HTTP answer other than 503, so the server is either
+    # gone or saturated. Any other status shows that the server is there.
+    SUBMIT_OUTCOME="outage"
+    [ "$_local_error" -eq 0 ] || SUBMIT_OUTCOME="local"
+    [ "$_answered" -eq 0 ] || SUBMIT_OUTCOME="answered"
     return "$rc"
+}
+
+# server_is_up: one GET /api/status; true only for a complete 2xx response.
+server_is_up() {
+    local status_url="$1/api/status"
+    local resp_file="$WORK_DIR/status.response"
+    local header_file="$WORK_DIR/status.headers"
+    local rc http_code
+    : > "$header_file" || return 1
+    : > "$resp_file" || return 1
+    if [ "$UPLOAD_TOOL" = "curl" ]; then
+        run_http curl --disable --noproxy '*' --globoff -sS -D "$header_file" -o "$resp_file" "${CURL_EXTRA_OPTS[@]}" \
+            --connect-timeout 10 --max-time 10 "$status_url" 2>/dev/null
+        rc=$?
+    else
+        run_http wget --no-config --no-proxy -S -O "$resp_file" "${WGET_EXTRA_OPTS[@]}" \
+            --tries=1 --max-redirect=0 --timeout=10 "$status_url" 2>"$header_file"
+        rc=$?
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    response_is_bounded "$resp_file" "$header_file" || return 1
+    http_code="$(grep -oE '^[[:space:]]*HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+    case "$http_code" in
+        2[0-9][0-9]) return 0 ;;
+    esac
+    return 1
+}
+
+# wait_for_server: called after OUTAGE_FILES consecutive "outage" files. Takes no new
+# file and polls /api/status with capped backoff (2, 4, 8 ... 60 s) until the server
+# answers or SERVER_WAIT seconds have passed. Without this, every remaining file would
+# spend its full retry budget, which takes hours to days on a large collection.
+# Sets OUTAGE_WAITED to the seconds waited; returns 0 once the server is back.
+wait_for_server() {
+    local base_url="$1"
+    local started now up delay=2 slept=0
+    OUTAGE_WAITED=0
+    started="$(date +%s 2>/dev/null)"
+    is_integer "$started" || started=""
+    log_msg warn "No server response for $OUTAGE_FILES files in a row; pausing uploads and polling ${base_url}/api/status for up to ${SERVER_WAIT}s"
+    while [ "$OUTAGE_WAITED" -lt "$SERVER_WAIT" ]; do
+        [ "$delay" -le $((SERVER_WAIT - OUTAGE_WAITED)) ] || delay=$((SERVER_WAIT - OUTAGE_WAITED))
+        sleep "$delay"
+        slept=$((slept + delay))
+        server_is_up "$base_url"
+        up=$?
+        # Wall-clock time includes the probes; the sum of the sleeps bounds the loop
+        # even if the clock is unavailable or steps backwards.
+        OUTAGE_WAITED="$slept"
+        if [ -n "$started" ] && now="$(date +%s 2>/dev/null)" && is_integer "$now" &&
+            [ $((now - started)) -gt "$OUTAGE_WAITED" ]; then
+            OUTAGE_WAITED=$((now - started))
+        fi
+        if [ "$up" -eq 0 ]; then
+            log_msg info "Server reachable again after ${OUTAGE_WAITED}s; resuming with the next file"
+            return 0
+        fi
+        delay=$((delay * 2))
+        [ "$delay" -le 60 ] || delay=60
+    done
+    return 1
 }
 
 parse_args() {
@@ -961,16 +1090,20 @@ parse_args() {
                 ;;
             --ssl)
                 USE_SSL=1
+                NO_SSL_REQUESTED=0
                 ;;
-            --no-ssl) USE_SSL=0 ;;
+            --no-ssl)
+                USE_SSL=0
+                NO_SSL_REQUESTED=1
+                ;;
             --verify-tls) INSECURE=0 ;;
             -k|--insecure)
                 INSECURE=1
                 ;;
             --ca-cert)
+                # validate_config turns on HTTPS for a CA from here or the header.
                 [ -n "${2:-}" ] || die "Missing value for $arg"
                 CA_CERT="$2"
-                USE_SSL=1
                 shift
                 ;;
             --async)
@@ -979,6 +1112,11 @@ parse_args() {
             --retries)
                 [ -n "${2:-}" ] || die "Missing value for $arg"
                 RETRIES="$2"
+                shift
+                ;;
+            --server-wait)
+                [ -n "${2:-}" ] || die "Missing value for $arg"
+                SERVER_WAIT="$2"
                 shift
                 ;;
             --dry-run)
@@ -1051,6 +1189,7 @@ validate_config() {
     is_integer "$MAX_AGE" || die "max-age must be numeric: '$MAX_AGE'"
     is_integer "$MAX_FILE_SIZE_KB" || die "max-size-kb must be numeric: '$MAX_FILE_SIZE_KB'"
     is_integer "$RETRIES" || die "retries must be numeric: '$RETRIES'"
+    is_integer "$SERVER_WAIT" || die "server-wait must be numeric: '$SERVER_WAIT'"
 
     [ "$THUNDERSTORM_PORT" -gt 0 ] || die "Port must be greater than 0"
     [ "$THUNDERSTORM_PORT" -le 65535 ] || die "Port must be <= 65535"
@@ -1058,6 +1197,9 @@ validate_config() {
     [ "$MAX_FILE_SIZE_KB" -gt 0 ] || die "max-size-kb must be > 0"
     [ "$RETRIES" -ge 1 ] || die "retries must be >= 1"
     [ "$RETRIES" -le 10 ] || die "retries must be <= 10"
+    [ "${#SERVER_WAIT}" -le 5 ] && [ "$SERVER_WAIT" -le 86400 ] || die "server-wait must be <= 86400"
+    # Leading zeros would make Bash arithmetic read the value as octal.
+    SERVER_WAIT=$((10#$SERVER_WAIT))
 
     [ -n "$THUNDERSTORM_SERVER" ] || die "Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST."
     is_valid_server "$THUNDERSTORM_SERVER" ||
@@ -1065,8 +1207,13 @@ validate_config() {
     if [ "${#SCAN_FOLDERS[@]}" -eq 0 ]; then
         die "At least one directory is required"
     fi
-    if [ -n "$CA_CERT" ] && [ ! -f "$CA_CERT" ]; then
-        die "CA certificate file not found: '$CA_CERT'"
+    if [ -n "$CA_CERT" ]; then
+        # A CA is only used for HTTPS. With plain HTTP the samples would cross the
+        # network in cleartext although a CA was configured (CLI or header).
+        [ "$NO_SSL_REQUESTED" -eq 0 ] ||
+            die "--no-ssl conflicts with the CA certificate '$CA_CERT' (--ca-cert or CA_CERT); a CA certificate requires HTTPS"
+        USE_SSL=1
+        [ -f "$CA_CERT" ] || die "CA certificate file not found: '$CA_CERT'"
     fi
     if [ -n "$CA_CERT" ] && [ "$INSECURE" -eq 1 ]; then
         log_msg warn "--ca-cert and --insecure are both set; --insecure takes precedence"
@@ -1142,6 +1289,69 @@ main() {
     done
     [ "$DRY_RUN" -eq 1 ] && log_msg info "Dry-run mode enabled"
 
+    # Resolve the roots and build the find exclusions before the begin marker, so
+    # nothing here can leave a begun collection behind on the server.
+    SCAN_ROOTS=()
+    for scandir in "${SCAN_FOLDERS[@]}"; do
+        if [ ! -d "$scandir" ]; then
+            log_msg warn "Skipping non-directory path '$scandir'"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
+            continue
+        fi
+
+        if ! resolve_directory "$scandir"; then
+            log_msg warn "Cannot access scan directory"
+            SCAN_ERRORS=$((SCAN_ERRORS + 1))
+            continue
+        fi
+        SCAN_ROOTS+=("$RESOLVED_DIR")
+    done
+
+    # Build find exclusions once (shared across all scan dirs)
+    local find_excludes=()
+    find_excludes+=(-path "$(escape_find_path "$WORK_DIR")" -prune -o)
+    if [ "$LOG_TO_FILE" -eq 1 ]; then
+        local log_dir log_path
+        log_dir="${LOGFILE%/*}"
+        [ "$log_dir" != "$LOGFILE" ] || log_dir=.
+        [ -n "$log_dir" ] || log_dir=/
+        if resolve_directory "$log_dir"; then
+            log_path="$RESOLVED_DIR/${LOGFILE##*/}"
+            log_path="$(escape_find_path "$log_path"; printf '.')"
+            find_excludes+=(-path "${log_path%.}" -prune -o)
+        fi
+    fi
+    # Only paths within a scan root; see path_under_roots. No [ -d ] on mount points.
+    local _ep
+    for _ep in "${EXCLUDE_PATHS[@]}"; do
+        path_under_roots "$_ep" && find_excludes+=(-path "$_ep" -prune -o)
+    done
+    local _mount_pattern
+    while IFS= read -r -d '' _ep; do
+        if [ -n "$_ep" ] && path_under_roots "$_ep"; then
+            _mount_pattern="$(escape_find_path "$_ep"; printf '.')"
+            find_excludes+=(-path "${_mount_pattern%.}" -prune -o)
+        fi
+    done < <(get_excluded_mounts)
+
+    # Prune known cloud storage directory names at the find level so they are
+    # excluded from both the file count and processing (keeps progress accurate).
+    local _cloud_name
+    for _cloud_name in $CLOUD_DIR_NAMES; do
+        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
+    done
+    local _old_ifs="$IFS"
+    IFS='|'
+    for _cloud_name in $CLOUD_DIR_NAMES_SPACED; do
+        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
+    done
+    for _cloud_name in $CLOUD_DIR_PATTERNS; do
+        find_excludes+=(\( -iname "${_cloud_name}*" -type d -prune \) -o)
+    done
+    IFS="$_old_ifs"
+    # Also prune macOS CloudStorage
+    find_excludes+=(\( -iname "CloudStorage" -path "*/Library/CloudStorage" -type d -prune \) -o)
+
     # Send collection begin marker; capture scan_id if server returns one
     if [ "$DRY_RUN" -eq 0 ]; then
         if ! detect_upload_tool; then
@@ -1181,66 +1391,9 @@ main() {
         SHOW_PROGRESS=0
     fi
 
-    # Build find exclusions once (shared across all scan dirs)
-    local find_excludes=()
-    find_excludes+=(-path "$(escape_find_path "$WORK_DIR")" -prune -o)
-    if [ "$LOG_TO_FILE" -eq 1 ]; then
-        local log_dir log_path
-        log_dir="${LOGFILE%/*}"
-        [ "$log_dir" != "$LOGFILE" ] || log_dir=.
-        [ -n "$log_dir" ] || log_dir=/
-        if resolve_directory "$log_dir"; then
-            log_path="$RESOLVED_DIR/${LOGFILE##*/}"
-            log_path="$(escape_find_path "$log_path"; printf '.')"
-            find_excludes+=(-path "${log_path%.}" -prune -o)
-        fi
-    fi
-    local _ep
-    for _ep in "${EXCLUDE_PATHS[@]}"; do
-        [ -d "$_ep" ] && find_excludes+=(-path "$_ep" -prune -o)
-    done
-    local _mount_pattern
-    while IFS= read -r -d '' _ep; do
-        if [ -n "$_ep" ] && [ -d "$_ep" ]; then
-            _mount_pattern="$(escape_find_path "$_ep"; printf '.')"
-            find_excludes+=(-path "${_mount_pattern%.}" -prune -o)
-        fi
-    done < <(get_excluded_mounts)
-
-    # Prune known cloud storage directory names at the find level so they are
-    # excluded from both the file count and processing (keeps progress accurate).
-    local _cloud_name
-    for _cloud_name in $CLOUD_DIR_NAMES; do
-        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
-    done
-    local _old_ifs="$IFS"
-    IFS='|'
-    for _cloud_name in $CLOUD_DIR_NAMES_SPACED; do
-        find_excludes+=(\( -iname "$_cloud_name" -type d -prune \) -o)
-    done
-    for _cloud_name in $CLOUD_DIR_PATTERNS; do
-        find_excludes+=(\( -iname "${_cloud_name}*" -type d -prune \) -o)
-    done
-    IFS="$_old_ifs"
-    # Also prune macOS CloudStorage
-    find_excludes+=(\( -iname "CloudStorage" -path "*/Library/CloudStorage" -type d -prune \) -o)
-
     # First pass: collect all file lists and count total files for progress
     local all_find_files=()
-    for scandir in "${SCAN_FOLDERS[@]}"; do
-        if [ ! -d "$scandir" ]; then
-            log_msg warn "Skipping non-directory path '$scandir'"
-            SCAN_ERRORS=$((SCAN_ERRORS + 1))
-            continue
-        fi
-
-        if ! resolve_directory "$scandir"; then
-            log_msg warn "Cannot access scan directory"
-            SCAN_ERRORS=$((SCAN_ERRORS + 1))
-            continue
-        fi
-        scandir="$RESOLVED_DIR"
-
+    for scandir in "${SCAN_ROOTS[@]}"; do
         log_msg info "Scanning '$scandir'"
         find_results_file="$(mktemp_portable)" || {
             log_msg error "Could not create temporary file list for '$scandir'"
@@ -1277,6 +1430,8 @@ main() {
     log_msg info "Found $TOTAL_FILES candidate files"
 
     local _processed=0
+    local _outage_streak=0
+    local _server_lost=0
     for find_results_file in "${all_find_files[@]}"; do
         while IFS= read -r -d '' file_path; do
             # Check for interruption between files
@@ -1286,7 +1441,8 @@ main() {
 
             # Show progress
             if [ "$SHOW_PROGRESS" -eq 1 ] && [ "$TOTAL_FILES" -gt 0 ]; then
-                printf '\r[%d/%d] %d%%' "$_processed" "$TOTAL_FILES" "$(( _processed * 100 / TOTAL_FILES ))" >&2
+                printf '\r[%d/%d] %d%%' "$_processed" "$TOTAL_FILES" "$(( _processed * 100 / TOTAL_FILES ))" >&2 2>/dev/null ||
+                    console_lost
             fi
 
             FILES_SCANNED=$((FILES_SCANNED + 1))
@@ -1319,9 +1475,23 @@ main() {
             log_msg debug "Submitting '$file_path'"
             if submit_file "$api_endpoint" "$file_path"; then
                 FILES_SUBMITTED=$((FILES_SUBMITTED + 1))
+                _outage_streak=0
             else
                 FILES_FAILED=$((FILES_FAILED + 1))
                 log_msg error "Could not upload '$file_path'"
+                # Files that never reached the server (local errors) neither count
+                # nor reset the streak.
+                case "$SUBMIT_OUTCOME" in
+                    answered) _outage_streak=0 ;;
+                    outage) _outage_streak=$((_outage_streak + 1)) ;;
+                esac
+                if [ "$_outage_streak" -ge "$OUTAGE_FILES" ]; then
+                    if ! wait_for_server "$base_url"; then
+                        _server_lost=1
+                        break 2
+                    fi
+                    _outage_streak=0
+                fi
             fi
         done < "$find_results_file"
     done
@@ -1333,7 +1503,15 @@ main() {
 
     # Clear progress line if we were showing progress
     if [ "$SHOW_PROGRESS" -eq 1 ]; then
-        printf '\r\033[K' >&2
+        printf '\r\033[K' >&2 2>/dev/null || console_lost
+    fi
+
+    if [ "$_server_lost" -eq 1 ]; then
+        # The files not attempted stay out of every counter.
+        log_msg error "Server unreachable for ${OUTAGE_WAITED}s, stopping ($((TOTAL_FILES - _processed)) of $TOTAL_FILES candidate files not attempted)"
+        log_msg info "Run stopped: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$elapsed"
+        send_interrupted_marker
+        return 1
     fi
 
     log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$elapsed"

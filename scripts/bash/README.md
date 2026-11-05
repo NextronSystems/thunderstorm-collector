@@ -61,11 +61,13 @@ console output. Keep externally captured logs outside the input directories.
 - HTTP/HTTPS, asynchronous `/api/checkAsync` only; there is no synchronous mode,
   and `--async` is accepted and ignored so existing command lines keep working.
   An accepted asynchronous upload does not mean analysis has finished.
-- TLS verification is enabled. `--ca-cert FILE` selects HTTPS and makes that CA
-  bundle the **only** trust anchor: an empty CA directory is passed to curl
-  (`--capath`) and wget (`--ca-directory`), so system CAs are not trusted in
-  addition. `--insecure` deliberately disables verification; do not use it as a
-  routine workaround for a certificate error.
+- TLS verification is enabled. `--ca-cert FILE`, or `CA_CERT` in the header,
+  selects HTTPS even when `USE_SSL=0`, and makes that CA bundle the **only** trust
+  anchor: an empty CA directory is passed to curl (`--capath`) and wget
+  (`--ca-directory`), so system CAs are not trusted in addition. `--no-ssl`
+  together with a CA certificate is a configuration error (exit 2), so samples
+  never go out over plain HTTP while a CA is configured. `--insecure` deliberately
+  disables verification; do not use it as a routine workaround for a certificate error.
 - Binary contents and unusual local filenames are supported. Multipart filename
   metadata replaces quotes, semicolons, backslashes and every control character
   (CR, LF, TAB, ESC, DEL, ...) with underscores; a strict multipart parser rejects
@@ -81,6 +83,15 @@ console output. Keep externally captured logs outside the input directories.
   with capped exponential backoff. HTTP 503 has a separate budget of five busy
   responses; integer-seconds `Retry-After` values are honored up to 120 seconds.
   Missing, malformed, or HTTP-date values use a two-second fallback.
+- Server loss: when three files in a row fail without any HTTP answer (connection
+  refused, timeout, reset) or use up their 503 budget, the collector takes no new
+  file and polls `GET /api/status` after 2, 4, 8 ... seconds, at most 60 seconds
+  apart, for up to `SERVER_WAIT` seconds (header, default 600; `--server-wait
+  SECONDS`; `0` stops at once). A 2xx answer resumes the run with the next file;
+  the files that already failed stay failed. If the time runs out, the collector
+  logs `Server unreachable for N s, stopping`, sends a best-effort `interrupted`
+  marker and exits `1`; files it did not attempt are not counted. Any other HTTP
+  answer, such as 500, resets the count. Dry-run never waits.
 - Failed uploads, unreadable/disappeared files, and incomplete directory scans
   do not prevent other readable files from being processed. They make the overall
   result nonzero. An end-marker failure also makes the result nonzero even when
@@ -91,13 +102,17 @@ console output. Keep externally captured logs outside the input directories.
   The configured collector log file is also excluded. Workspace creation failure
   is fatal; there is no predictable temporary-file fallback.
 - Optional logging, syslog, debug output, progress, and best-effort interrupted
-  markers on SIGINT/SIGTERM. `--log-file` enables file logging; `--no-log-file`
-  disables it. If both are present, the last option wins.
+  markers on SIGINT, SIGTERM, SIGHUP and SIGQUIT. `--log-file` enables file
+  logging; `--no-log-file` disables it. If both are present, the last option wins.
+- A console that goes away (a dropped SSH session without a terminal, or a pipe
+  reader such as `tee` that ends) does not end the run: console output stops,
+  and file and syslog logging continue. The workspace is removed on every exit
+  that the shell handles, including after a signal.
 
 | Exit Code | Meaning |
 |---|---|
 | `0` | Completed without detected errors; an empty readable directory is valid |
-| `1` | Partial failure, incomplete scan, failed end marker, or interrupted run |
+| `1` | Partial failure, incomplete scan, failed end marker, interrupted run, or server lost for longer than `SERVER_WAIT` |
 | `2` | Invalid configuration, missing upload tool, unusable workspace, or failed begin handshake |
 
 The summary reports `scanned`, `submitted`, `skipped`, `failed`, and `scan_errors`.
@@ -115,12 +130,15 @@ Missing roots are errors, not successful empty collections.
   are matched against directories only: a regular file called `mega` or
   `OneDrive-Setup.exe` is an ordinary sample and is collected. Automatic detection
   of network/special mounts uses Linux `/proc/mounts`; it is not comprehensive on
-  other systems. Select known local roots on macOS and other Unix systems.
+  other systems. Select known local roots on macOS and other Unix systems. Mount
+  points are compared with the scan roots as text and never accessed by the
+  collector's own checks, so a hung network mount outside the roots does not stall
+  the run. The exclusions are built before the begin marker is sent.
 - Curl: 10-second connection timeout and 300-second total upload timeout. GNU wget:
   10-second connection timeout, 300-second read timeout, one internal attempt.
   Wget's read timeout is **not a total wall-clock deadline** for a server that
   keeps sending data. Prefer curl.
-- Marker requests have 10-second timeouts; begin is tried twice. Large collections
+- Marker requests and `/api/status` probes have 10-second timeouts; begin is tried twice. Large collections
   and repeated busy responses can take much longer than a smoke test.
 - Responses are limited to 1 MiB. Each transport output file has an additional
   operating-system write limit of at most 2 MiB, including headers and diagnostics.
