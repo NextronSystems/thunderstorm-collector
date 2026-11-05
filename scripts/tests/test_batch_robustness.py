@@ -259,11 +259,7 @@ class BatchRobustness(shared.PowerShellRobustness):
     def test_compressed_wof_file_is_collected(self):
         # FSO exposes no reparse tag, so Batch cannot tell a compressed or deduplicated
         # file from a link; it skips all of them and says so at the end of the run.
-        path = self.file("compressed.exe", b"MZ" + b"\x00" * 65536)
-        result = subprocess.run(["compact.exe", "/c", "/exe:xpress4k", path], stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
-        if result.returncode != 0 or not os.stat(path).st_file_attributes & 0x400:
-            self.skipTest("compact /exe did not leave a reparse point here")
+        self.wof_file("compressed.exe")
         self.assertEqual(self.run_collector(), 0, self.output)
         self.assertEqual(self.uploads, [])
         self.assertIn("reparse point", self.output)
