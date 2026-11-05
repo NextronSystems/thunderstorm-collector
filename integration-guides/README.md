@@ -16,6 +16,7 @@ another system and sends them to Thunderstorm.
 
 | Platform | Approach | Guide | Evidence |
 | --- | --- | --- | --- |
+| Fortinet FortiGate / FortiOS | Export configurations, logs and diagnostics through the GUI or CLI, then scan on Linux with THOR Lab | [FortiGate export and scan guide](fortinet/fortigate-export-thor-lab.md) | Based on Fortinet and THOR documentation. Live appliance validation is pending. |
 | VMware ESXi 7 without Secure Boot | Persistent Python collector started from cron | [ESXi 7 without Secure Boot](esxi/esxi7-wo-secure-boot.md) | Earlier Python collector revisions ran on ESXi; versions were not recorded, and the current collector still needs validation there. See the [ESXi quick start](../scripts/README.md#vmware-esxi-use-the-python-collector). |
 | IBM AIX on POWER7 | THOR on a Linux analysis workstation reads the host over SSHFS; nothing runs on AIX | [AIX on POWER7 via SSHFS](aix/aix-power7-sshfs-scanning.md) | Prepared from IBM and upstream documentation; not tested against a live AIX/POWER7 host. |
 | Citrix NetScaler | Collection profile for the Go or Bash collector, kept with the [Emerging Threats profiles](../emerging-threats/README.md) | [NetScaler assessment profile](../emerging-threats/citrix-netscaler/README.md) | Legacy Go build tested in FreeBSD 8.4 and 14.3 VMs; Bash preset tested with synthetic files; named NetScaler firmware not yet tested. |
@@ -26,7 +27,7 @@ Other products, including appliances that cannot run a collector, are covered by
 
 | Location | Content |
 | --- | --- |
-| `integration-guides/<platform>/` | Running Thunderstorm collection, or an alternative such as SSHFS, on one platform |
+| `integration-guides/<platform>/` | Running Thunderstorm collection, or an alternative such as SSHFS or exported evidence, on one platform |
 | [`emerging-threats/`](../emerging-threats/README.md) | Time-bound collection profiles for a named assessment, such as the NetScaler profile |
 | [`docs/`](../docs/) | Cross-cutting references: scanning approaches, collector recommendations, construction guide, testing overview, acceptance report |
 | [`go/`](../go/README.md), [`scripts/`](../scripts/README.md) and [`sftp/`](../sftp/README.md) | Reference for each collector: options, requirements and compatibility evidence |
