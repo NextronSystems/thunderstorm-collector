@@ -219,6 +219,12 @@ File-size limits are in MiB (1024 × 1024 bytes), with the exact boundary includ
 
 Transport errors and HTTP 503 share a budget of **three retries after the initial attempt**. Transport failures use exponential delays of 4, 8, and 16 seconds; HTTP 503 uses an integer `Retry-After` value capped at 120 seconds, or 30 seconds when it is missing or invalid. Other HTTP errors and response-body read failures are logged and counted without a retry. A lost response can still cause a duplicate submission.
 
+No request can hang the collector. Connecting gives up after 30 seconds and the TLS handshake after 10 seconds. An upload fails when Thunderstorm accepts no data for 2 minutes, so a large file over a slow link is not cut off while it makes progress. Once a request has been sent, the answer must arrive within `--response-timeout` seconds: 120 by default, or 1800 with `--upload-synchronous`, where Thunderstorm scans the file before it answers. A missing answer counts as a transport error and is retried. Response bodies larger than 16 MiB are rejected.
+
+If Thunderstorm goes away during a run, the collector does not spend the full retry budget on every remaining file. After 3 files in a row could not be delivered (transport errors, or HTTP 503 until the retries were used up), it stops sending and polls `/api/status` with growing delays (2, 4, 8 ... up to 60 seconds) for up to `--server-wait` seconds (600 by default). When Thunderstorm answers again, the collection continues with the next file; the files that already failed stay counted as errors. When the time runs out, the walk stops, files that were already queued are counted as "Not sent", and the run exits with status 1. `--server-wait 0` stops at once.
+
+A selected file is checked again when it is opened for the upload: it must still be a regular file within `--max-filesize`, and on Unix-like systems the same file the walk saw. It is opened without following a symbolic link and without blocking on a FIFO or device that took its place. Exactly the size seen at that moment is sent; a file that shrinks while it is read is counted as an error, and a file that disappeared before it was read is not counted.
+
 Upload file names are sent as a quoted `filename` parameter with `\` and `"` backslash-escaped and every control character except TAB, plus DEL, percent-encoded (for example `%0D`, `%0A`, `%1B`), so a hostile file name cannot add MIME headers, alter the uploaded content or make the server reject the upload, whichever Go version built the binary.
 
 Redirects (HTTP 3xx) are never followed, for the status check or for uploads. Replaying an upload against a redirect target would send a body-less request and could report a transfer that Thunderstorm never accepted, so a redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy in front of Thunderstorm if you see one.
@@ -228,7 +234,7 @@ Redirects (HTTP 3xx) are never followed, for the status check or for uploads. Re
 | Status | Meaning |
 | --- | --- |
 | `0` | The run completed and every selected file was read and accepted (or, with `--dry-run`, every selected file could be opened). |
-| `1` | Startup or configuration failed (invalid option, unreachable server), **or** the run completed with errors: a scan root could not be read, or a selected file could not be read or was not accepted by Thunderstorm. The statistics and the log show which. |
+| `1` | Startup or configuration failed (invalid option, unreachable server), **or** the run completed with errors: a scan root could not be read, a selected file could not be read or was not accepted by Thunderstorm, or the collection stopped because Thunderstorm stayed unreachable for `--server-wait` seconds. The statistics and the log show which. |
 
 A missing scan root, an unreadable directory and every failed upload are logged when they happen and summarised in the statistics. A directory below a scan root that cannot be listed (permission denied is routine on a full scan, for example `System Volume Information` on Windows) is reported and counted under "Paths that could not be read during the walk" but does not change the exit status. Files that were skipped on purpose (size, age, type, exclusions, irregular files) are not errors. A file that disappears while the collector walks its directory is not counted either.
 
@@ -355,6 +361,8 @@ After reviewing the preview, use the same configuration and roots for upload. `-
 - **"magic header too long"**: Magic headers are limited to 1024 bytes. Check your magic header configuration.
 - **"Could not open CA file"**: The specified CA certificate file cannot be opened. Check the file path and permissions.
 - **"Could not add CA to certificate pool"**: The CA certificate file is not in valid PEM format or cannot be parsed.
+- **"no answer from Thunderstorm within ..."**: The server or a gateway in front of it accepted the connection but did not answer within `--response-timeout` seconds. Check the server's load and logs; raise the value only if Thunderstorm is known to answer slowly.
+- **"Thunderstorm did not accept 3 files in a row"** / **"Thunderstorm unreachable for ..., stopping the collection"**: The server went away during the run. See [Error Handling and Retry Logic](#error-handling-and-retry-logic) for `--server-wait`.
 
 ### Performance Tips
 
