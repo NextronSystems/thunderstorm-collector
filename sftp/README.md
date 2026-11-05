@@ -182,15 +182,37 @@ analysis side, where a current toolchain is available.
 - `--threads` sets parallel header checks and uploads, `--walk-threads`
   parallel directory listings. Over high-latency links, listing time grows
   with the number of directories; more walk threads shorten it.
-- Roots follow the same rules as listed entries: excludes apply to them, and a
-  root that is a symlink is not followed; give its target instead.
+- Excludes apply to roots as to listed entries. A root that is a symbolic
+  link is followed to its target, which the log names; excludes written for
+  the root as given still apply below it. A directory given twice is listed
+  once. Below a root of `/`, the pseudo filesystems `/proc`, `/sys` and `/dev`
+  are skipped; give them as roots to list them.
 - `--response-timeout` bounds the wait for Thunderstorm's answer after an
-  upload: 2 minutes by default, 30 minutes with `--upload-synchronous`. An
-  upload also stops when Thunderstorm accepts no data for 2 minutes.
+  upload: 2 minutes by default, 30 minutes with `--upload-synchronous`. A
+  plain number is seconds, as in the Go collector's `config.yml`. An upload
+  also stops when Thunderstorm accepts no data for 2 minutes. Uploads use
+  HTTP/1.1, also over HTTPS, so that this stall check works.
+- `--sftp-timeout` (default 5 minutes) closes the connection when the source
+  has not answered a pending SFTP request for that long, for example when its
+  SFTP server hangs on a dead network mount. Connecting, the SSH handshake and
+  the start of SFTP must finish within 30 seconds.
+- Each file is checked again after it is opened: it must still be a regular
+  file within `--max-filesize`, and exactly its size at that moment is sent. A
+  file that grows or shrinks while it is read is counted as a file error.
+- `--server-wait` (default 600 seconds): after 3 files in a row got no answer
+  from Thunderstorm (or only 503 until the retries were used up), the
+  collector stops sending and polls `/api/status`. It continues with the next
+  file when Thunderstorm answers, or stops when the time runs out. `0` stops
+  at once.
+- SIGINT or SIGTERM ends the run: pending uploads are cancelled, the manifest
+  and `--stats-json` are written, and the exit status is 1. A second signal
+  exits at once.
 
 Run `--help` for all options. Exit status 1 means that a selected file could
 not be read or sent, a root could not be read, the configuration was invalid,
-or the SSH or Thunderstorm connection failed, as with the Go collector.
+the SSH connection failed or was lost during the run, Thunderstorm could not be
+reached or stayed unreachable for `--server-wait`, or the run was interrupted.
+The statistics then show what is incomplete.
 
 ## Limits
 
@@ -199,9 +221,11 @@ or the SSH or Thunderstorm connection failed, as with the Go collector.
   collector on Linux also checks the change time, so it still selects a file
   whose modification time was set back; this collector does not. Repeat
   collections without `-a` regularly.
-- **No filesystem types.** SFTP does not report them, so pseudo filesystems
-  and network mounts on the source are not skipped automatically. Limit `-p`
-  to the relevant paths and exclude mounts such as `/proc` and `/sys`.
+- **No filesystem types.** SFTP does not report them, so network mounts on the
+  source are not skipped automatically, and pseudo filesystems only below a
+  root of `/`. Limit `-p` to the relevant paths and exclude other mounts.
+- **No reconnect.** A lost connection ends the run with exit status 1; the
+  directories not yet listed are not collected. Run it again.
 - **SFTP subsystem required.** See [When to Use It](#when-to-use-it).
 - **Coverage.** Files that are not selected are never analyzed. The manifest
   keeps their paths and metadata for review.

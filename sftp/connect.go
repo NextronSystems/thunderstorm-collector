@@ -16,19 +16,25 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// handshakeTimeout bounds connecting, the SSH handshake, authentication and
+// the start of the SFTP subsystem. ssh.ClientConfig.Timeout covers only the TCP
+// connect, so a peer that accepts and never sends a banner would hang the run.
+const handshakeTimeout = 30 * time.Second
+
 // connect opens an SSH connection with strict host key checking and starts
-// the SFTP subsystem on it. A shell or exec permission is not needed.
-func connect(config Config) (*ssh.Client, *sftp.Client, error) {
+// the SFTP subsystem on it. A shell or exec permission is not needed. The
+// returned watchdog closes the connection when the source stops answering.
+func connect(config Config, sftpTimeout time.Duration, logger func(string, ...interface{})) (*ssh.Client, *sftp.Client, *sftpWatchdog, error) {
 	if config.KnownHosts == "" {
-		return nil, nil, errors.New("known-hosts: no file given; host keys are always verified")
+		return nil, nil, nil, errors.New("known-hosts: no file given; host keys are always verified")
 	}
 	hostKeyCallback, err := knownhosts.New(config.KnownHosts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not read known_hosts: %v", err)
+		return nil, nil, nil, fmt.Errorf("could not read known_hosts: %v", err)
 	}
 	auth, err := authMethods(config.SFTPKey)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	address := net.JoinHostPort(config.SFTPHost, strconv.Itoa(config.SFTPPort))
 	sshConfig := &ssh.ClientConfig{
@@ -36,18 +42,59 @@ func connect(config Config) (*ssh.Client, *sftp.Client, error) {
 		Auth:              auth,
 		HostKeyCallback:   hostKeyCallback,
 		HostKeyAlgorithms: knownHostKeyAlgorithms(hostKeyCallback, address),
-		Timeout:           30 * time.Second,
+		Timeout:           handshakeTimeout,
 	}
-	sshClient, err := ssh.Dial("tcp", address, sshConfig)
+	conn, err := net.DialTimeout("tcp", address, handshakeTimeout)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not connect to %s: %v", address, err)
+		return nil, nil, nil, fmt.Errorf("could not connect to %s: %v", address, err)
 	}
-	sftpClient, err := sftp.NewClient(sshClient)
+	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("could not connect to %s: %v", address, err)
+	}
+	clientConn, channels, requests, err := ssh.NewClientConn(conn, address, sshConfig)
 	if err != nil {
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("could not connect to %s: %v", address, err)
+	}
+	sshClient := ssh.NewClient(clientConn, channels, requests)
+	watchdog := newSFTPWatchdog(sftpTimeout, func() {
+		logger("The source did not answer an SFTP request for %v; closing the connection", sftpTimeout)
 		sshClient.Close()
-		return nil, nil, fmt.Errorf("could not start SFTP on %s (is the sftp subsystem enabled?): %v", address, err)
+	})
+	sftpClient, err := startSFTP(sshClient, watchdog)
+	if err != nil {
+		watchdog.Stop()
+		sshClient.Close()
+		return nil, nil, nil, fmt.Errorf("could not start SFTP on %s (is the sftp subsystem enabled?): %v", address, err)
 	}
-	return sshClient, sftpClient, nil
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		watchdog.Stop()
+		sshClient.Close()
+		return nil, nil, nil, fmt.Errorf("could not connect to %s: %v", address, err)
+	}
+	return sshClient, sftpClient, watchdog, nil
+}
+
+// startSFTP starts the SFTP subsystem like sftp.NewClient, but reads the
+// answers through the watchdog. Output on stderr is discarded.
+func startSFTP(sshClient *ssh.Client, watchdog *sftpWatchdog) (*sftp.Client, error) {
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	input, err := session.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	output, err := session.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := session.RequestSubsystem("sftp"); err != nil {
+		return nil, err
+	}
+	return sftp.NewClientPipe(watchdog.reader(output), input)
 }
 
 func authMethods(keyFile string) ([]ssh.AuthMethod, error) {

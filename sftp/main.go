@@ -18,7 +18,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -47,13 +49,14 @@ func main() {
 		}
 	}
 
-	sshClient, sftpClient, err := connect(config)
+	sshClient, sftpClient, watchdog, err := connect(config, settings.SFTPTimeout, logger.Printf)
 	if err != nil {
 		logger.Print(err)
 		os.Exit(1)
 	}
 	defer sshClient.Close()
 	defer sftpClient.Close()
+	defer watchdog.Stop()
 
 	var manifest *manifestWriter
 	if config.Manifest != "" {
@@ -72,7 +75,21 @@ func main() {
 	}
 
 	collector := NewCollector(settings, sftpClient, httpClient, logger, manifest)
+	collector.watchdog = watchdog
+	collector.closeSource = func() { sshClient.Close() }
+	// SIGINT or SIGTERM ends the run with its statistics and manifest written; a
+	// second signal exits at once.
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-signals
+		logger.Print("Interrupted; ending the run and writing the statistics (send the signal again to exit at once)")
+		collector.Interrupt()
+		<-signals
+		os.Exit(130)
+	}()
 	collector.Run()
+	signal.Stop(signals)
 	if err := manifest.Close(); err != nil {
 		logger.Printf("Could not write manifest: %v", err)
 		collector.Stats.FileErrors++
@@ -120,6 +137,13 @@ func newHTTPClient(config Config, responseTimeout time.Duration) (*http.Client, 
 		return &stallTimeoutConn{Conn: conn, timeout: stallTimeout}, nil
 	}
 	transport.ResponseHeaderTimeout = responseTimeout
+	// HTTP/1.1 only: over HTTP/2 a server that stops granting flow-control window
+	// blocks the upload without a blocked write, which stallTimeoutConn would not
+	// notice.
+	transport.ForceAttemptHTTP2 = false
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	transport.Protocols = protocols
 	if config.SSL {
 		tlsConfig := &tls.Config{InsecureSkipVerify: config.Insecure}
 		if len(config.CAs) > 0 {
@@ -193,5 +217,8 @@ func printStatistics(logger *log.Logger, s *Statistics, dryRun bool) {
 	logger.Printf("Selected: %d", s.Selected)
 	logger.Printf("%s: %d files, %d content bytes read from the source", sentLabel, s.Uploaded, s.ContentBytes)
 	logger.Printf("Errors: %d file, %d upload, %d root; unreadable directories: %d", s.FileErrors, s.UploadErrors, s.RootErrors, s.WalkErrors)
+	if s.ConnectionErrors > 0 || s.NotSent > 0 || s.Interrupted > 0 {
+		logger.Printf("Incomplete: connection lost %d, interrupted %d, selected files not sent %d", s.ConnectionErrors, s.Interrupted, s.NotSent)
+	}
 	logger.Printf("Total time: %v", (time.Duration(s.DurationSeconds * float64(time.Second))).Round(time.Millisecond))
 }

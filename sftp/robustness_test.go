@@ -86,9 +86,10 @@ func TestRootsFollowTheEntryRules(t *testing.T) {
 	if got := uploadedPaths(received()); !reflect.DeepEqual(got, []string{implant}) {
 		t.Errorf("uploads = %v, want only %s", got, implant)
 	}
+	// The linked root is followed to www, which is excluded.
 	stats := collector.Stats
-	if stats.Excluded != 1 || stats.Symlinks != 1 || stats.Irregular != 1 {
-		t.Errorf("excluded %d, symlinks %d, irregular %d; want 1 each", stats.Excluded, stats.Symlinks, stats.Irregular)
+	if stats.Excluded != 2 || stats.Symlinks != 0 || stats.Irregular != 1 {
+		t.Errorf("excluded %d, symlinks %d, irregular %d; want 2, 0 and 1", stats.Excluded, stats.Symlinks, stats.Irregular)
 	}
 }
 
