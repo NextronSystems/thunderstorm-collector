@@ -250,8 +250,9 @@ function walk(root) {
             for (; !files.atEnd() && !serverLost; files.moveNext()) {
                 try {
                     var file = files.item();
-                    // FSO exposes no reparse tag: links, deduplicated, compressed (WOF) and cloud
-                    // placeholder files all look the same here and are skipped.
+                    // FSO exposes no reparse tag: links, deduplicated and cloud placeholder files
+                    // all look the same here and are skipped. Compressed (WOF) files show no
+                    // reparse attribute while the overlay filter runs and are read normally.
                     if ((file.Attributes & 1024) !== 0) { stats.skipped++; reparseFiles++; continue; }
                     upload(file);
                 } catch (error) { stats.failed++; log("[ERROR] Cannot examine a file in " + path + ": " + error.message); }
@@ -310,9 +311,8 @@ try {
     if (!dryRun) { var curl = resolveCurl(); createWorkspace(); }
     for (var i = 0; i < roots.length && !serverLost; i++) walk(roots[i]);
     if (reparseFiles)
-        log("[WARN] " + reparseFiles + " reparse point file(s) skipped: links, deduplicated, compressed (WOF) or cloud " +
-            "placeholder files cannot be told apart by this collector. The PowerShell collector reads deduplicated " +
-            "and compressed files.");
+        log("[WARN] " + reparseFiles + " reparse point file(s) skipped: links, deduplicated or cloud placeholder " +
+            "files cannot be told apart by this collector. The PowerShell collector reads deduplicated files.");
     if (stats.failed || stats.scan_errors || serverLost) exitCode = 1;
 } catch (error) { log("[ERROR] " + error.message); exitCode = 2; }
 finally {
