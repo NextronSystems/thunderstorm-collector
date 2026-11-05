@@ -350,10 +350,14 @@ class PowerShellRobustness(ScanRootAssertions):
         info = entry.stat(follow_symlinks=False)
         tag = getattr(info, "st_reparse_tag", 0)
         if not info.st_file_attributes & 0x400 or tag != 0x80000017:
-            self.skipTest("compact /exe left no WOF reparse point: exit {}, attributes 0x{:x}, tag 0x{:x}, "
-                          "stat attributes 0x{:x}; {}".format(
-                              result.returncode, info.st_file_attributes, tag, os.stat(path).st_file_attributes,
-                              " ".join(result.stdout.decode("utf-8", "replace").split())))
+            reason = ("compact /exe left no WOF reparse point: exit {}, attributes 0x{:x}, tag 0x{:x}, "
+                      "stat attributes 0x{:x}; {}".format(
+                          result.returncode, info.st_file_attributes, tag, os.stat(path).st_file_attributes,
+                          " ".join(result.stdout.decode("utf-8", "replace").split())))
+            # The Windows CI job sets this, so the only test of the WOF read path cannot skip unnoticed.
+            if os.environ.get("THUNDERSTORM_REQUIRE_WOF") == "1":
+                self.fail(reason)
+            self.skipTest(reason)
         return path
 
     @unittest.skipUnless(os.name == "nt", "Windows reparse points")
