@@ -158,6 +158,9 @@ jobs:
     name: Windows script collectors
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      # The compressed (WOF) file tests fail instead of skipping when compact /exe cannot create one.
+      THUNDERSTORM_REQUIRE_WOF: "1"
     steps:
       - uses: actions/checkout@v4
 

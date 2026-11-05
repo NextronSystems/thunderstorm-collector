@@ -338,15 +338,40 @@ class PowerShellRobustness(ScanRootAssertions):
         self.assertEqual(self.run_collector("--max-size-kb", "32", timeout=180), 0, self.output)
         self.assertEqual(len(self.uploads), 1, self.output)
 
-    @unittest.skipUnless(os.name == "nt", "Windows reparse points")
-    def test_compressed_wof_file_is_collected(self):
-        path = self.file("compressed.exe", b"MZ" + b"\x00" * 65536)
+    def wof_file(self, name, data):
+        # Compress a file with the Windows Overlay Filter (compact /exe, as CompactOS does).
+        # While the filter runs, Windows lists such a file as an ordinary file: its directory
+        # entry has no reparse attribute, so the collectors read it like any other file.
+        import ctypes
+        path = self.file(name, data)
         result = subprocess.run(["compact.exe", "/c", "/exe:xpress4k", path], stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT)
-        if result.returncode != 0 or not os.stat(path).st_file_attributes & 0x400:
-            self.skipTest("compact /exe did not leave a reparse point here")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCompressedFileSizeW.restype = ctypes.c_uint32
+        kernel32.GetCompressedFileSizeW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)]
+        high = ctypes.c_uint32(0)
+        low = kernel32.GetCompressedFileSizeW(path, ctypes.byref(high))
+        error = ctypes.get_last_error() if low == 0xFFFFFFFF else 0
+        stored = (high.value << 32) + low
+        if result.returncode != 0 or error or stored >= len(data):
+            entry = [item for item in os.scandir(os.path.dirname(path)) if item.name == name][0]
+            reason = ("compact /exe did not compress the file: exit {}, {} of {} bytes stored (error {}), "
+                      "attributes 0x{:x}; {}".format(
+                          result.returncode, stored, len(data), error,
+                          entry.stat(follow_symlinks=False).st_file_attributes,
+                          " ".join(result.stdout.decode("utf-8", "replace").split())))
+            # The Windows CI job sets this, so the only compressed-file test cannot skip unnoticed.
+            if os.environ.get("THUNDERSTORM_REQUIRE_WOF") == "1":
+                self.fail(reason)
+            self.skipTest(reason)
+        return path
+
+    @unittest.skipUnless(os.name == "nt", "Windows Overlay Filter")
+    def test_compressed_wof_file_is_collected(self):
+        data = b"MZ" + b"\x00" * 65536
+        self.wof_file("compressed.exe", data)
         self.assertEqual(self.run_collector(), 0, self.output)
-        self.assertEqual(len(self.uploads), 1, self.output)
+        self.assertEqual(self.uploads, [data], self.output)
 
     def test_binary_empty_special_and_unicode_source(self):
         for name in ["normal", "semi;colon", "comma,name", "bracket[name]", "percent%PATH%", "bang!", u"unicode-\u00e4"]:
