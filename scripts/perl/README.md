@@ -50,6 +50,8 @@ default root is `/`. Missing server configuration exits 2 with instructions.
 Command-line values override header values; the first `--dir` replaces the whole
 header root list, and further `--dir` options add roots. `--no-tls`, `--verify-tls`,
 `--no-dry-run` and `--no-debug` disable corresponding header choices.
+`$SERVER_WAIT` (`--server-wait`) bounds how long a run waits for a lost server; see
+the capability profile below.
 
 Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
 files are intentionally not collected. The console log shows resolved roots and
@@ -64,12 +66,14 @@ this profile. Errors and the startup scope are always reported.
 ## Capability Profile
 
 - Iterative recursive regular-file collection, binary/empty/Unicode/newline names. Symlink entries and special files are skipped; explicit roots resolve physically. Queued directories and their ancestor identities are rechecked before traversal and around file reads; detected replacements fail rather than upload their contents. These portable path checks are not an atomic filesystem sandbox: a hostile process can still race between checks. Use a read-only snapshot or a quiescent, trusted tree when strict containment is required. Descriptor-relative traversal would require a different platform/dependency profile than the Perl 5.8.1 baseline.
-- Built-in exclusions: /proc, /dev, /sys, /run, /snap, /.snapshots, Linux detected special/network mounts, known cloud folders, /mnt trees, .dat, .npm and .lck paths. These are best effort, not a security boundary.
+- Built-in exclusions: /proc, /dev, /sys, /run, /snap, /.snapshots, Linux detected special/network mounts, known cloud folders, /mnt trees (WSL drives and mounted shares often live there), .dat, .npm and .lck paths. These are best effort, not a security boundary.
+- The excluded trees and the network/special mounts listed in /proc/mounts are skipped by path, before they are lstat()ed: a stat on the mount point of an unresponsive hard NFS mount would block in the kernel, where not even SIGINT/SIGTERM can end the run. Filesystem types outside the built-in network/special list (for example ceph or glusterfs), and every mount on systems without /proc/mounts, are walked like local directories.
 - Default age 30 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
 - Default size 2048 KiB; --max-size-kb 1..204800 includes exact limit. Bounded in-memory snapshot precedes network access; multipart construction needs several times the configured file size in RAM. Replaced/changed/unreadable files fail; newly oversized files are skipped. Not a filesystem-wide atomic snapshot.
 - Async /api/checkAsync only; no synchronous mode, and --async is accepted and ignored so existing command lines keep working. Complete 2xx means accepted, not finished analysis; no polling/resume/deduplication. Lost responses/retries can duplicate uploads.
 - Optional markers: 404/501 nonfatal without scan ID; real JSON parsing rather than regex extraction. Only a top-level JSON string is used as the scan ID; numbers, booleans, arrays and objects are ignored. Begin retries once after two seconds, then exits 2; failed end exits 1. SIGINT/SIGTERM sets an interruption flag; network I/O completes or times out before best-effort interrupted marker and exit 1. No further uploads after interruption is observed.
 - --retries 1..10 counts total attempts; 503 integer Retry-After caps at 120 seconds, exponential delays at 60. No automatic redirects or environment-proxy discovery.
+- Lost server: when 3 files in a row could not be delivered (no attempt got an HTTP answer other than 503), the collector stops sending and checks `GET /api/status` after 2, 4, 8 ... up to 60 seconds, for at most `$SERVER_WAIT` seconds (`--server-wait 0..86400`, default 600; 0 stops at once). When the server answers 2xx, it continues with the next file; the files that failed stay failed. When the time runs out, it logs `Thunderstorm unreachable for N seconds`, sends a best-effort interrupted marker, does not send the remaining files and exits 1. SIGINT/SIGTERM during the wait ends it as an interruption. Dry-run never waits.
 - Upload timeout 30 seconds and marker timeout 10 are LWP idle-I/O limits, not whole-run deadlines. Response limit 1 MiB; aborted or length-incomplete 2xx responses fail. Chunked HTTP/HTTPS responses must include complete chunks, a terminating zero chunk and complete trailers; socket EOF cannot substitute for those delimiters, including on older LWP/Net::HTTP installations.
 - --ssl verifies hostname and peer explicitly; --ca-cert FILE selects a CA; --insecure is explicit bypass. TLS-only options without --ssl are rejected, never silently converted to plaintext.
 - Dry-run sends no network requests, including markers, and does not prove file readability. Repeated --dir/-d options accumulate. Default root is /; use explicit approved roots.
@@ -80,7 +84,7 @@ this profile. Errors and the startup scope are always reported.
 | Exit | Meaning |
 |---|---|
 | 0 | All eligible files accepted or successful dry-run; intentional skips allowed |
-| 1 | Failed files, traversal/partial-root errors, interruption or end-marker failure |
+| 1 | Failed files, traversal/partial-root errors, interruption, server unreachable for `$SERVER_WAIT` or end-marker failure |
 | 2 | Invalid config/dependencies, no valid roots or failed begin |
 
 Unreadable directories count as Scan errors; unreadable selected files as Failed. Existing empty roots can succeed; missing roots cannot. A missing interpreter or startup module can fail before the collector's exit-code handling runs. Record the diagnostic and actual nonzero exit status rather than expecting a fixed value such as 255; these startup failures are outside the table above. Legacy Perl/SSL and Windows builds require their own target-system acceptance. Transport limits follow the [LWP documentation](https://metacpan.org/pod/LWP::UserAgent).
@@ -238,7 +242,8 @@ globally; remove private keys afterwards.
 Interrupt a slow run: exit 1, no normal end marker, best-effort interrupted
 marker if supported. Do not disrupt a shared real service for failure injection.
 The isolated regression suite covers 503 bounds, end HTTP 500, incomplete 2xx,
-malformed marker JSON and SIGTERM on the actual interpreters:
+malformed marker JSON, a lost server (wait, resume, stop) and SIGTERM on the
+actual interpreters:
 
 ```sh
 python3 -B ../tests/test_perl_robustness.py

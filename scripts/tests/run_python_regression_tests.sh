@@ -81,7 +81,7 @@ printf "============================================\n\n"
 
 run_python_case \
     "python/mount-path-decode: escaped /proc/mounts entries are honored" \
-    $'import builtins\norig_open = builtins.open\nsample = "server:/share /mnt/Remote\\\\040Share cifs rw 0 0\\n"\ndef fake_open(path, mode="r", *args, **kwargs):\n    if path == "/proc/mounts":\n        return io.StringIO(sample)\n    return orig_open(path, mode, *args, **kwargs)\nbuiltins.open = fake_open\ntry:\n    mounts = module.get_excluded_mounts()\nfinally:\n    builtins.open = orig_open\nassert mounts == ["/mnt/Remote Share"], mounts\nmodule.hard_skips[:] = mounts\nassert module.is_under_excluded("/mnt/Remote Share/secret.bin")'
+    $'import builtins\norig_open = builtins.open\nsample = "server:/share /mnt/Remote\\\\040Share cifs rw 0 0\\n"\ndef fake_open(path, mode="r", *args, **kwargs):\n    if path == "/proc/mounts":\n        return io.BytesIO(sample.encode(\"utf-8\")) if \"b\" in mode else io.StringIO(sample)\n    return orig_open(path, mode, *args, **kwargs)\nbuiltins.open = fake_open\ntry:\n    mounts = module.get_excluded_mounts()\nfinally:\n    builtins.open = orig_open\nassert mounts == ["/mnt/Remote Share"], mounts\nmodule.hard_skips[:] = mounts\nassert module.is_under_excluded("/mnt/Remote Share/secret.bin")'
 
 run_python_case \
     "python/surrogate-filename: multipart preamble survives undecodable path bytes" \

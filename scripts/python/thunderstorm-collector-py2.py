@@ -37,6 +37,8 @@ MAX_SIZE_KB = 2048       # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact limi
 # exclusion patterns (e.g. .dat/.npm/VM files) still apply.
 
 RETRIES = 3             # TOTAL upload attempts including the first, 1..10.
+SERVER_WAIT = 600       # Seconds to wait for the server after 3 files in a row could not be
+                        # delivered, 0..86400; polls /api/status, then stops (exit 1). 0 = stop at once.
 DRY_RUN = False         # True = preview only; False = uploads (--dry-run / --no-dry-run).
 DEBUG = False           # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
 # Progress is automatic on terminals; --progress / --no-progress overrides it.
@@ -59,8 +61,11 @@ VERSION = "0.2"
 MAX_RESPONSE = 1024 * 1024
 SEND_CHUNK = 64 * 1024
 MAX_MARKER_JSON = 64 * 1024
-hard_skips = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots"]
-skip_elements = [r"^/mnt(?:/|$)", r"\.dat$", r"\.npm", r"\.vmdk$",
+OUTAGE_FILES = 3         # undeliverable files in a row before uploads pause for the server
+# Matched by path before anything is stat()ed; /mnt holds WSL drives, removable media and
+# network shares.
+hard_skips = ["/proc", "/dev", "/sys", "/run", "/snap", "/.snapshots", "/mnt"]
+skip_elements = [r"\.dat$", r"\.npm", r"\.vmdk$",
                  r"\.vswp$", r"\.nvram$", r"\.vmsd$", r"\.lck$"]
 NETWORK_FS_TYPES = set(["nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs",
                         "fuse.sshfs", "afp", "webdav", "davfs2",
@@ -105,16 +110,22 @@ def log(message):
 
 
 def _decode_proc_mount_path(path):
-    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), path)
+    # The kernel writes space, TAB, LF and backslash as octal escapes and every other byte
+    # as is. Python 3 names paths the way os.listdir does in this locale, so they compare
+    # equal; Python 2 keeps the bytes.
+    path = re.sub(br"\\([0-3][0-7]{2})", lambda m: bytes(bytearray([int(m.group(1), 8)])), path)
+    return os.fsdecode(path) if sys.version_info[0] == 3 else path
 
 
 def get_excluded_mounts():
     excluded = []
     try:
-        with open("/proc/mounts", "r") as stream:
+        # Bytes: a text read uses the locale codec, and under the C locale (cron, systemd,
+        # ssh) one non-ASCII mount point raised UnicodeDecodeError before anything was scanned.
+        with open("/proc/mounts", "rb") as stream:
             for line in stream:
                 fields = line.split()
-                if len(fields) >= 3 and fields[2] in NETWORK_FS_TYPES | SPECIAL_FS_TYPES:
+                if len(fields) >= 3 and _text(fields[2]) in NETWORK_FS_TYPES | SPECIAL_FS_TYPES:
                     excluded.append(_decode_proc_mount_path(fields[1]))
     except (IOError, OSError):
         pass
@@ -159,12 +170,20 @@ def read_response(response):
     return body
 
 
+class ServerUnreachable(Exception):
+    pass
+
+
+_monotonic = getattr(time, "monotonic", time.time)
+
+
 class Collector(object):
     def __init__(self, args):
         self.args = args
         self.started_at = time.time()
         self.scanned = self.submitted = self.failed = self.skipped = self.scan_errors = 0
         self.would_submit = 0
+        self.undelivered = 0
         self.scan_id = None
         self.started = False
         self.in_flight = None
@@ -304,6 +323,7 @@ class Collector(object):
             endpoint += "&scan_id=" + quote(_bytes(self.scan_id), safe="")
         headers = {"Content-Type": "multipart/form-data; boundary=" + boundary,
                    "Content-Length": str(len(preamble) + len(data) + len(epilogue))}
+        answered = False  # some attempt got an HTTP status other than 503 (busy)
         for attempt in range(self.args.retries):
             connection = None
             delay = min(2 ** attempt, 60)
@@ -322,9 +342,11 @@ class Collector(object):
                 connection.send(epilogue)
                 response = connection.getresponse()
                 read_response(response)
+                answered = answered or response.status != 503
                 if 200 <= response.status < 300:
                     self.submitted += 1
                     self.in_flight = None
+                    self.undelivered = 0
                     return
                 if response.status == 503:
                     try:
@@ -341,6 +363,54 @@ class Collector(object):
                 time.sleep(delay)
         self.failed += 1
         self.in_flight = None
+        if answered:
+            self.undelivered = 0
+            return
+        self.undelivered += 1
+        if self.undelivered >= OUTAGE_FILES:
+            self.undelivered = 0
+            self.wait_for_server()
+
+    def server_answers(self):
+        connection = None
+        try:
+            connection = self.connection(10)
+            connection.request("GET", "/api/status")
+            response = connection.getresponse()
+            read_response(response)
+            return 200 <= response.status < 300
+        except (IOError, OSError, ValueError, http_client.HTTPException):
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def wait_for_server(self):
+        """Poll /api/status instead of running every remaining file through its retries.
+
+        Returns when the server answers again; raises ServerUnreachable once SERVER_WAIT
+        seconds have passed. SIGINT/SIGTERM keep working while this sleeps."""
+        host = self.args.server
+        if ":" in host and not host.startswith("["):
+            host = "[" + host + "]"
+        log("[WARN] Thunderstorm did not accept {} files in a row; checking {}://{}:{}/api/status for "
+            "up to {} seconds before sending more.".format(OUTAGE_FILES, "https" if self.args.tls else "http",
+                                                           host, self.args.port, self.args.server_wait))
+        started = _monotonic()
+        delay = 2
+        while True:
+            remaining = self.args.server_wait - (_monotonic() - started)
+            if remaining <= 0:
+                break
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 60)
+            if self.server_answers():
+                log("[INFO] Thunderstorm answers again after {} seconds; continuing with the next "
+                    "file.".format(int(_monotonic() - started)))
+                return
+        log("[ERROR] Thunderstorm unreachable for {} seconds; stopping the collection. Remaining "
+            "files are not sent.".format(self.args.server_wait))
+        raise ServerUnreachable()
 
     def entries(self, root):
         """Yield (path, metadata, error) for every entry below root that is not a directory.
@@ -365,6 +435,10 @@ class Collector(object):
                 continue
             for name in names:
                 path = os.path.join(directory, name)
+                # By path, before any stat: stat() on the mount point of a dead hard NFS mount
+                # blocks in the kernel for good, where no signal handler can run.
+                if is_under_excluded(path):
+                    continue
                 try:
                     metadata = os.lstat(path)
                 except (IOError, OSError) as error:
@@ -373,7 +447,9 @@ class Collector(object):
                 if stat.S_ISDIR(metadata.st_mode):
                     if not self.excluded(path):
                         stack.append(path)
-                elif not (stat.S_ISLNK(metadata.st_mode) and os.path.isdir(path)):
+                else:
+                    # Links are never followed, not even to ask whether they lead to a
+                    # directory: the target may be on such a mount, too.
                     yield path, metadata, None
 
     def walk(self, root):
@@ -418,8 +494,16 @@ class Collector(object):
         if not self.marker("begin"):
             return 2
         self.started = True
-        for root in roots:
-            self.walk(root)
+        try:
+            for root in roots:
+                self.walk(root)
+        except ServerUnreachable:
+            self.marker("interrupted")  # best effort; the server has not answered for a while
+            log("Thunderstorm Collector Run stopped, server unreachable (Checked: {} Submitted: {} "
+                "Failed: {} Skipped: {} Scan errors: {} Seconds: {})".format(
+                    self.scanned, self.submitted, self.failed, self.skipped, self.scan_errors,
+                    int(time.time() - self.started_at)))
+            return 1
         end_ok = self.marker("end")
         dry_summary = " Would submit: {}".format(self.would_submit) if self.args.dry_run else ""
         log("Thunderstorm Collector Run finished (Checked: {} Submitted: {}{} Failed: {} "
@@ -448,6 +532,9 @@ def main():
     parser.add_argument("--max-age", type=int, default=MAX_AGE, help="Days; 0 disables age filtering")
     parser.add_argument("--max-size-kb", type=int, default=MAX_SIZE_KB, help="KiB; maximum 204800")
     parser.add_argument("--retries", type=int, default=RETRIES, help="Total attempts, including the first")
+    parser.add_argument("--server-wait", type=int, default=SERVER_WAIT,
+                        help="Seconds to wait for the server after 3 files in a row could not be "
+                             "delivered; 0 stops at once")
     parser.add_argument("--async", dest="async_compat", action="store_true",
                         help="Accepted for compatibility; uploads are always asynchronous")
     parser.add_argument("--dry-run", action="store_true", default=DRY_RUN)
@@ -459,10 +546,14 @@ def main():
     parser.set_defaults(progress=sys.stderr.isatty())
     args = parser.parse_args()
     args.dirs = [path for group in args.dirs for path in group] if args.dirs else list(SCAN_DIRS)
-    args.source = _text(args.source)
+    # Under the C locale Python 3 decodes the UTF-8 bytes of an argument to lone surrogates;
+    # back to bytes and through UTF-8, markers and upload queries carry the same text.
+    args.source = _text(_bytes(args.source))
     if (not 1 <= args.port <= 65535 or not 0 <= args.max_age <= 36500 or
-            not 1 <= args.max_size_kb <= 204800 or not 1 <= args.retries <= 10):
-        parser.error("port 1..65535, max-age 0..36500, max-size-kb 1..204800, retries 1..10 required")
+            not 1 <= args.max_size_kb <= 204800 or not 1 <= args.retries <= 10 or
+            not 0 <= args.server_wait <= 86400):
+        parser.error("port 1..65535, max-age 0..36500, max-size-kb 1..204800, retries 1..10, "
+                     "server-wait 0..86400 required")
     if not args.server:
         parser.error("Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST.")
     if re.search(r"[\s/\x00]", args.server):
