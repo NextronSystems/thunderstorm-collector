@@ -243,6 +243,8 @@ Markers are a separate capability, not required for a useful collector. Native
 THOR 10.7.30 in acceptance returned HTTP 404 for `/api/collection` while sample
 uploads worked. The stub implements this extended endpoint for lifecycle tests;
 its behavior is not a promise about every production service version.
+[Collection markers](COLLECTION_MARKERS.md) describes what the existing
+collectors send and what a server has to do with it.
 
 If markers are supported by the profile, POST UTF-8 JSON with
 `Content-Type: application/json`. A begin example is:
