@@ -69,18 +69,23 @@ type Statistics struct {
 	ConnectionErrors int64 `json:"connection_errors"`
 	// NotSent counts selected files that were not sent because the run stopped
 	// (Thunderstorm unreachable for server-wait, or an interruption).
-	NotSent         int64   `json:"not_sent"`
-	Interrupted     int64   `json:"interrupted"`
+	NotSent     int64 `json:"not_sent"`
+	Interrupted int64 `json:"interrupted"`
+	// MarkerErrors counts collection markers that a server supporting them did
+	// not accept, see markers.go.
+	MarkerErrors    int64   `json:"marker_errors"`
 	DurationSeconds float64 `json:"duration_seconds"`
 }
 
 // ErrorCount returns the failures that make the run unsuccessful, as in the Go
 // collector: selected files that could not be read or sent, roots that could
-// not be read, a lost connection and an interrupted run. Unreadable
-// directories below a root are only reported.
+// not be read, a lost connection, an interrupted run and collection markers
+// that were not accepted. Unreadable directories below a root are only
+// reported.
 func (s *Statistics) ErrorCount() int64 {
 	return atomic.LoadInt64(&s.FileErrors) + atomic.LoadInt64(&s.UploadErrors) + atomic.LoadInt64(&s.RootErrors) +
-		atomic.LoadInt64(&s.ConnectionErrors) + atomic.LoadInt64(&s.NotSent) + atomic.LoadInt64(&s.Interrupted)
+		atomic.LoadInt64(&s.ConnectionErrors) + atomic.LoadInt64(&s.NotSent) + atomic.LoadInt64(&s.Interrupted) +
+		atomic.LoadInt64(&s.MarkerErrors)
 }
 
 // manifestEntry describes one listed entry. All fields except the read
@@ -183,6 +188,13 @@ type Collector struct {
 	// rootAliases maps a root given as a symbolic link to its target, so that
 	// excludes written for the given path still apply below the target.
 	rootAliases []rootAlias
+
+	// Collection markers, see markers.go. scanID and markersActive are set by
+	// BeginRun before Run and only read afterwards.
+	startTime     time.Time
+	markerTimeout time.Duration
+	scanID        string
+	markersActive bool
 }
 
 type rootAlias struct {
@@ -203,6 +215,9 @@ func NewCollector(settings Settings, sftpClient *sftp.Client, httpClient *http.C
 		now:        time.Now,
 		ctx:        ctx,
 		cancel:     cancel,
+
+		startTime:     time.Now(),
+		markerTimeout: markerTimeout,
 	}
 	for _, root := range settings.RootPaths {
 		if path.Clean(root) == "/" {

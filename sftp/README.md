@@ -207,12 +207,25 @@ analysis side, where a current toolchain is available.
 - SIGINT or SIGTERM ends the run: pending uploads are cancelled, the manifest
   and `--stats-json` are written, and the exit status is 1. A second signal
   exits at once.
+- Collection markers: once the source is connected, the collector sends a
+  `begin` marker to `POST /api/collection`, like the Go and script collectors.
+  If Thunderstorm answers with a scan ID, every upload carries it in the
+  `scan_id` query parameter, and the run closes with an `end` marker, or with
+  an `interrupted` marker when it stopped early (a signal, Thunderstorm
+  unreachable for `--server-wait`, a lost SSH connection). A server without the
+  endpoint answers 404 or 501, as THOR 10 and the current THOR 11 versions do;
+  the collector then logs one line and the run is the same as without markers.
+  A `begin` that fails otherwise is tried once more after 2 seconds; if it
+  fails again, the files are still sent, without a scan ID. The markers name
+  the `--source` and, as `hostname`, the system that runs this collector.
+  [Collection markers](../docs/COLLECTION_MARKERS.md) describes the format.
 
 Run `--help` for all options. Exit status 1 means that a selected file could
 not be read or sent, a root could not be read, the configuration was invalid,
 the SSH connection failed or was lost during the run, Thunderstorm could not be
-reached or stayed unreachable for `--server-wait`, or the run was interrupted.
-The statistics then show what is incomplete.
+reached or stayed unreachable for `--server-wait`, the run was interrupted, or
+a Thunderstorm that supports collection markers did not accept the `begin` or
+`end` marker. The statistics then show what is incomplete.
 
 ## Limits
 
