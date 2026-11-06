@@ -77,6 +77,9 @@ func main() {
 	collector := NewCollector(settings, sftpClient, httpClient, logger, manifest)
 	collector.watchdog = watchdog
 	collector.closeSource = func() { sshClient.Close() }
+	if !settings.DryRun {
+		collector.BeginRun()
+	}
 	// SIGINT or SIGTERM ends the run with its statistics and manifest written; a
 	// second signal exits at once.
 	signals := make(chan os.Signal, 2)
@@ -94,6 +97,7 @@ func main() {
 		logger.Printf("Could not write manifest: %v", err)
 		collector.Stats.FileErrors++
 	}
+	collector.FinishRun()
 	printStatistics(logger, &collector.Stats, settings.DryRun)
 	if config.StatsJSON != "" {
 		data, _ := json.MarshalIndent(&collector.Stats, "", "  ")
@@ -217,6 +221,9 @@ func printStatistics(logger *log.Logger, s *Statistics, dryRun bool) {
 	logger.Printf("Selected: %d", s.Selected)
 	logger.Printf("%s: %d files, %d content bytes read from the source", sentLabel, s.Uploaded, s.ContentBytes)
 	logger.Printf("Errors: %d file, %d upload, %d root; unreadable directories: %d", s.FileErrors, s.UploadErrors, s.RootErrors, s.WalkErrors)
+	if s.MarkerErrors > 0 {
+		logger.Printf("Collection markers not accepted by Thunderstorm: %d", s.MarkerErrors)
+	}
 	if s.ConnectionErrors > 0 || s.NotSent > 0 || s.Interrupted > 0 {
 		logger.Printf("Incomplete: connection lost %d, interrupted %d, selected files not sent %d", s.ConnectionErrors, s.Interrupted, s.NotSent)
 	}
