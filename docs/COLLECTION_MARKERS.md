@@ -52,11 +52,12 @@ and reports the end of the run, or its interruption, together with its counters.
 | [PowerShell 3+](../scripts/powershell/README.md) | Yes | `powershell3/0.3` | Also sends `interrupted` when it gives up on an unreachable server. |
 | [PowerShell 2](../scripts/powershell/README.md) | Yes, if a JSON parser is available | `powershell2/0.3` | Needs .NET 3.5 `System.Web.Extensions`; without it, no markers. |
 | [Windows Batch](../scripts/batch/README.md) | No | | Removed by design in March 2026. |
-| [Go collector](../go/README.md) | No | | Never implemented. Uploads carry only `source`. |
-| [SFTP collector](../sftp/README.md) | No | | Uploads carry only `source`. |
+| [Go collector](../go/README.md) | Yes | `go` | Also adds `scan_id` to `/api/check` in synchronous mode. A failed begin does not stop the run. |
+| [SFTP collector](../sftp/README.md) | Yes | `sftp` | `hostname` is the system that runs the collector, not the SFTP source. Same begin rule as Go. |
 
-The version in the `collector` value follows each script's own version number.
-Treat the value as a label and do not parse it.
+The version in a script's `collector` value follows that script's own version
+number; Go and SFTP send no version. Treat the value as a label and do not
+parse it.
 
 ### Servers
 
@@ -107,7 +108,7 @@ Every marker request is:
 |---|---|---|---|---|
 | `type` | string | all | all | `begin`, `end` or `interrupted` |
 | `source` | string | all | all | The run's source label: the host name by default, or the value the operator set. The uploads carry the same string. |
-| `hostname` | string | all | all except Bash | The collecting machine's name, independent of `source` |
+| `hostname` | string | all | all except Bash | The name of the machine that runs the collector, independent of `source`. For the SFTP collector, this is not the system it collects from. |
 | `collector` | string | all | all | Collector name and version, see the table above |
 | `timestamp` | string | all | all | Client clock in UTC, `YYYY-MM-DDTHH:MM:SSZ`, whole seconds |
 | `scan_id` | string | end, interrupted | all | The ID from the begin answer. Absent when the run has none. |
@@ -186,10 +187,10 @@ with a top-level string field `scan_id`:
 
 The collector warns and runs without an ID when the body is not a JSON object,
 or when `scan_id` is missing, null, a number, an empty string or only present in
-a nested object. The Bash and ash collectors are stricter: they also ignore IDs
-longer than 256 bytes, IDs containing control characters, duplicate `scan_id`
-keys, JSON nested deeper than 32 levels and bodies larger than 64 KiB. Python
-also ignores begin bodies larger than 64 KiB.
+a nested object. Bash, ash, Go and SFTP also ignore IDs longer than 256 bytes
+and IDs containing control characters. Bash, ash, Python, Go and SFTP ignore
+begin bodies larger than 64 KiB. Bash and ash also ignore duplicate `scan_id`
+keys and JSON nested deeper than 32 levels.
 
 All other fields of the begin answer are ignored, and so is the body of the
 answers to end and interrupted. Clients do not check the response
@@ -206,7 +207,8 @@ POST /api/checkAsync?source=web-01&scan_id=6f1c2a9e-3b7d-4e55-9a0c-1d2e3f405162
 
 The multipart body does not change: it holds the file in the `file` field, and
 the ID is not repeated there. The script collectors upload only to
-`/api/checkAsync`.
+`/api/checkAsync`. The Go and SFTP collectors add the ID to `/api/check` too
+when they upload synchronously (`--upload-synchronous`).
 
 ## How Collectors React to Answers
 
@@ -214,26 +216,34 @@ the ID is not repeated there. The script collectors upload only to
 |---|---|---|---|
 | 2xx | The run starts, with the ID if it is usable | Success | Not checked |
 | 404 or 501 | Markers are unsupported. The run continues and uploads carry no `scan_id`. | Treated as success | Not checked |
-| Any other status (400, 401, 403, 500, 503 ...), a redirect, a timeout, a connection or TLS error, or an incomplete reply | Retried once after 2 seconds. If that fails too, the collector stops **before the first upload** and exits with code 2. | The collector exits with code 1. Uploads are not repeated. | Not checked |
+| Any other status (400, 401, 403, 500, 503 ...), a redirect, a timeout, a connection or TLS error, or an incomplete reply | Retried once after 2 seconds. If that fails too, a script collector stops **before the first upload** and exits with code 2. The Go and SFTP collectors upload every file without `scan_id`, send no `end`, and exit with code 1. | The collector exits with code 1. Uploads are not repeated. | Not checked |
 | Attempts | 2 | 1 | 1 |
 
-No collector follows redirects. After a 404 or 501 on begin, PowerShell sends no
-further markers in that run; the other collectors still send `end` and accept
-the same 404 or 501 again. An `interrupted` run always exits with code 1.
+No collector follows redirects. After a 404 or 501 on begin, PowerShell, Go and
+SFTP send no further markers in that run; the other script collectors still
+send `end` and accept the same 404 or 501 again. Go and SFTP send `end` or
+`interrupted` only after a 2xx answer to begin. An `interrupted` run always
+exits with code 1.
 
-The begin marker is therefore also the collectors' connectivity check. A server
-that answers begin with anything other than 2xx, 404 or 501 stops every
-marker-capable collector before its first upload.
+For the script collectors, the begin marker is also the connectivity check. A
+server that answers begin with anything other than 2xx, 404 or 501 stops every
+script collector before its first upload. The Go and SFTP collectors check
+`/api/status` first and keep uploading after a failed begin, but the samples
+of that run carry no ID.
 
 ## When Markers Are Sent
 
 - **Begin**: once, after the configuration is checked, before the first upload.
+  Go sends it after its `/api/status` check, SFTP after it has connected to the
+  source.
 - **End**: once, after the walk finished. Runs with failed files or unreadable
   directories end normally; the counters show the problems.
 - **Interrupted**: best effort on Ctrl+C or SIGTERM; ash also reacts to SIGHUP
-  and SIGQUIT. PowerShell also sends it when it stops because the server did not
-  answer for `ServerWait` seconds (600 by default). The Bash collector can send
-  it during the begin request, so it may arrive without `scan_id`.
+  and SIGQUIT. PowerShell and SFTP also send it when they stop because the
+  server did not answer for `ServerWait` or `--server-wait` seconds (600 by
+  default), and SFTP when its SSH connection to the source was lost. The Bash
+  collector can send it during the begin request, so it may arrive without
+  `scan_id`.
 - **Nothing**: after SIGKILL, power loss, a reboot, a killed container, a hung
   file system, or a network failure at the end of the run. The server then sees
   a begin and uploads, but no closing marker.
@@ -271,8 +281,10 @@ breaks collections that work against THOR 10 today.
 
 1. Keep `POST /api/collection` at least as available as `/api/checkAsync`. Do
    not answer begin with 503 because the sample queue is full, and keep proxies
-   from answering it with 401 or 403; either stops the collector before it
-   uploads anything. Apply back-pressure to uploads, not to markers.
+   from answering it with 401 or 403. Either stops the script collectors before
+   they upload anything, and makes the Go and SFTP collectors upload the run
+   without an ID and exit with code 1. Apply back-pressure to uploads, not to
+   markers.
 2. To switch markers off, answer 404 or 501, never 400 or 403.
 3. Answer within a few seconds; the clients give up after about 10.
 4. Do not redirect `/api/collection`.
@@ -281,8 +293,8 @@ breaks collections that work against THOR 10 today.
    `.` and `:`, such as a UUID, is safe in URLs, file names and every collector.
 6. Accept the documented fields without answering 400 when an optional one is
    missing (`hostname`, `scan_id`, `stats`), and ignore unknown fields. A 400 on
-   begin aborts the run; on end it turns a completed collection into exit
-   code 1.
+   begin aborts a script collector's run; on end it turns a completed
+   collection into exit code 1.
 7. Accept `end` and `interrupted` with a `scan_id` the server does not know, for
    example after a restart, and record them. The stub server does the same.
 8. Accept uploads with an unknown, closed or missing `scan_id`.
@@ -320,6 +332,11 @@ The collectors leave these to the server:
   local fake servers for 404 and 501, failed and malformed begin answers, failed
   end markers and interruption by signals. The
   [testing overview](COLLECTOR_TESTING_OVERVIEW.md) explains how to run them.
+- `go/markers_test.go` and `sftp/markers_test.go` cover the same answers for
+  the Go and SFTP collectors. The Go 1.9.7 runtime check for the NetScaler
+  package ([test-legacy-runtime.py](../.github/scripts/test-legacy-runtime.py))
+  runs the Go binary against a server that answers 404 and one that returns a
+  scan ID.
 
 To watch the markers against a development server, run a script collector on a
 small directory, for example:
@@ -337,9 +354,9 @@ first specification in the stub repository,
 Its wire format still applies, but the collectors have changed since then in
 ways that matter to a server:
 
-- A failed begin, other than 404 or 501, now stops the run, and a failed end
-  makes the exit code 1. The first specification said that a marker failure
-  never aborts a collection.
+- A failed begin, other than 404 or 501, now stops a script collector's run,
+  and a failed end makes the exit code 1. The first specification said that a
+  marker failure never aborts a collection.
 - `interrupted` was added as a third type. The first specification listed an
   `abort` type as a future idea.
 - `hostname`, `stats.scan_errors` and `stats.in_flight` were added.
@@ -348,5 +365,5 @@ ways that matter to a server:
 - The collector version strings have changed.
 
 The Batch collector dropped markers in March 2026 when it stopped depending on
-PowerShell. Where this document and the first specification disagree, this
+PowerShell. The Go and SFTP collectors gained them in November 2026. Where this document and the first specification disagree, this
 document describes what the collectors do.
