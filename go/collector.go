@@ -79,6 +79,17 @@ type Collector struct {
 	// HTTP client for all requests to Thunderstorm. It never follows redirects,
 	// see refuseRedirects.
 	client *http.Client
+	// markerClient sends collection markers. Like client, it never follows
+	// redirects; unlike client, it gives up after markerTimeout.
+	markerClient *http.Client
+
+	// scanID is the run's ID from the begin marker answer, or empty. It is set
+	// before the workers start and only read afterwards.
+	scanID string
+	// markersActive is 1 once the server accepted the begin marker.
+	markersActive int32
+	closingMutex  sync.Mutex
+	closingSent   bool
 
 	// Set before starting workers; defaults to time.Sleep.
 	retrySleep func(time.Duration)
@@ -121,6 +132,9 @@ type CollectionStatistics struct {
 	// read. They are reported but, like the permission-denied directories of any
 	// full-disk scan, do not change the exit status.
 	walkErrors int64
+	// markerErrors counts collection markers that a server supporting them did
+	// not accept; they fail the run, see markers.go.
+	markerErrors int64
 
 	// Timings (in nanoseconds, converted to seconds/milliseconds for display)
 
@@ -156,11 +170,12 @@ func (s *CollectionStatistics) getSkipCount(reason SkipReason) int64 {
 }
 
 // ErrorCount returns the number of failures that make the run unsuccessful:
-// selected files that could not be read or accepted, and scan roots that could
-// not be read. Unreadable directories below a root are only reported, see
-// walkErrors.
+// selected files that could not be read or accepted, scan roots that could not
+// be read, and collection markers that were not accepted. Unreadable
+// directories below a root are only reported, see walkErrors.
 func (s *CollectionStatistics) ErrorCount() int64 {
-	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors)
+	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors) +
+		atomic.LoadInt64(&s.markerErrors)
 }
 
 // refuseRedirects makes the HTTP client hand a redirect response back to the
@@ -186,6 +201,7 @@ func NewCollector(config CollectorConfig, logger *log.Logger) *Collector {
 		CollectorConfig: config,
 		logger:          logger,
 		client:          &http.Client{CheckRedirect: refuseRedirects},
+		markerClient:    &http.Client{CheckRedirect: refuseRedirects, Timeout: markerTimeout},
 		retrySleep:      time.Sleep,
 		Statistics: &CollectionStatistics{
 			skipReasons: make(map[SkipReason]int64),
@@ -591,6 +607,9 @@ func (c *Collector) thunderstormUrl() string {
 	var urlParams = url.Values{}
 	if c.Source != "" {
 		urlParams.Add("source", c.Source)
+	}
+	if c.scanID != "" {
+		urlParams.Add("scan_id", c.scanID)
 	}
 
 	var apiEndpoint string
