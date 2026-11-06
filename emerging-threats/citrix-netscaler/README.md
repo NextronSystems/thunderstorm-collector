@@ -1,12 +1,12 @@
 # Citrix NetScaler assessment profile
 
-[All assessment guides](../README.md) · [Collector recommendations](../../docs/COLLECTOR_RECOMMENDATIONS.md) · [Collector downloads](../../README.md#download-a-collector)
+[All assessment guides](../README.md) · [NetScaler integration guide](../../integration-guides/citrix/netscaler-collection-and-scanning.md) · [Collector recommendations](../../docs/COLLECTOR_RECOMMENDATIONS.md) · [Collector downloads](../../README.md#download-a-collector)
 
 Reviewed **2026-10-11**. This profile selects a broad set of NetScaler files for submission to Thunderstorm. Detection uses the server's installed signatures. The profile contains a **Go configuration** and **header settings for the existing Bash collector**.
 
 ## Choose the collector first
 
-Use the [NetScaler selection steps](../../go/README.md#choose-a-collector-for-your-netscaler) to identify the firmware/build, underlying OS and CPU. The dedicated Go binary targets confirmed FreeBSD 8.4/amd64; the [Bash preset below](#option-2-existing-bash-collector) is an alternative when its requirements are met. FreeBSD 14.3 appears in the Go test record as a VM environment, not as a NetScaler version boundary. Actual firmware validation remains pending for both options.
+Use the [NetScaler selection steps](../../go/README.md#choose-a-collector-for-your-netscaler) to identify the firmware/build, underlying OS and CPU. The dedicated Go binary targets confirmed FreeBSD 8.4/amd64; the [Bash preset below](#option-2-existing-bash-collector) is an alternative when its requirements are met. FreeBSD 14.3 appears in the Go test record as a VM environment, not as a NetScaler version boundary. Actual firmware validation remains pending for both options. The [NetScaler integration guide](../../integration-guides/citrix/netscaler-collection-and-scanning.md) covers access, running a collector on each node, repeat runs and the routes that run nothing on the appliance.
 
 ## Collection scope
 
