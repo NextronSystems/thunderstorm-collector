@@ -6,7 +6,7 @@ Four routes bring the appliance's files to THOR's signatures:
 
 | Route | What runs on the NetScaler | Requirements | Suited to |
 | --- | --- | --- | --- |
-| [1. Collector on the appliance](#route-1-run-a-collector-on-the-appliance) | The Go or Bash collector, copied for each run, or installed for runs started by cron | Shell access, a network path from the appliance to Thunderstorm, a Thunderstorm service | Selective collection, repeat runs, many appliances |
+| [1. Collector on the appliance](#route-1-run-a-collector-on-the-appliance) | The Go or Bash collector, copied for each run and removed afterwards; installed only where cron starts the runs | Shell access, a network path from the appliance to Thunderstorm, a Thunderstorm service | Selective collection, repeat runs, many appliances |
 | [2. SFTP collector on another host](#route-2-pull-files-with-the-sftp-collector) (prototype) | Nothing; files are read over SFTP | A working SFTP subsystem, SSH key login, a Thunderstorm service | Appliances that cannot reach Thunderstorm, or where nothing may run |
 | [3. THOR over SSHFS](#route-3-scan-over-sshfs-with-thor) | Nothing; files are read over SFTP | A working SFTP subsystem, a Linux workstation with SSHFS, a Forensic Lab License | One complete assessment, as in incident response |
 | [4. Exported evidence](#route-4-scan-exported-evidence) | `show techsupport` writes a support archive; a VPX disk copy needs nothing on the instance | SCP access or hypervisor access, a Forensic Lab License | No live access to the files, or a second look at configuration and logs |
@@ -141,9 +141,16 @@ Each node of an HA pair or cluster has its own NSIP and its own files. `show ha 
 
 ### Repeat collections
 
-Repeat runs can start from a scheduler host or from cron on the appliance:
+Start repeat runs from a scheduler host. Cron on the appliance also works, but it is the second choice:
 
-| | Scheduler host | Cron on the appliance |
+- **Nothing changes on the appliance between runs.** The scheduler host brings the collector and its configuration for each run and removes them afterwards. Cron needs a lasting change to the system crontab and a collector that stays installed on every node.
+- **Nothing to lose or alter between runs.** A firmware upgrade or HA file sync can drop or overwrite a crontab line. Anyone with shell access can change an installed collector or its configuration, for example to exclude a directory. Fresh copies from the scheduler host confine such changes to a single run, although a compromised appliance can still interfere while the collector runs.
+- **Missing runs show up.** The scheduler host fetches the log of every run, so a failed or skipped run is visible there. A cron line that was removed simply stops sending files.
+- **No look-alike persistence.** Nothing on the appliance resembles the cron and boot persistence that attackers use on NetScaler, so a later assessment has nothing to explain.
+
+The cost is the transfer of the collector, about 6 MB per run and node, and a scheduler host that can log in to every appliance as a superuser. Protect that host and its SSH key like an administrator workstation, and use the key for nothing else. Use cron only where no scheduler host can reach the appliances over SSH.
+
+| | Scheduler host (recommended) | Cron on the appliance |
 | --- | --- | --- |
 | What stays on the appliance | Nothing between runs | The run directory on every node, and one line in the system crontab |
 | What each run needs | Inbound SSH from the scheduler host with key login | Only the network path to Thunderstorm |
@@ -166,7 +173,7 @@ This sequence follows the documented command form but has not been tested on an 
 
 #### With cron on the appliance
 
-Citrix documents how to keep a changed system crontab. `crontab` is one of the `/etc` files that the appliance takes from `/nsconfig` at boot, and Citrix's log rotation article edits `/etc/crontab` and then copies it to `/nsconfig/crontab`. [Citrix CTX327915](https://support.citrix.com/external/article/CTX327915/how-to-install-custom-freebsd-configuration-files-on-a-netscaler.html) · [Citrix CTX277306](https://support.citrix.com/external/article/277306/how-to-modify-the-interval-for-nslog-rot.html) FreeBSD's cron rereads `/etc/crontab` within a minute of a change, so a new line takes effect without a restart. [FreeBSD cron(8)](https://man.freebsd.org/cgi/man.cgi?query=cron&sektion=8&manpath=FreeBSD+8.4-RELEASE) Citrix calls the older method of adding crontab entries through `rc.netscaler` obsolete; do not use it.
+Use this only where no scheduler host can reach the appliance over SSH. Citrix documents how to keep a changed system crontab. `crontab` is one of the `/etc` files that the appliance takes from `/nsconfig` at boot, and Citrix's log rotation article edits `/etc/crontab` and then copies it to `/nsconfig/crontab`. [Citrix CTX327915](https://support.citrix.com/external/article/CTX327915/how-to-install-custom-freebsd-configuration-files-on-a-netscaler.html) · [Citrix CTX277306](https://support.citrix.com/external/article/277306/how-to-modify-the-interval-for-nslog-rot.html) FreeBSD's cron rereads `/etc/crontab` within a minute of a change, so a new line takes effect without a restart. [FreeBSD cron(8)](https://man.freebsd.org/cgi/man.cgi?query=cron&sektion=8&manpath=FreeBSD+8.4-RELEASE) Citrix calls the older method of adding crontab entries through `rc.netscaler` obsolete; do not use it.
 
 1. On every node, install the run directory as described in [copy, test, preview and collect](#copy-test-preview-and-collect). Run the test upload and the preview, then leave the directory in place. Remove `test/` and `preview.log` from it.
 2. In the shell of the standalone appliance or the HA primary, check whether the crontab was customized before, and keep a copy of the current one:
