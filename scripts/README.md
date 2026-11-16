@@ -1,63 +1,62 @@
 # THOR Thunderstorm Script Collectors
 
-Use this guide to select a standalone script and find its runtime-specific instructions. The [main README](../README.md) covers the Go-versus-script choice, downloads, and the overall collection workflow. Current scripts use header settings with command-line or environment-variable overrides, depending on the collector; they do not read the Go YAML configuration.
+Pick the script that matches the runtime on the target, then follow its guide.
+For the choice between Go and scripts, downloads and the overall workflow, see
+the [main README](../README.md).
 
-For VMware ESXi, start with the [Python guidance below](#vmware-esxi-use-the-python-collector). For assessment-specific paths and presets, see the [Emerging Threats profiles](../emerging-threats/README.md).
-
-For recommendations by product rather than scripting language, see the [product and platform recommendation list](../docs/COLLECTOR_RECOMMENDATIONS.md). It distinguishes candidate combinations from recorded tests and explains when external file collection is needed.
-
-## Alternatives to Running a Collector
-
-If a compatible script or its dependencies cannot be deployed, consider
-**SSHFS scanning**: mount accessible source directories on a supported analysis
-workstation and run THOR there. The source needs SSH/SFTP access and sufficient
-read permissions; it does not run a scanner or collector. The prototype
-[SFTP collector](../sftp/README.md) uses the same access without a mount: it
-runs on the Thunderstorm host or another system, selects files from the SFTP
-directory listing and sends only those to Thunderstorm.
-
-See [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md) for the
-SSHFS example and a comparison with native scans, Thunderstorm submissions and
-offline analysis, including licensing and evidence coverage. Scheduled
-collectors remain useful for recurring assessments where they can be deployed.
+- Recommendations by product: [product and platform list](../docs/COLLECTOR_RECOMMENDATIONS.md)
+- Assessment paths and presets: [Emerging Threats profiles](../emerging-threats/README.md)
 
 ## Choosing a Collector
 
-The eight collectors are organized by language. Choose a file using the target's available runtime, then follow its guide for all prerequisites and configuration options.
-
 | Available execution environment | Collector | Guide |
 | --- | --- | --- |
-| Bash on a compatible Unix-like host | [Bash](bash/thunderstorm-collector.sh) | [Requirements and usage](bash/README.md) |
-| POSIX sh / ash, including BusyBox and minimal Linux | [POSIX sh / ash](ash/thunderstorm-collector-ash.sh) | [Requirements and usage](ash/README.md) |
-| Python 3.4+ | [Python 3](python/thunderstorm-collector.py) | [Requirements and usage](python/README.md) |
-| Legacy Python 2.7 | [Python 2](python/thunderstorm-collector-py2.py) | [Requirements and usage](python/README.md) |
-| Perl with the required modules | [Perl](perl/thunderstorm-collector.pl) | [Requirements and usage](perl/README.md) |
-| Windows PowerShell 3+ | [PowerShell](powershell/thunderstorm-collector.ps1) | [Requirements and usage](powershell/README.md) |
-| Legacy Windows PowerShell 2 | [PowerShell 2](powershell/thunderstorm-collector-ps2.ps1) | [Requirements and usage](powershell/README.md) |
-| Windows cmd with Windows Script Host and suitable curl | [Batch](batch/thunderstorm-collector.bat) | [Requirements and usage](batch/README.md) |
+| Bash on a compatible Unix-like host | [Bash](bash/thunderstorm-collector.sh) | [Bash guide](bash/README.md) |
+| POSIX sh / ash, including BusyBox and minimal Linux | [POSIX sh / ash](ash/thunderstorm-collector-ash.sh) | [ash guide](ash/README.md) |
+| Python 3.4+ | [Python 3](python/thunderstorm-collector.py) | [Python guide](python/README.md) |
+| Legacy Python 2.7 | [Python 2](python/thunderstorm-collector-py2.py) | [Python guide](python/README.md) |
+| Perl with the required modules | [Perl](perl/thunderstorm-collector.pl) | [Perl guide](perl/README.md) |
+| Windows PowerShell 3+ | [PowerShell](powershell/thunderstorm-collector.ps1) | [PowerShell guide](powershell/README.md) |
+| Legacy Windows PowerShell 2 | [PowerShell 2](powershell/thunderstorm-collector-ps2.ps1) | [PowerShell guide](powershell/README.md) |
+| Windows cmd with Windows Script Host and suitable curl | [Batch](batch/thunderstorm-collector.bat) | [Batch guide](batch/README.md) |
 
-Each collector is a standalone file; `scripts/tests/` contains development/acceptance tooling and is not needed on the collecting host. Preview the collection using the selected guide's syntax. Most scripts have default collection directories; Batch requires an explicit directory. Override the defaults when you want a different scope. Flags and units differ between languages.
+- **One file is enough.** Each collector is standalone; `scripts/tests/` is
+  test tooling, not needed on the collecting host.
+- **Settings** live in the script header, with command-line or
+  environment-variable overrides depending on the collector. Scripts do not
+  read the Go YAML configuration.
+- **Directories:** most scripts have defaults; Batch requires an explicit
+  directory. Preview the collection first. Flags and units differ between
+  languages.
 
-## VMware ESXi: use the Python collector
+## VMware ESXi: Use the Python Collector
 
-For VMware ESXi, start with [the Python 3 collector](python/thunderstorm-collector.py) and its [full usage and acceptance guide](python/README.md). Earlier Python collector revisions have been used successfully on ESXi, but the exact firmware versions and collector revisions were not recorded. The revised implementation still requires validation on the intended ESXi system.
+Use the [Python 3 collector](python/thunderstorm-collector.py) and its
+[guide](python/README.md).
 
-### Requirements and compatibility
+> [!NOTE]
+> Earlier Python collector revisions ran successfully on ESXi; firmware and
+> collector versions were not recorded. The revised collector is **not yet
+> tested** on ESXi. The
+> [acceptance report of 8 October 2026](../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
+> records tests against real THOR with Python 3.9.6 on macOS and Python 3.4.10
+> and 2.7.18 in containers.
 
-- The revised Python 3 collector requires **Python 3.4 or later** and only the standard library.
-- A separate, standalone [Python 2 collector](python/thunderstorm-collector-py2.py) supports **Python 2.7** for legacy hosts. Prefer Python 3 where available. Verified HTTPS requires Python 2.7.9 or later; older versions refuse it rather than silently disabling certificate verification.
-- Select an interpreter already available on the appliance. `python3` in the examples is not a guaranteed ESXi interpreter path. Runtime and SSL availability depend on the appliance; these instructions do not require installing an unsupported runtime or changing ESXi security settings.
-- As of **8 October 2026**, the [script acceptance report](../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md) records successful HTTP/HTTPS tests with Python 3.9.6 on macOS and actual Python 3.4.10 and 2.7.18 in containers against real THOR. These are not ESXi deployment tests.
+### Requirements
 
-### Source checkout versus published releases
+| File | Interpreter | Notes |
+| --- | --- | --- |
+| `thunderstorm-collector.py` | **Python 3.4+**, standard library only | Preferred |
+| `thunderstorm-collector-py2.py` | **Python 2.7** | Legacy hosts. Verified HTTPS needs 2.7.9+; older versions refuse HTTPS instead of disabling certificate checks |
 
-The quick start below describes the revised source files in `scripts/python/` and later releases containing those files. Each collector is standalone: copy the selected `.py` file to the target; the rest of this repository and the test harness are not required there.
+Use an interpreter already on the appliance; `python3` is not a guaranteed
+ESXi path. No unsupported runtime or ESXi security change is required.
 
-See the [main download guidance](../README.md#download-a-collector) for current release availability. The older `thunderstorm-collector-1.0.1.py` requires Python 3.6+, has no `--dry-run` or configurable age/size options, and uses a 20 MiB size limit. Do not apply the revised examples below to that file. Consult [its tagged source](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/scripts/thunderstorm-collector.py) and its `--help` output instead.
+### Quick start
 
-### Quick start for the revised collector
-
-Copy `scripts/python/thunderstorm-collector.py` to a working directory on the target. From that directory, substitute the actual server and an existing absolute directory containing a few synthetic test files. Begin with a local dry-run:
+Copy `scripts/python/thunderstorm-collector.py` to a working directory on the
+target. Replace the server, and point `--dirs` at an existing absolute
+directory with a few synthetic test files. Preview first:
 
 ```sh
 python3 ./thunderstorm-collector.py \
@@ -66,7 +65,8 @@ python3 ./thunderstorm-collector.py \
   --max-age 14 --max-size-kb 2048 --dry-run
 ```
 
-The dry-run selects files without contacting the server. It does not verify upload connectivity, TLS or payload readability. After checking the selection, use `--no-dry-run` to upload the same fixture files:
+The dry run contacts no server, so it does not check connectivity, TLS or
+file readability. If the selection is right, upload:
 
 ```sh
 python3 ./thunderstorm-collector.py \
@@ -75,36 +75,75 @@ python3 ./thunderstorm-collector.py \
   --max-age 14 --max-size-kb 2048 --no-dry-run
 ```
 
-For a later versioned release file, substitute its actual filename. For the legacy collector, copy `scripts/python/thunderstorm-collector-py2.py` instead and substitute the available Python 2.7 interpreter and that filename; the selection and upload options are the same.
+For Python 2.7, use `thunderstorm-collector-py2.py` with that interpreter; the
+options are the same. For a versioned release file, use its filename.
 
-For normal collection, `--dirs` is optional: on ESXi/Unix, omitting it uses `/` unless `SCAN_DIRS` was changed in the header. Use an explicit synthetic-file directory for the test examples above. The revised collector defaults to port 8080, a maximum age of 30 days and a maximum size of **2048 KiB (2 MiB)**, including the exact limit. `--max-age 0` disables age filtering. Symlink entries, special files and configured system/cloud/VM path patterns are skipped; see the Python guide for the full selection rules.
+- **Defaults:** port **8080**, files changed in the last **30 days**
+  (`--max-age 0` disables the filter), up to **2048 KiB (2 MiB)** inclusive.
+- **Directories:** without `--dirs`, the collector uses `/` unless `SCAN_DIRS`
+  was changed in the header.
+- **Skipped:** symlink entries, special files and configured system, cloud and
+  VM path patterns. The [Python guide](python/README.md) has the full rules,
+  retries and exit codes.
+- **HTTPS:** add `--tls` and the port. For a private CA, add
+  `--ca-cert /path/to/ca.pem`; certificate and hostname checks stay on. Old SSL
+  libraries can still limit interoperability.
+- **Results:** uploads are always asynchronous. Check received samples and
+  analysis results on the server.
 
-For HTTPS, add `--tls` and the appropriate port. Use `--ca-cert /path/to/ca.pem` for a private CA while retaining certificate and hostname verification. Old SSL libraries can still limit interoperability even when the Python version meets the minimum.
+### Release v1.0.1
 
-Uploads are always asynchronous; check received samples and analysis results on the server. The [Python guide](python/README.md) is the reference for retries, exit codes, exclusions, and manual acceptance checks.
+The steps above apply to the current source and later releases
+([download guidance](../README.md#download-a-collector)).
+`thunderstorm-collector-1.0.1.py` needs Python 3.6+, has no `--dry-run` or
+age/size options, and has a 20 MiB size limit. Do not use the examples above
+with it; see
+[its tagged source](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.0.1/scripts/thunderstorm-collector.py)
+and its `--help` output.
 
-## Manual Acceptance Testing
+## Alternatives to Running a Collector
 
-Each language guide contains acceptance cases for that collector. Run them against the exact source revision or release asset you intend to deploy, starting with synthetic files and explicit directories.
+If no script can be deployed on the source:
 
-Use the shared [test preparation](MANUAL_TESTING_GUIDE.md#manual-test-preparation) and [acceptance record](MANUAL_TESTING_GUIDE.md#acceptance-record) to capture runtime, service, revision/hash, collection scope, and server-side results. The older PR-stack sections in that document describe the original review process; the collectors are now merged.
+- **SSHFS scanning:** mount the source directories on a supported analysis
+  workstation and run THOR there. The source needs SSH/SFTP access and read
+  permissions; nothing runs on it.
+- **[SFTP collector](../sftp/README.md)** (prototype): same access, no mount.
+  It runs on the Thunderstorm host or another system and sends only the files
+  it selects from the SFTP directory listing.
 
-## Automated Tests
+[Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md) has the
+SSHFS example and compares it with native scans, Thunderstorm submissions and
+offline analysis,
+including licensing and evidence coverage.
 
-The [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md) explains available backends, prerequisites, and CI coverage. Run focused shared-harness checks from the repository root:
+## Testing
+
+**Manual acceptance:** each collector has its cases in a `TESTING.md` next to
+its guide: [Bash](bash/TESTING.md), [ash](ash/TESTING.md),
+[Python](python/TESTING.md), [Perl](perl/TESTING.md),
+[PowerShell](powershell/TESTING.md), [Batch](batch/TESTING.md). Run them on the
+exact revision or release asset you will deploy, with synthetic files and
+explicit directories. Record the results with the shared
+[test preparation](MANUAL_TESTING_GUIDE.md#manual-test-preparation) and
+[acceptance record](MANUAL_TESTING_GUIDE.md#acceptance-record).
+
+**Automated tests:** the [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md)
+covers backends, prerequisites and CI. A focused run from the repository
+root:
 
 ```bash
 THUNDERSTORM_TEST_COLLECTORS=bash \
   scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
-Supported selector values are `bash`, `ash`, `python3`, `python2`, `perl`, `ps3`, and `ps2`.
-
-Use `THUNDERSTORM_TEST_REQUIRE_MATCH=1` when CI or manual test runs must fail if the requested collector is missing or not runnable.
+Selectors: `bash`, `ash`, `python3`, `python2`, `perl`, `ps3`, `ps2`. Set
+`THUNDERSTORM_TEST_REQUIRE_MATCH=1` to fail when the requested collector is
+missing or not runnable.
 
 ## Building a Collector for Another Platform
 
-The [collector construction guide](../docs/COLLECTOR_CONSTRUCTION_GUIDE.md) describes the
-upload protocol, optional capability profiles, safety requirements and acceptance
-tests without prescribing a language-specific implementation. It includes a
-reusable assignment for a coding agent targeting a new language, OS or architecture.
+The [collector construction guide](../docs/COLLECTOR_CONSTRUCTION_GUIDE.md)
+describes the upload protocol, capability profiles, safety requirements and
+acceptance tests, with a reusable coding-agent assignment for a new language,
+OS or architecture.
