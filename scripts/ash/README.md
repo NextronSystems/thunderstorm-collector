@@ -1,303 +1,215 @@
 # POSIX sh / BusyBox ash Collector
 
-Use `thunderstorm-collector-ash.sh` on Unix-like systems without Bash: BusyBox/Alpine, embedded Linux, routers, appliances, and recovery environments. Use the [Bash collector](../bash/README.md) when Bash is available and filenames containing newlines must be supported. No Python, Perl, or Go is required on the collector target.
+`thunderstorm-collector-ash.sh` uploads files to a THOR Thunderstorm service
+from Unix systems without Bash: BusyBox/Alpine, embedded Linux, appliances and
+recovery environments. It needs no Python, Perl or Go.
 
-For alternatives, use the [script chooser](../README.md#choosing-a-collector).
-See [download guidance](../../README.md#download-a-collector) for release availability;
-the options below describe the current source collector.
+Alternatives: [Bash collector](../bash/README.md) (newline file
+names) · [script chooser](../README.md#choosing-a-collector) ·
+[SSHFS and offline scanning](../../docs/SCANNING_APPROACHES.md)
 
-For systems where running a collector is impractical, compare
-[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
-SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+> [!NOTE]
+> Tested with dash and BusyBox ash; check the shell, utilities and transport on
+> your target. This guide describes the current source; for releases, see the
+> [download guidance](../../README.md#download-a-collector).
 
-## Requirements and Transport Selection
+## Requirements
 
-The script uses POSIX shell syntax and is tested with dash and BusyBox ash. Test the actual shell and utility versions on your target; a dash run is not evidence for every BusyBox build.
+<a id="requirements-and-transport-selection"></a>
 
 | Requirement | Detail |
 |---|---|
-| Utilities | `sh`, `find`, `awk`, `sed`, `grep`, `tr`, `wc`, `od`, `cat`, `date`, `head`, `tail`, `rm`, `mktemp`, `dirname`, `basename`, `uname` |
-| Utility features | `od -v -An -tx1` and `head -c BYTES`. BusyBox `od` built without `CONFIG_DESKTOP` has no `-A`/`-t`; a startup self-test exits 2 before any request instead of sending empty source names |
-| Temporary storage | Writable `TMPDIR` (default `/tmp`); `mktemp -d TEMPLATE` must work |
-| Size metadata | GNU/BSD/BusyBox `stat` when available; otherwise `wc -c` reads the file to measure it |
-| Optional tools | `hostname`, `id`, `logger` for hostname discovery, privilege warnings, syslog |
-| Server addressing | IPv4 or DNS hostname plus port 1..65535; no URL scheme/path or IPv6 literal |
+| Runtime | POSIX `sh`, such as BusyBox ash or dash |
+| System tools | `find`, `awk`, `sed`, `grep`, `tr`, `wc`, `od`, `cat`, `date`, `head`, `tail`, `rm`, `mktemp`, `dirname`, `basename`, `uname` |
+| Utility features | `od -v -An -tx1` and `head -c BYTES`; a startup self-test exits 2 before any request if they are missing (BusyBox `od` built without `CONFIG_DESKTOP` lacks `-A`/`-t`) |
+| Temporary storage | Writable `TMPDIR` (default `/tmp`) |
+| Optional | `stat` (else files are read in full to measure size); `hostname`, `id`, `logger` |
 
-The first supported transport is selected:
+The first available upload tool is used:
 
-| Transport | HTTP | HTTPS | Binary-safe | Collection markers |
-|---|---|---|---|---|
-| curl | Yes | Verified by default | Yes | If the service supports them |
-| GNU wget | Yes | Verified by default | Yes | If the service supports them |
-| nc + timeout | Yes | No | Yes | Not sent |
-| BusyBox/unknown wget alone | Refused | Refused | Not accepted as a safe fallback | Not sent |
+- **curl** or **GNU wget** (with `--no-config`): HTTP or verified HTTPS, with
+  collection markers.
+- **`nc` + `timeout`**: plain HTTP only, no markers
+  ([netcat transport](#netcat-transport)).
+- BusyBox or unknown wget alone is **refused** (exit 2): binary integrity is
+  required.
 
-Curl/wget configuration files and proxy environment settings are ignored, so
-they cannot silently disable TLS verification or redirect uploads. GNU wget must
-support `--no-config`.
+## Quick Start
 
-Netcat requires `nc -w SECONDS HOST PORT` and GNU/BusyBox-compatible `timeout SECONDS COMMAND`. BusyBox `timeout` before 1.30 only accepts `timeout -t SECONDS`; the collector runs `timeout 5 sh -c :` before choosing nc and, if that fails, warns and does not use nc (exit 2 when no other transport exists). Its minimal HTTP/1.0 client requires a complete header section, exactly one `Content-Length`, no `Transfer-Encoding`, and the exact declared body length. Chunked, close-delimited, informational, malformed and incomplete responses fail. Prefer curl/GNU wget if your backend needs those features. HTTP is unencrypted; use an appropriately isolated network.
+Preview which files would be uploaded; this contacts no server:
 
-## Configuration and Startup Output
+```sh
+busybox ash ./thunderstorm-collector-ash.sh \
+  --server thunderstorm.example.internal \
+  --dir /path/to/collection --source incident-123 --dry-run
+```
 
-Edit the commented `USER CONFIGURATION` block or pass command-line options.
-`THUNDERSTORM_SERVER` is required (hostname/IPv4 only, without scheme/port/path).
-An empty value exits 2 with instructions. `SCAN_DIRS` contains one recursive root
-per line inside the quotes; spaces within a line belong to that path. Review the
-broad shipped Linux roots before running. The first `--dir` replaces the header
-list; further `--dir` options add roots. Other CLI values override their header
-defaults. `--no-ssl`, `--verify-tls`, `--no-dry-run` and `--no-debug` disable
-corresponding header choices. A CA certificate (`--ca-cert` or `CA_CERT`) turns
-on HTTPS; `--no-ssl` together with a CA certificate, in either order, exits 2
-before any request.
+If the file list looks right, upload:
 
-Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
-files are not collected. The console and enabled file/syslog destinations print
-one line per root and the effective limits before scanning, including in dry-run.
-Start with `--dry-run` to check the scope. `--quiet` deliberately suppresses console
-output. Keep externally captured logs outside the input directories.
-If the console goes away during a run (an SSH session without a terminal, or a
-`| tee` ended with Ctrl-C), console output stops and the run continues with file
-and syslog logging; markers and workspace cleanup are unaffected.
+```sh
+busybox ash ./thunderstorm-collector-ash.sh \
+  --server thunderstorm.example.internal \
+  --dir /path/to/collection --source incident-123
+```
 
-## Capabilities
+Use `sh` or `dash` if that is your validated shell. Defaults: files
+changed in the **last 30 days**, up to **2048 KiB (2 MiB)**; `--max-age 0`
+removes the age filter. Roots and limits are printed first.
 
-- Recursive regular-file scanning; no traversal of symlink entries. Explicit symlink roots resolve to their physical directory.
-- Filename validation is batched with `find -exec ... +` when supported; older BusyBox builds fall back to one file per invocation. Newline rejection is unchanged in both modes.
-- All extensions are eligible. No executable-only selector or extension-filter option.
-- Age: `--max-age 0..36500`, default 30. Zero disables filtering; positive values use `find -mtime -N` (24-hour buckets, not calendar dates).
-- Size: `--max-size-kb 1..1048576`, default 2048. One unit is 1024 bytes; the exact limit is included. Empty files are eligible, subject to backend support.
-- Known cloud-folder paths are skipped. `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots` and detected Linux network/special mounts are excluded. These are best-effort exclusions, not a security boundary.
-- Mount exclusions come from the text of `/proc/mounts`, read once before the begin marker. Mount points are compared as strings with each resolved root and never accessed, so a stale hard NFS/CIFS/sshfs mount outside the roots cannot hang the run. Inside a root, `find` itself may still block on a stale mount point before pruning it, and a root that itself lies on such a mount is still traversed.
-- Cloud matching applies to directory components, not regular-file names such as `dropbox` or `Google Drive notes.txt`.
-- A private workspace and the active log are excluded from scanning. Scratch files are reused and removed on exit.
-- Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and every control character (CR, LF, TAB, ESC, DEL, ...) with underscores; a strict multipart parser rejects control characters in a part header and the file would never be collected.
-- `--ca-cert FILE` is the **only** trust anchor: an empty CA directory is passed to curl (`--capath`) and GNU wget (`--ca-directory`), so system CAs are not trusted in addition. The nc transport has no TLS.
-- Async `/api/checkAsync` submission only; there is no synchronous mode, and `--async` is accepted and ignored so existing command lines keep working. Async success means accepted, not analysis completed. The collector does not poll async results.
-- Optional begin/end/interrupted `/api/collection` markers. Marker results are logged only with `--debug`. HTTP 404/501 (no marker support) supplies no scan ID. Any other HTTP status on begin is retried once after two seconds; uploads then continue without a scan ID. The begin marker doubles as the connectivity check: only a begin that gets no HTTP answer to either attempt (connection, TLS, timeout or incomplete reply) aborts with exit 2. End and interrupted marker results never change the exit status.
-- Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored (a debug message with `--debug`).
-- Marker JSON above 64 KiB, including an answer cut off at the 1 MiB response limit, is not parsed: uploads continue without a scan ID (a debug message with `--debug`). This bounds parser work on older awk runtimes.
-- `--retries 1..10` bounds total attempts per file, including HTTP 503. Retry-After integer seconds cap at 120; otherwise backoff starts at two seconds and caps at 60. A lost response can cause duplicates; no deduplication or resume.
-- Server loss: after 3 files in a row whose every attempt got no HTTP status (or only 503), uploads pause and `GET /api/status` is polled after 2, 4, 8 ... seconds (capped at 60) for up to `--server-wait` seconds (header `SERVER_WAIT`, 0..86400, default 600). A 2xx answer resumes with the next file; files that already failed stay failed. Any other HTTP status, including 4xx and 500, means the server is up and does not count. When the window runs out the collector logs `Server unreachable for Ns, stopping`, sends a best-effort `interrupted` marker and exits 1; the remaining files are not attempted and not counted. `--server-wait 0` stops at once without polling. Dry-run never waits.
-- Dry-run needs no upload tool and never contacts the server. CLI, file and optional syslog logging are supported.
+## Configuration
 
-## Limits and Exit Codes
+Options override the `USER CONFIGURATION` block at the top of the script.
 
-Paths containing literal newlines are **not supported**. Explicit newline roots are rejected before contacting the server. Discovered newline paths are never submitted or split into other paths; the run records scan errors and continues with supported files.
-This also applies to physical paths reached through symlinks. A resolved newline
-root is a scan error; a newline workspace or log path is a fatal configuration error.
+- **Server:** `THUNDERSTORM_SERVER` or `--server`, required (else exit 2). Only
+  a DNS name or IPv4 address: no scheme, port, path or IPv6 literal.
+- **Directories:** `SCAN_DIRS`, one path per line. The shipped list (`/root`,
+  `/tmp`, `/home`, `/var`, `/usr`) is broad; replace it. The first `--dir`
+  replaces the list, further ones add to it.
+- `--no-ssl`, `--verify-tls`, `--no-dry-run` and `--no-debug` reverse header
+  settings.
+- **CA certificate:** `--ca-cert` or `CA_CERT` turns on HTTPS. Combined with
+  `--no-ssl`, in either order, it exits 2 before any request.
 
-Missing/inaccessible roots, traversal errors, unreadable/disappeared files and failed uploads are visible failures, not successful skips. Other readable files can still be submitted. `scan_errors` counts root/traversal/unsupported-path errors separately from per-file `failed` counts.
-Only the first 4096 bytes of traversal diagnostics are retained and logged per root; remaining diagnostics are drained without accumulating in memory or on disk.
+## Common Options
 
-| Exit | Meaning |
+`--help` lists all options.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-s`, `--server HOST` | none | Thunderstorm server |
+| `-p`, `--port PORT` | 8080 | Server port |
+| `-d`, `--dir PATH` | `SCAN_DIRS` | Directory to collect; repeatable |
+| `--max-age DAYS` | 30 | Days since modification; `0` disables |
+| `--max-size-kb KIB` | 2048 | Largest file, inclusive |
+| `--source NAME` | hostname | Source name in Thunderstorm |
+| `--dry-run` | off | List files, send nothing |
+| `--ssl` | off | Use HTTPS |
+| `--ca-cert FILE` | system trust | Use HTTPS and trust only this CA |
+| `--retries N` | 3 | Attempts per file, 1 to 10 |
+| `--server-wait SEC` | 600 | Wait for a lost server, 0 to 86400; `0` stops at once |
+| `--debug` | off | Extra diagnostics, including markers |
+| `--log-file PATH` | `./thunderstorm.log` | `--no-log-file` disables it |
+
+`--async` is accepted and ignored.
+
+## Exit Codes
+
+| Code | Meaning |
 |---|---|
-| 0 | All eligible supported files submitted, or successful dry-run; intentional filter skips allowed |
-| 1 | Partial/incomplete run, interruption, failed file, scan error, or server unreachable for the whole server wait |
-| 2 | Invalid configuration, missing dependencies or utility features, workspace failure, or no HTTP answer to the begin marker after retry |
+| `0` | No errors detected (an empty directory is fine) |
+| `1` | Failed file, scan error, missing root, interruption, or server unreachable for the whole server wait |
+| `2` | Invalid configuration, missing tool or utility feature, unusable workspace, or no HTTP answer to the begin marker |
 
-An empty existing root can succeed with zero files; missing roots cannot. Netcat has no begin connectivity check, so an unreachable service fails the first three files, then waits up to `--server-wait` seconds and exits 1, rather than curl/GNU wget's begin-stage exit 2. Logging failures disable file logging with a warning; they do not alone fail uploads.
+The summary counts `failed` files (unreadable or not uploaded) and
+`scan_errors` (missing roots, traversal errors, rejected paths). With `nc`
+(no begin marker), an unreachable server fails three files, then waits up to
+`--server-wait` seconds and exits **1**.
 
-Curl attempts have a 10-second connect timeout and 60-second total timeout. GNU wget uses one internal attempt, no redirects, a 10-second connect timeout and 60-second idle-read timeout; this is not a total wall-clock deadline. Netcat attempts are wrapped in a 60-second timeout. Finite attempts do not imply a fixed deadline for the whole scan.
+## Behavior Details
 
-Responses are limited to 1 MiB (including headers for netcat). Each transport
-output file also has an operating-system write limit of at most 2 MiB, including
-headers and diagnostics. Oversized responses fail; error-body logging is limited
-to 4 KiB. Large sample spooling is not subject to the response limit.
+### File selection
 
-Collection is not an atomic snapshot. Files can change between enumeration, measurement and reading; hostile replacement/symlink races are not prevented. Directory listings consume temporary disk space. Without `stat`, measuring size reads whole files, even oversized ones. Mount detection depends on Linux `/proc/mounts`; do not assume equivalent detection elsewhere. POSIX syntax alone does not establish compatibility with untested ksh or legacy BusyBox versions.
+- **Walk:** recursive, regular files, all extensions. Symlinks are not
+  followed; a symlinked root resolves to its physical path.
+- **Age:** modification time (`find -mtime -N`, 24-hour periods).
+- **Size:** up to `N * 1024` bytes, including empty files.
+- **Excluded:** `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots`,
+  cloud-sync directories (not file names), and network or special mounts
+  (Linux `/proc/mounts` only). Best effort, not a security boundary.
+- **Mounts are compared as text:** `/proc/mounts` is read once before the
+  begin marker, and mount points are never accessed, so a stale NFS, CIFS or
+  sshfs mount outside the roots cannot hang the run. Inside a root, `find` may
+  still block on a stale mount before pruning it, and a root on such a mount
+  is still walked.
+- **Missing roots** are scan errors, shipped ones too.
+- **Own files:** the log and the private workspace are never uploaded; the
+  workspace is removed on exit. Keep other logs outside the roots.
 
-## Basic Usage
+### Paths with newlines
 
-From the directory containing the standalone script, replace the server and
-approved input path, then preview the selected files:
+Not supported. A `--dir`, workspace or log path with a newline exits 2 before
+any request. A root resolving to such a path, or a found file with a newline,
+is a scan error; such files are never uploaded or split into other paths.
 
-```sh
-busybox ash ./thunderstorm-collector-ash.sh \
-  --server thunderstorm.example.internal --port 8080 \
-  --dir /path/to/approved/input --source appliance-test \
-  --max-age 30 --max-size-kb 2048 --dry-run
-```
+### Uploads and retries
 
-After reviewing the preview, enable uploads explicitly:
+- Uploads use asynchronous `/api/checkAsync`: accepted is not yet analyzed.
+- Only a complete HTTP 2xx counts. Redirects are not followed.
+- curl/wget configuration files and proxy variables are ignored, so they
+  cannot weaken TLS or redirect uploads.
+- `--retries` includes HTTP 503 answers. Waits start at 2 s, doubling to 60 s;
+  `Retry-After` seconds are honored up to 120 s. A failed file does not stop
+  the run.
+- **Lost server:** after 3 files in a row got no HTTP status (or only 503),
+  uploads pause and `/api/status` is polled after 2, 4, 8 … s (at most 60 s
+  apart) for up to `--server-wait` seconds (`SERVER_WAIT`, default 600). A 2xx
+  answer resumes with the next file; failed files stay failed. Any other HTTP
+  status, including 4xx and 500, means the server is up. When the time runs
+  out, the collector logs `Server unreachable for Ns, stopping`, sends an
+  "interrupted" marker and exits 1; remaining files are not attempted or
+  counted. A dry run never waits.
+- Quotes, semicolons, backslashes and control characters in the uploaded file
+  name become underscores; contents are unchanged.
 
-```sh
-busybox ash ./thunderstorm-collector-ash.sh \
-  --server thunderstorm.example.internal --port 8080 \
-  --dir /path/to/approved/input --source appliance-test \
-  --max-age 30 --max-size-kb 2048 --no-dry-run
-```
+### Netcat transport
 
-Use `sh` or `dash` instead only when that is the runtime being validated. Run `--help` for all options. Never use the broad default system roots for acceptance tests.
+Needs `nc -w SECONDS HOST PORT` and `timeout SECONDS COMMAND`. BusyBox
+`timeout` before 1.30 only accepts `-t SECONDS`: the collector tests
+`timeout 5 sh -c :` first and, if that fails, warns and does not use nc (exit 2
+without another transport). Traffic is
+unencrypted, so use an isolated network. The answer needs one
+`Content-Length`, no `Transfer-Encoding` and the full body; chunked,
+close-delimited or incomplete answers fail.
 
-## Manual Acceptance Against Real THOR
+### TLS
 
-Test the exact collector revision to be deployed. Follow the shared [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
-and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record); the cases below
-supply the ash-specific commands and expected results.
+Verification is on by default. `--ca-cert` turns on HTTPS and makes that
+bundle the **only** trusted CA; with `--no-ssl` it is a configuration error
+(exit 2). `-k`, `--insecure` disables verification: testing only.
 
-### 1. Record Environment and Prepare Harmless Fixtures
+### Collection markers
 
-Record the exact commit, tester, OS/architecture, shell/BusyBox version, selected upload-tool version, service version, HTTP/HTTPS and source.
+Begin and end [collection markers](../../docs/COLLECTION_MARKERS.md)
+(`/api/collection`) return a scan ID that tags uploads.
 
-Run from the directory containing the collector. Substitute the real service values. Examples use `sh`; change the invocation inside `collect` to `busybox ash` if `/bin/sh` is not already BusyBox ash.
+- HTTP 404 or 501 (no support, as in THOR 10): no scan ID, the run continues.
+- Any other non-2xx begin result, or no answer, is retried once after 2 s.
+- Marker problems show only with `--debug` and never change the exit code,
+  except: no HTTP answer to either begin attempt stops the run with exit 2.
 
-```sh
-COLLECTOR="$(pwd)/thunderstorm-collector-ash.sh"
-SERVER=thunderstorm.example.internal
-PORT=8080
-SOURCE=manual-ash-acceptance-yourname
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ts-ash-acceptance.XXXXXX")
-mkdir -p "$ROOT/input/nested" "$ROOT/scratch"
-printf 'manual text\n' > "$ROOT/input/sample.txt"
-printf '\000\001\377THUNDER\000\n' > "$ROOT/input/binary.bin"
-: > "$ROOT/input/empty.bin"
-printf 'nested\n' > "$ROOT/input/nested/nested.txt"
-printf 'spaces\n' > "$ROOT/input/file with spaces.txt"
-printf 'semicolon\n' > "$ROOT/input/semi;colon.txt"
-printf 'comma\n' > "$ROOT/input/comma,name.txt"
-printf 'quote\n' > "$ROOT/input/double\"quote.txt"
+### Dry run
 
-collect() {
-  sh "$COLLECTOR" --server "$SERVER" --port "$PORT" \
-    --source "$SOURCE" --max-age 0 --retries 1 \
-    --no-dry-run --no-log-file --no-progress "$@"
-  code=$?
-  printf 'exit_code=%s\n' "$code"
-  return "$code"
-}
-```
+`--dry-run` sends **no requests** and needs no upload tool; `submitted`
+then means "would submit".
 
-Use a shell without `set -e` for intentionally failing cases. Keep output and exit codes. Use separate source identifiers when otherwise repeated runs would be mixed in the service.
+### Logging
 
-### 2. Positive Uploads
+- An unwritable log file turns file logging off with a warning.
+- If the console goes away (an SSH session without a terminal, or a `| tee`
+  ended with Ctrl-C), console output stops; the run continues with file and
+  syslog logging, markers and cleanup.
+- SIGINT, SIGTERM, SIGHUP or SIGQUIT: best-effort "interrupted" marker,
+  workspace removed, exit 1.
 
-```sh
-collect --dir "$ROOT/input"
-```
+### Timeouts and limits
 
-Expect exit 0 and `scanned=8 submitted=8 skipped=0 failed=0 scan_errors=0`. Verify **eight new uploads**, including empty, binary and nested files. Compare received sizes/hashes, not just success messages. Inspect completion of asynchronous analyses in the service; `/api/getAsyncResults?id=<returned-sample-id>` is the native result endpoint. Collector exit 0 alone does not prove completion. If benign results contain no attribution fields, record source/filename verification as NOT TESTED until logs/UI/backend records confirm it.
+| Item | Limit |
+|---|---|
+| curl | 10 s connect, 60 s total |
+| GNU wget | 10 s connect, 60 s idle read (no total deadline) |
+| `nc` | 60 s |
+| Markers | 10 s per request |
+| `/api/status` polls | 10 s per request (15 s with `nc`) |
+| Server answer | 1 MiB (2 MiB output file) |
+| Logged excerpts | 4 KiB per error body and per root's traversal errors |
+| Marker JSON | 64 KiB; scan ID: top-level string, ≤ 256 bytes |
 
-### 3. TLS Trust
+## Limitations
 
-Set `SERVER` and `PORT` to the service's HTTPS listener before these commands.
+- No snapshot: files can change, or be swapped, during the run.
+- No deduplication, resume or parallel upload; a retry can submit a file twice.
+- No deadline for the whole run.
 
-```sh
-collect --dir "$ROOT/input" --ssl --ca-cert /path/to/trusted-ca.pem
-collect --dir "$ROOT/input" --ssl --ca-cert /path/to/unrelated-valid-ca.pem
-```
+## Testing
 
-Correct CA: exit 0 and eight matching uploads. Unrelated **valid** CA: no uploads, exit 2 during begin. A nonexistent certificate only tests path validation, not trust. Do not use `--insecure` for normal acceptance; if explicitly tested, record that verification was disabled. Netcat cannot run HTTPS cases.
-
-### 4. Dry-run and Unreachable Service
-
-Use a known closed local port, not a real service you intend to stop:
-
-```sh
-collect --dir "$ROOT/input" --server 127.0.0.1 --port 1 --dry-run
-collect --dir "$ROOT/input" --server 127.0.0.1 --port 1
-```
-
-Dry-run: exit 0, eight would-submit messages, **no requests**. Unreachable: no uploads, visible error, exit 2 with curl/GNU wget or exit 1 with netcat. With netcat, three files fail before the collector polls `/api/status` for the server wait (default 600 s); add `--server-wait 0` to end this case at once. No indefinite hang. Server-side absence of requests is stronger evidence than a client summary alone.
-
-### 5. Missing and Unreadable Paths
-
-```sh
-mkdir -p "$ROOT/errors/locked-dir"
-printf 'readable\n' > "$ROOT/errors/ok.txt"
-printf 'unreadable\n' > "$ROOT/errors/blocked.txt"
-printf 'hidden\n' > "$ROOT/errors/locked-dir/hidden.txt"
-chmod 000 "$ROOT/errors/blocked.txt" "$ROOT/errors/locked-dir"
-collect --dir "$ROOT/errors" --dir "$ROOT/does-not-exist"
-chmod 600 "$ROOT/errors/blocked.txt"
-chmod 700 "$ROOT/errors/locked-dir"
-collect --dir "$ROOT/does-not-exist" --dry-run
-```
-
-Run permissions as non-root. Expected: only `ok.txt` submitted, exit 1, `failed=1 scan_errors=2` (unreadable file, inaccessible subtree, missing root). All-missing dry-run: exit 1, `scan_errors=1`. Restore permissions even after interruption. Root results do not establish this behavior; record NOT TESTED rather than PASS.
-
-### 6. Exact Size Limit and Age Filter
-
-```sh
-mkdir "$ROOT/size" "$ROOT/age"
-dd if=/dev/zero of="$ROOT/size/limit.bin" bs=1024 count=1 2>/dev/null
-cp "$ROOT/size/limit.bin" "$ROOT/size/too-large.bin"
-printf x >> "$ROOT/size/too-large.bin"
-collect --dir "$ROOT/size" --max-size-kb 1
-printf 'recent\n' > "$ROOT/age/recent.txt"
-printf 'old\n' > "$ROOT/age/old.txt"
-touch -t 202001010000 "$ROOT/age/old.txt"
-collect --dir "$ROOT/age" --max-age 1
-collect --dir "$ROOT/age" --max-age 0
-```
-
-All exit 0. Size: one 1024-byte upload, 1025-byte file skipped. Age 1: recent only. Age 0: both. Confirm excluded files are absent from that run's backend records.
-
-### 7. Log, Workspace and Symlink Exclusions
-
-```sh
-printf 'outside - must stay local\n' > "$ROOT/outside.txt"
-ln -s "$ROOT/outside.txt" "$ROOT/input/link.txt"
-TMPDIR="$ROOT/input" collect --dir "$ROOT/input" \
-  --log-file "$ROOT/input/collector.log"
-```
-
-Expected: exit 0, only eight original payloads. No outside target, log, file list, marker or multipart scratch data uploaded. No `thunderstorm.*` workspace remains after exit. The log remains for inspection.
-
-### 8. Unsupported Newline Filename Fails Safely
-
-```sh
-mkdir "$ROOT/newline"
-name=$(printf 'line\nbreak.txt')
-printf 'unsupported path\n' > "$ROOT/newline/$name"
-printf 'readable\n' > "$ROOT/newline/ok.txt"
-collect --dir "$ROOT/newline"
-```
-
-Expected: exit 1, only `ok.txt` uploaded, `scan_errors=1`, explicit unsupported-path warning. Never upload a path fragment instead of the actual file.
-
-### 9. Validate the Deployment Transport
-
-Repeat positive binary/special-name tests on the actual appliance where curl is absent. For live runs, `--debug` prints `Upload transport: curl`, `Upload transport: wget` (GNU wget), or `Upload transport: nc`; record that line. Dry-run selects no transport and makes no network requests. A test PATH must retain required utilities; removing `/usr/bin` can invalidate the environment.
-
-- GNU wget: eight matching payloads; repeat HTTPS/CA checks if used in deployment.
-- BusyBox nc + timeout: eight matching payloads over HTTP, no markers; repeat the unreachable-service test. Actual nc options vary by build.
-- BusyBox wget without a safe alternative: exit 2 before uploads. Install curl, GNU wget or nc + timeout; warnings followed by corrupted submissions are not acceptable.
-
-### 10. Interruption and Server Failures
-
-Interrupt an isolated fixture run with Ctrl-C, SIGTERM, SIGHUP or SIGQUIT, not a broad system-directory scan. Expected: exit 1 and workspace cleanup. Interrupted markers are best-effort and only available with curl/GNU wget and a supporting service. A client debug message does not prove receipt.
-
-Do not disrupt real THOR to simulate HTTP 500/503 or truncated responses. The regression suite injects those failures locally, checks retry bounds, and rejects incomplete responses despite a 2xx status. A service returning 404/501 for markers can pass uploads; `--debug` then shows `not supported (HTTP 404)`. Record marker functionality as NOT SUPPORTED.
-
-### 11. Acceptance Record and Cleanup
-
-For each case record PASS, FAIL, NOT SUPPORTED or NOT TESTED, with commit/runtime/transport, exit, summary, upload count, hashes and backend evidence. Fix supported failures before approval; agree on intentional limitations. Agent-run tests do not replace human sign-off on the target appliance.
-
-After retaining evidence and restoring permissions:
-
-```sh
-rm -rf -- "$ROOT"
-```
-
-## Automated Tests
-
-For shared setup and test-host requirements, see the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md#running-tests-locally).
-Run these collector-specific commands from the repository root, with Python 3 on
-the **test host**, not the collector target:
-
-```sh
-COLLECTOR_SH=/bin/dash python3 -B scripts/tests/test_ash_robustness.py
-COLLECTOR_SH='/bin/busybox ash' python3 -B scripts/tests/test_ash_robustness.py
-ASH_SHELL='/bin/busybox ash' sh scripts/tests/run_ash_regression_tests.sh
-THUNDERSTORM_TEST_COLLECTORS=ash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  THUNDERSTORM_TEST_REQUIRE_ALL=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
-```
-
-CI runs the suite under dash, under BusyBox ash with Ubuntu utilities, and
-under BusyBox ash with a BusyBox-first `PATH` (`busybox --install -s DIR`), in
-which every utility the collector uses is a BusyBox applet; curl and GNU wget
-still come from Ubuntu there. BusyBox features are compile-time options, so
-validate the actual appliance shell, utilities and selected transport separately.
-Run permission cases as non-root.
+[TESTING.md](TESTING.md) has the manual acceptance cases and automated tests.
