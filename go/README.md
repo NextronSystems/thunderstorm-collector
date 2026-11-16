@@ -1,31 +1,58 @@
-# THOR Thunderstorm Collector
+# Go Collector
 
-This guide covers the compiled Go collector: configuration, filtering, platform compatibility, and builds. Start with the [main README](../README.md) for collector selection, downloads, and a minimal quick start with an optional preview. Published binaries do not require an installed Go runtime, but their OS/kernel and CPU requirements still apply.
+The Go collector is a compiled binary that selects local files and uploads
+them to a THOR Thunderstorm service for analysis. Use it wherever a package for
+the system's OS and CPU exists.
 
-For product-specific collection scope, use the [Emerging Threats profiles](../emerging-threats/README.md). Script collectors have their own [configuration and runtime guides](../scripts/README.md).
+- Other collectors: [collector selection](../README.md#choose-a-collector) and [script collectors](../scripts/README.md)
+- Product-specific scope: [Emerging Threats profiles](../emerging-threats/README.md)
+- Nothing can run on the system: SSHFS scanning (see [scanning approaches](../docs/SCANNING_APPROACHES.md)) or the prototype [SFTP collector](../sftp/README.md), which selects files over SSH/SFTP and uploads only those
 
-If deploying a collector is impractical, THOR can also scan files remotely
-through **SSHFS** from a supported analysis workstation. The source needs
-SSH/SFTP access and readable files, rather than a compatible scanner or
-collector binary. See [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md)
-for prerequisites, licensing and a comparison with native and offline scans.
-The prototype [SFTP collector](../sftp/README.md) uses the same SSH/SFTP access
-from another system, but selects files before transferring them and sends only
-those to Thunderstorm.
+> [!NOTE]
+> This guide describes the current source; for a release, use the guide from
+> its tag. Not every binary has been tested on its platform; see the
+> [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md) and report problems.
 
-## Usage
+## Requirements
 
-Run your executable with `--help` to see every available option and the effective defaults for the loaded configuration. The [main README contains the complete help output](../README.md#command-line-help). It shows built-in Unix defaults; a loaded YAML configuration can change them, including the file-size limit.
+| Requirement | Detail |
+| --- | --- |
+| Runtime | None; no Go installation needed |
+| Package | Must match the system's OS and CPU; see [downloads](../README.md#download-a-collector) |
+| Compiler | **Go 1.10** for broad OS compatibility; latest stable Go for targets Go 1.10 cannot build |
+| Permissions | Only files readable by the current user can be uploaded |
+| Service | Thunderstorm over HTTP or HTTPS |
+
+Special cases: [NetScaler / FreeBSD 8.4](#citrix-netscaler-and-freebsd-84), [Windows 2000 and NT](#unsupported-versions), [AIX on POWER7](#aix-on-power7). Historical runs succeeded on Debian 10 and Windows 10 (revisions not recorded).
+
+## Quick Start
+
+Extract the [package](../README.md#quick-start) and change into its directory. Preview the selection:
+
+```sh
+./amd64-linux-thunderstorm-collector -p /absolute/path/to/files --dry-run --debug
+```
+
+The preview contacts no server. If the list looks right, upload:
+
+```sh
+./amd64-linux-thunderstorm-collector -p /absolute/path/to/files -s thunderstorm.example.internal
+```
+
+The collector loads `config.yml` from the **current directory**. Without `-p`, it collects from `/` (or `C:\` on Windows).
 
 ## Configuration Files
 
-The **Go collector** reads YAML. By default it looks for `config.yml` in the current working directory. Use `-t`/`--template` to select a configuration explicitly: a missing explicit file is an error, while an absent implicit `config.yml` falls back to built-in defaults. Those defaults include the filesystem root and no extension or magic-header filter.
+Settings come from YAML; command-line values override them.
 
-At startup the collector logs which configuration file it loaded, with its absolute path, or that it found none and uses the built-in defaults. A summary of the settings that decide what the run collects (scan roots, size and age limits, filters, upload mode and destination) follows. Both appear with `--dry-run` and in the `--logfile`. Because `config.yml` is read from the working directory rather than from the executable's directory, check these lines when the collector starts from cron, a service, or by absolute path.
+- **Which file:** `config.yml` in the **current working directory**, not the executable's directory, or the file given with `-t`/`--template`.
+- **Missing file:** a missing `-t` file is an error. Without `config.yml`, built-in defaults apply: filesystem root, **100 MiB**, no extension or magic filter.
+- **Startup log:** shows the loaded file's absolute path (or that built-in defaults apply), then roots, limits, filters, upload mode and destination, also with `--dry-run` and in `--logfile`. Check it when running from cron or a service.
+- **Keys:** the long option names, such as `path`, `max-filesize`, `thunderstorm-server`. `--help` and `--template` are command-line only.
+- **Server:** add `thunderstorm-server: HOST` to the existing `config.yml`; from that directory, no flags are needed.
+- **Roots:** the first `--path` replaces the configured roots; repeat it to add more.
 
-Command-line values override YAML values. The server can be set once as `thunderstorm-server: HOST` in the existing `config.yml`; from that directory, the executable then needs no flags for a normal collection. With the shipped configuration, only `-s HOST` is needed if the server is not stored in YAML. The first `--path` replaces the configured roots; repeat it to add more roots. YAML uses configuration names such as `path`, `max-filesize`, and `thunderstorm-server`; `--help` and `--template` are command-line controls.
-
-For example, save this preview-first configuration as `my-config.yml`, replacing the input path and server:
+A preview-first `my-config.yml`:
 
 ```yaml
 path:
@@ -42,271 +69,136 @@ magic: []
 dry-run: true
 ```
 
-This selects regular files up to and including **10 MiB** with a listed extension and a qualifying timestamp within 30 days. Timestamp selection is platform-dependent; see [file filtering](#file-filtering-logic). Preview the configuration, then explicitly enable uploads after reviewing it:
+It selects regular files up to **10 MiB** with a listed extension and a [timestamp](#file-filtering-logic) within 30 days. Preview, then enable uploads:
 
 ```sh
 ./amd64-linux-thunderstorm-collector -t ./my-config.yml --dry-run --debug
 ./amd64-linux-thunderstorm-collector -t ./my-config.yml --dry-run=false
 ```
 
-### Default Configuration
+### Default configuration
 
-Binary packages include [config.yml](config.yml), which selects extensions and magic headers with a **64 MiB** limit and no age cutoff. The built-in size limit without that file is **100 MiB**. Review the configuration for the intended assessment; a profile may deliberately select a broader set of files. The [NetScaler profile](../emerging-threats/citrix-netscaler/README.md) provides one such configuration.
+The packaged [config.yml](config.yml) selects by extension and magic header, up to **64 MiB**, any age. Profiles such as the [NetScaler profile](../emerging-threats/citrix-netscaler/README.md) may select more.
 
-To collect all regular file types, set both `extension: []` and `magic: []`; other limits and exclusions still apply. For no age cutoff, use `max-age: ""`. A value of `"0"` sets a current-time threshold and does not disable the age filter.
+- **All file types:** set both `extension: []` and `magic: []`. Other limits and exclusions still apply.
+- **No age cutoff:** `max-age: ""`. The value `"0"` sets the cutoff to the current time; it does not disable the filter.
 
-## Precompiled Binaries
+## Usage
 
-See [downloads and current release availability](../README.md#download-a-collector) for package selection and contents. This guide describes the current source; use the tagged documentation for a downloaded release.
+`--help` lists every option with the loaded configuration's defaults; see the [full help output](../README.md#command-line-help).
 
-**Note:** In general, Go 1.10 is used to build the binaries to ensure the broadest possible compatibility with older operating system versions. Additionally, this is complemented by builds with the latest stable Go version for targets that are not supported by Go 1.10.
+### Common options
 
-### Citrix NetScaler and FreeBSD 8.4
+Built-in defaults; the packaged `config.yml` changes some.
 
-**FreeBSD 8.4 is the target of the dedicated legacy binary. FreeBSD 14.3 is a VM test environment for that same binary, not a boundary between legacy and recent NetScaler firmware.** These two tests do not establish a supported range from 8.4 through 14.3. Intermediate versions need the same environment checks described below; the absence of a test does not itself establish incompatibility.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-s`, `--thunderstorm-server HOST` | none | Server; required unless `--dry-run` |
+| `--port PORT` | 8080 | Server port |
+| `--ssl` | off | Use HTTPS |
+| `--ca FILE` | system CAs | Trust only these PEM CAs; repeatable |
+| `--insecure` | off | Skip certificate verification (testing only) |
+| `-p`, `--path DIR` | `/` or `C:\` | Root to collect; repeatable |
+| `-m`, `--max-filesize MIB` | 100 (**64** in `config.yml`) | Largest file, inclusive |
+| `-a`, `--max-age AGE` | none | Skip older files; suffix `s`, `m`, `h` or `d` (default days) |
+| `--exclude GLOB` | none | Skip paths; `?`, `*` and `**`; repeatable |
+| `-r`, `--threads N` | 1 | Upload workers; `0` all cores, `-2` all but two; minimum 1 |
+| `--uploads-per-minute N` | 0 (no limit) | Rate-limit uploads |
+| `--upload-synchronous` | off | Wait for scan results (slower) |
+| `-o`, `--source NAME` | hostname | Source name in Thunderstorm |
+| `--http-proxy URL` | `HTTP_PROXY`/`HTTPS_PROXY` | Proxy |
+| `--dry-run` | off | Select files without contacting the server |
+| `--debug` | off | Show every file decision and marker answer |
+| `-l`, `--logfile FILE` | none | Also write the log to this file |
+| `-t`, `--template FILE` | `config.yml` | Configuration file |
 
-#### Choose a collector for your NetScaler
+`-e`/`--extension`, `--magic` and `--all-filesystems`: see [filtering](#file-filtering-logic) and [filesystem types](#filesystem-types).
 
-First identify the **NetScaler firmware/build**, **underlying OS**, and **CPU architecture**. In the NetScaler CLI, record the firmware/build and enter the system shell:
+### Examples
 
-```text
-show ns version
-shell
-```
-
-Then inspect the underlying system:
-
-```sh
-uname -a
-```
-
-These are the vendor-documented [firmware command](https://developer-docs.netscaler.com/en-us/adc-command-reference-int/current-release/ns/ns-version.html) and [FreeBSD identification procedure](https://support.citrix.com/external/article?articleUrl=CTX495617-how-to-check-the-version-of-freebsd-on-netscaler&language=en_US). In Citrix's example, `11.4-NETSCALER-13.1` identifies **FreeBSD 11.4** beneath **NetScaler 13.1**; the architecture is `amd64` (64-bit x86). Run the shell command on the NetScaler instance being assessed, rather than a management host or hypervisor.
-
-For orientation, vendor notices for FreeBSD-based products list **FreeBSD 8.4 for [13.0](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/Citrix_ADC_ADM_FreeBSD_13.0_Third_Party_Notices.pdf)** and **FreeBSD 11.4 for [13.1](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/NetScaler_ADC_ADM_FreeBSD_13.1_Third_Party_Notices.pdf) and [14.1](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/NetScaler_ADC_ADM_FreeBSD_14.1_Third_Party_Notices.pdf)**. These are component inventories, not collector test results or a complete firmware-to-OS mapping. Components can vary by product/build, so use the actual appliance output to select a collector.
-
-| Appliance environment | Collector to evaluate first | Requirements | Recorded test status |
-| --- | --- | --- | --- |
-| **FreeBSD 8.4, amd64 confirmed** | Dedicated **`amd64-freebsd8-netscaler`** Go package; [download below](#dedicated-netscaler-package-and-downloads) | Matching OS/CPU; no installed Go runtime needed. [Bash with the NetScaler preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) is an alternative when its requirements are met. | An identified legacy artifact passed FreeBSD 8.4 VM tests. Named NetScaler firmware testing remains pending. |
-| **Other FreeBSD versions**, including versions between 8.4 and 14.3 | [Bash collector with the NetScaler assessment preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) | Bash 3.2+, compatible upload tools and Unix utilities as listed below. A regular FreeBSD Go package is another candidate after the compiler/OS checks below. | Bash preset tested with synthetic files on macOS; actual NetScaler firmware testing remains pending. |
-| **Other OS or CPU architecture** | A Go package matching the actual OS/CPU, or the [Bash preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) when its requirements are met | Check the [platform and runtime requirements](../docs/COLLECTOR_RECOMMENDATIONS.md#compatibility-boundaries). Select by the instance's environment, not the NetScaler product name alone. | No product-wide compatibility claim; validate the exact target. |
-
-The **Bash alternative runs independently of the Go binary**. It requires Bash 3.2 or newer, `curl` or GNU wget with `--no-config`, GNU/BSD utilities, readable input paths and writable temporary storage. Follow the [full Bash requirements](../scripts/bash/README.md#requirements) and the linked preset; the script does not read the Go YAML configuration. Use known local collection roots: its automatic mount exclusions rely on Linux `/proc/mounts` and do not establish mount coverage on FreeBSD.
-
-For the **regular FreeBSD amd64/386 Go packages**, the Go 1.10 builds require **FreeBSD 10.3 or later** according to the [compiler's installation requirements](https://github.com/golang/go/blob/go1.10.8/doc/install.html). This is a minimum OS requirement, not a tested NetScaler firmware range or a guarantee on every newer kernel. Packages built with newer Go versions have their own requirements. The legacy binary's FreeBSD 14.3 VM test does not make it the preferred build for modern FreeBSD; see the [specific ASLR test note](#aslr-when-testing-on-modern-freebsd).
-
-If local execution is unavailable or the required tools cannot be used, **copy the relevant files to a collection workstation and upload them from there**. Point the workstation collector at the copied directories. It uploads those local files; it does not acquire the appliance remotely, and coverage depends on which files were copied.
-
-Before a broad assessment, preview a small directory of synthetic files and perform a controlled upload on the intended appliance. Record the firmware/build, OS/CPU, collector revision, selected paths and result. Use the [NetScaler assessment guide](../emerging-threats/citrix-netscaler/README.md) for the broader collection configuration.
-
-#### Dedicated NetScaler package and downloads
-
-For **FreeBSD 8.4 / amd64**, use the separate collector built with **Go 1.9.7** and `CGO_ENABLED=0`. Regular FreeBSD packages are not interchangeable with this target.
-
-**Release availability:** the [v1.1.0 release](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) includes **`thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz`** and its `.sha256` file under **Assets**. **v1.0.1 and earlier do not contain this dedicated package.** For later versions, look for `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` in the selected release.
-
-The package contains the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt`. Verify the checksum and consult its build information for the exact source commit and compiler. The [legacy build guide](legacy/README.md) covers CI artifacts and building from source when a release asset is unavailable. For assessment paths and filters, use the [NetScaler collection profile](../emerging-threats/citrix-netscaler/README.md).
-
-#### Compatibility evidence as of 2026-10-08
-
-| Evidence level | Status for the dedicated legacy build |
-| --- | --- |
-| Compilation for freebsd/amd64 with Go 1.9.7 | Verified, including static FreeBSD ELF, architecture, executable permissions, package contents and checksums |
-| Shared source/runtime on Linux/amd64 with Go 1.9.7 | Automated Go tests and synthetic HTTP checks verified; these do not execute the FreeBSD binary |
-| Runtime on FreeBSD 8.4-RELEASE amd64 | Reported successful in a KVM/QEMU VM without a workaround; 253 files uploaded with zero errors |
-| Runtime on FreeBSD 14.3-RELEASE amd64 | Reported successful in a KVM/QEMU VM with per-process ASLR disabled; 302 files uploaded with zero errors |
-| Runtime on a named NetScaler appliance/firmware | Pending; the VM results do not establish appliance/firmware compatibility |
-
-##### How the FreeBSD binaries were tested
-
-The [external test report on PR #51](https://github.com/NextronSystems/thunderstorm-collector/pull/51#issuecomment-6056935463), supplied on **8 October 2026**, used the same GitHub Actions artifact on both VMs. These are reported VM results, separate from the automated Linux tests. The artifact identity and archive checksum were independently checked against the CI download; the VM runs were performed by the report's author.
-
-| Test environment | Startup | Dry run over `/etc` | Upload to Thunderstorm |
-| --- | --- | --- | --- |
-| FreeBSD 8.4-RELEASE amd64, r251259 (2013-06-02); KVM/QEMU, qemu64 CPU, RTL8139 NIC, IDE disk | Ran directly, without an ASLR workaround | `--dry-run -p /etc`: 253 files would be sent, zero errors | 253 successful uploads, zero read/transmission errors |
-| FreeBSD 14.3-RELEASE amd64; KVM/QEMU, host-passthrough CPU, virtio NIC | Direct start failed with `runtime: address space conflict`; ran with ASLR disabled for the invocation | `--dry-run -p /etc`: 600 files discovered, 302 selected, zero errors | 302 successful uploads, zero errors |
-
-The server was **Thunderstorm v10**, using **THOR 10.7.32 (build 1cabaee)** over **HTTP port 8082**. The report records 555 scanned samples across both runs, no denied requests and no upload errors. These tests cover startup, file collection/filtering and HTTP submission; they do not establish HTTPS/TLS interoperability or compatibility with a particular NetScaler firmware. `/etc` describes the VM test input; for a first appliance test, use a small directory containing synthetic files.
-
-The reported FreeBSD 8.4 installation ISO SHA-256 was `2fb17d77d4eba34736eb98c142c56546dd73a4e7ac38895bb6c8517949282438`.
-
-##### Exact tested artifact
-
-| Field | Value |
-| --- | --- |
-| CI run / artifact | [Legacy NetScaler run 37743060852](https://github.com/NextronSystems/thunderstorm-collector/actions/runs/37743060852), artifact `netscaler-freebsd8`, ID `11534377782` |
-| PR head at the time of the run | `2af4e908e078674a3821b9f106eaee85a576f97b` |
-| Built source commit from `BUILD-INFO.txt` | `ed70dd980d4e4132e319f15090a58f927cd85035` (the PR test-merge commit; clean source tree) |
-| Compiler / target | Go 1.9.7 on Linux/amd64; `GOOS=freebsd`, `GOARCH=amd64`, `CGO_ENABLED=0` |
-| Archive | `thunderstorm-collector-validation-ed70dd980d4e-amd64-freebsd8-netscaler.tar.gz` |
-| Archive SHA-256, verified against its sidecar | `018efbc71a7b0ac5f53b5b376f2e155fa64c542ca98a7eb6e683c29cd8186b92` |
-| Executable | `amd64-freebsd8-netscaler-thunderstorm-collector`, 5,644,000 bytes; static, stripped FreeBSD ELF64 x86-64 |
-| Executable SHA-256, computed from the downloaded artifact | `3cf8abd09c964095f795dc8f680d646c24e91541e01da605d94c5bc803dee3d4` |
-| Go Build ID, matching the report | `24b3731e01aa0df55459eb274cafee81a99d5de4` |
-
-These runtime results apply to the identified artifact. Later builds are not automatically VM-tested. The `pending` runtime fields in its `BUILD-INFO.txt` reflect the CI build-time checks, which preceded these external tests; this section records the subsequent VM evidence.
-
-##### ASLR when testing on modern FreeBSD
-
-For the FreeBSD 14.3 VM, the per-invocation workaround can be applied to a help check as follows:
+The `config.yml` filters still apply; preview with `--dry-run --debug` first.
 
 ```sh
-proccontrol -m aslr -s disable ./amd64-freebsd8-netscaler-thunderstorm-collector --help
+# Files up to 500 MiB, ten upload workers
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false -r 10 -m 500
+
+# HTTPS, files from the last ten days
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false --ssl --port 443 -a 10
+
+# Proxy, scan results, log outside the collected directory
+./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
+  -s thunderstorm.example.internal --dry-run=false --upload-synchronous \
+  --http-proxy http://proxy.example.internal:3128 --logfile ./collector.log
 ```
 
-The failure and workaround are consistent with an ASLR-sensitive legacy runtime. The [FreeBSD 13.2 release notes](https://www.freebsd.org/releases/13.2R/relnotes/#kernel) document default ASLR for 64-bit executables and this per-invocation control. The FreeBSD 8.4 VM ran without this workaround. It is not a required NetScaler configuration change.
-
-The repository also records historical Go 1.9.7 use on FreeBSD 8.4 NetScaler gateways, without their firmware, architecture or collector revision. The [official Go FreeBSD table](https://go.dev/wiki/FreeBSD) supports the amd64 toolchain choice. No 386 legacy package is promised without a verified target need. Add future OS/appliance results and their artifact identities here so compatibility evidence has one reference location.
-
-**Go 1.9.7 is unsupported** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its shipped runtime and standard library, including HTTP/TLS code, lack later security fixes. An isolated build job does not remove these limitations. Retain certificate verification and server security settings; if secure interoperability fails, use a supported collector/platform rather than weakening them.
-
-### Unsupported Versions
-
-The Go Collector does not run on:
-
-- Windows 2000
-- Windows NT
-
-For an alternative, consult the [script selection and runtime requirements](../scripts/README.md#choosing-a-collector). Each script requires its own supported interpreter and utilities.
-
-In case that the pre-build collector crashes on your end system, please see the [platform requirements](https://go.dev/wiki/#platform-specific-information) for the different go versions to get the last supported go version for your OS version.
-
-This [page](https://golang.org/doc/install/source#environment) contains all possible `arch` and `os` values for the latest Go version.
-
-Use `go version <binary>` when the executable contains build information recognized by your Go toolchain. For older binaries, consult the matching release/build record. The dedicated NetScaler package records its compiler and source commit in `BUILD-INFO.txt`.
-
-The standard Go-based binaries for IBM AIX require POWER8 or newer and do not
-support actual POWER7 hardware. For POWER7, consider a validated script
-collector, SSHFS scanning from a supported workstation, the prototype
-[SFTP collector](../sftp/README.md) on another system, or exported evidence;
-see the [AIX example](../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example)
-and the dedicated [POWER7 SSHFS scanning guide](../integration-guides/aix/aix-power7-sshfs-scanning.md).
-Contact Nextron to confirm current availability and target compatibility of
-any special `gccgo` build.
-
-Regular FreeBSD packages follow the normal Go 1.10/stable build process. For FreeBSD 8.4 NetScaler gateways, see the [separate legacy package guidance](#citrix-netscaler-and-freebsd-84) above.
-
-Note: We haven't tested all compiled binaries on the respective platforms. Please report issues with the execution.
-
-## Performance Considerations
-
-Analysis runs on the Thunderstorm server. Collection scope, file sizes, signatures, and server capacity determine processing time. The packaged filters are a general starting point; use the assessment profile when its broader scope is required.
-
-Enumerating, reading and uploading files still consumes source resources.
-Reduced transfer volume depends on file selection; see
-[recurring collection](../docs/SCANNING_APPROACHES.md#recurring-collection).
-
-Start with a small collection and inspect server load and results before increasing scope or concurrency. Adjust `--threads` and `--uploads-per-minute` to control upload pressure. Asynchronous acceptance means the server accepted a file; check analysis completion separately.
-
-### Filesystem Types
-
-Unless `--all-filesystems` is set, the collector does not walk directories on pseudo or network filesystems. Linux recognises them by the statfs magic number and macOS by the filesystem type name (`devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp`). Other platforms, including Windows and FreeBSD, do not detect filesystem types; use `--exclude` for such paths. On those platforms the startup summary says so (`Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)`).
-
-### File Filtering Logic
-
-The collector uses a two-stage filtering approach for optimal performance:
-
-1. **Metadata filtering** (before queuing): Files are checked for size, age, and file type before being added to the upload queue. This prevents unnecessary processing of files that will be excluded.
-
-2. **Content filtering** (after opening): Files are checked for extension and magic header matches. The logic works as follows:
-   - If file extensions are specified and the file matches an extension, it's included. Extensions are compared case-insensitively, so `.exe` also selects `RUN.EXE`
-   - If extensions don't match (or aren't specified) and magic headers are specified, magic headers are checked
-   - If neither extensions nor magic headers match (and at least one is configured), the file is excluded
-   - If no extensions or magic headers are specified, all files pass content filtering
-
-File-size limits are in MiB (1024 × 1024 bytes), with the exact boundary included. The age check accepts a file if any timestamp provided by the platform is newer than the cutoff: modification and metadata-change times on many Unix targets, plus birth time on supported BSD/macOS targets; Windows uses modification and creation times. This differs from the script collectors' modification-time-only rules.
-
-### Error Handling and Retry Logic
-
-Transport errors and HTTP 503 share a budget of **three retries after the initial attempt**. Transport failures use exponential delays of 4, 8, and 16 seconds; HTTP 503 uses an integer `Retry-After` value capped at 120 seconds, or 30 seconds when it is missing or invalid. Other HTTP errors and response-body read failures are logged and counted without a retry. A lost response can still cause a duplicate submission.
-
-Upload file names are sent as a quoted `filename` parameter with `\` and `"` backslash-escaped and every control character except TAB, plus DEL, percent-encoded (for example `%0D`, `%0A`, `%1B`), so a hostile file name cannot add MIME headers, alter the uploaded content or make the server reject the upload, whichever Go version built the binary.
-
-Redirects (HTTP 3xx) are never followed, for the status check, collection markers or uploads. Replaying an upload against a redirect target would send a body-less request and could report a transfer that Thunderstorm never accepted, so a redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy in front of Thunderstorm if you see one.
-
-### Collection Markers
-
-After the status check, the collector sends a `begin` marker to `POST /api/collection`, so that Thunderstorm can group the samples of one run. If the server answers with a scan ID, every upload of the run carries it in the `scan_id` query parameter (for `/api/check` as well as `/api/checkAsync`), and the run closes with an `end` marker that holds the run's counters. SIGINT (Ctrl+C) or SIGTERM then sends an `interrupted` marker instead and ends the collector with status 1; a second signal exits at once. A dry run sends no markers.
-
-Markers never affect a collection, and a server without them is not an error:
-
-- A server without the endpoint answers `404` or `501`. THOR 10 and the current THOR 11 versions do. The collector sends no further markers, and the run is the same as without markers.
-- Any other failure of the `begin` marker (another HTTP status, a redirect, a timeout, a connection error) is tried once more after 2 seconds. If it fails again, the files are uploaded without a scan ID.
-- A failed `end` or `interrupted` marker is ignored as well.
-
-None of this is logged or changes the exit status. Start the collector with `--debug` to see the answers to the marker requests. Each marker request gives up after 10 seconds. The script collectors send the same markers; [Collection markers](../docs/COLLECTION_MARKERS.md) describes the format.
-
-### Exit Status
+## Exit Status
 
 | Status | Meaning |
 | --- | --- |
-| `0` | The run completed and every selected file was read and accepted (or, with `--dry-run`, every selected file could be opened). |
-| `1` | Startup or configuration failed (invalid option, unreachable server), **or** the run completed with errors: a scan root could not be read, or a selected file could not be read or was not accepted by Thunderstorm. The statistics and the log show which. [Collection markers](#collection-markers) never change the exit status; an interrupted run that sent an `interrupted` marker ends with `1`. |
+| `0` | Every selected file was read and accepted (dry run: could be opened) |
+| `1` | Startup or configuration failed (invalid option, unreachable server); a scan root could not be read; a selected file could not be read or was not accepted; or the run was interrupted and sent an `interrupted` marker |
+| `130` | A second SIGINT/SIGTERM arrived while the `interrupted` marker was being sent |
 
-A missing scan root, an unreadable directory and every failed upload are logged when they happen and summarised in the statistics. A directory below a scan root that cannot be listed (permission denied is routine on a full scan, for example `System Volume Information` on Windows) is reported and counted under "Paths that could not be read during the walk" but does not change the exit status. Files that were skipped on purpose (size, age, type, exclusions, irregular files) are not errors. A file that disappears while the collector walks its directory is not counted either.
+[Collection markers](#collection-markers) never change the exit status. The log and statistics show each error.
 
-## Build
+Not errors: a directory below a root that cannot be listed (such as `System Volume Information`; counted under "Paths that could not be read during the walk"), files skipped on purpose, and files that vanish during the walk (not counted).
 
-### Build requirements
+## Behavior Details
 
-Use Go, `make`, and a Unix-like shell with standard command-line utilities. Creating release archives also requires `tar`, `gzip`, and `zip`. Running downloaded collectors requires no Go compiler or `make`; scripts still need the runtimes and tools listed in their guides. Regular builds retain Go 1.10 compatibility where that compiler supports the target; newer targets require a newer compiler. The separate [NetScaler procedure](legacy/README.md) prepares its Go 1.9.7 build.
+### File filtering logic
 
-Dependencies are declared in `go.mod` and `go.sum`. For a Go 1.10 build, first run `go mod vendor` from this directory with a modern Go toolchain, then select Go 1.10 for the build. The generated `vendor/` directory is not committed. The [CI setup action](../.github/actions/setup-go/action.yml) follows that preparation sequence; the Makefile provides the GOPATH symlink needed by the legacy compiler.
+1. **Metadata, before queuing:** size, age and file type. Excluded files are never opened.
+2. **Content, after opening:**
+   - A matching extension selects the file. Case is ignored: `.exe` also selects `RUN.EXE`.
+   - Otherwise, a matching magic header selects it.
+   - If either list is configured and nothing matches, the file is skipped.
+   - With neither configured, every file passes.
 
-### Build Steps
+- **Size:** in MiB (1024 × 1024 bytes); a file of exactly the limit is included.
+- **Age:** a file passes if **any** timestamp the platform provides is newer than the cutoff: modification and metadata-change time on many Unix targets, plus birth time on supported BSD/macOS targets; modification and creation time on Windows. The script collectors use modification time only.
 
-From this `go/` directory, choose the target you need. These commands are alternatives, not a sequence:
+### Filesystem types
 
-```sh
-make              # Build for the current OS/architecture
-make all          # Build the Makefile's supported cross-compilation targets
-make linux/amd64   # Build one target
-make release      # Create regular distribution archives in dist/
-make help         # List build targets
-```
+Unless `--all-filesystems` is set, pseudo and network filesystems are not walked.
 
-`go tool dist list` shows the compiler's OS/architecture combinations; the Makefile excludes targets it does not package. Repository-wide script packaging and the tagged release workflow are described in the [main build guide](../README.md#build-or-extend-a-collector).
+| Platform | Detection |
+| --- | --- |
+| Linux | statfs magic number |
+| macOS | type name: `devfs`, `fdesc`, `volfs`, `autofs`, `nfs`, `smbfs`, `afpfs`, `webdav`, `ftp` |
+| Windows, FreeBSD, others | none; use `--exclude`. The startup summary says `Filesystems: all filesystem types are scanned (network and pseudo filesystems cannot be recognised on this platform)` |
 
-## Usage Examples
+### Error handling and retry logic
 
-Start with the [main quick start](../README.md#quick-start). These additional Linux amd64 examples load `config.yml` explicitly and restrict collection to one directory. Substitute your executable, directory, and server. Preview the chosen options with `--dry-run --debug` before enabling uploads; the configuration's extension/magic filters still apply.
+- **Retries:** transport errors and HTTP 503 share **three retries** after the first attempt.
+- **Transport errors:** wait 4, 8 and 16 seconds.
+- **HTTP 503:** wait for an integer `Retry-After`, capped at **120 seconds**; **30 seconds** if missing or invalid.
+- **Other HTTP errors** and unreadable response bodies are logged and counted, without a retry.
+- **Duplicates:** a lost response can cause a second submission.
+- **Redirects** (3xx) are never followed, for the status check, markers or uploads; a replayed upload would have no body. A redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy.
+- **File names** are sent quoted, with `\` and `"` backslash-escaped and control characters (except TAB) and DEL percent-encoded, such as `%0D`. A hostile name cannot add MIME headers, alter the content or make the server reject the upload, whichever Go version built the binary.
 
-Allow files up to 500 MiB and use ten upload workers:
+### Collection markers
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
-  -s thunderstorm.example.internal --dry-run=false -r 10 -m 500
-```
+After the status check, the collector sends a `begin` marker to `POST /api/collection` so that Thunderstorm can group the run's samples.
 
-Apply a ten-day age cutoff and use HTTPS:
+- With a scan ID in the answer, every upload carries it as the `scan_id` query parameter (`/api/check` and `/api/checkAsync`), and an `end` marker with the run's counters closes the run.
+- SIGINT (Ctrl+C) or SIGTERM sends an `interrupted` marker instead and exits with status 1; a second signal exits at once.
+- `404` or `501` means no marker support (THOR 10 and current THOR 11). No further markers are sent.
+- Any other `begin` failure is retried once after 2 seconds; then files upload without a scan ID.
+- Failed `end` or `interrupted` markers are ignored. Each marker request times out after **10 seconds**. Dry runs send none.
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
-  -s thunderstorm.example.internal --dry-run=false --ssl --port 443 -a 10
-```
+Marker problems are not logged and never change the exit status; `--debug` shows the answers. The format, shared with the script collectors, is in [Collection markers](../docs/COLLECTION_MARKERS.md).
 
-Upload through an HTTP proxy:
+### Collection statistics
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
-  -s thunderstorm.example.internal --dry-run=false \
-  --http-proxy http://proxy.example.internal:3128
-```
+Each run ends with statistics: files discovered, exclusions by reason, uploads, errors and time per phase. With `--debug`, every file to be sent (marked DRY-RUN in a dry run) and every skipped file with its reason is listed too.
 
-Wait for synchronous responses and write them to a log outside the collection directory:
+<details>
+<summary>Example statistics</summary>
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml -p /absolute/path/to/files \
-  -s thunderstorm.example.internal --dry-run=false \
-  --upload-synchronous --logfile ./collector.log
-```
-
-## Collection Statistics
-
-At the end of each collection run, the collector displays comprehensive statistics.
-
-**Example output:**
-
-```
+```text
 === Collection Statistics ===
 
 Files discovered during walk: 1234
@@ -331,57 +223,135 @@ Timing:
   - Total time: 49.3s
 ```
 
-**Statistics include:**
-- Total files discovered during filesystem walk
-- Detailed breakdown of exclusions by reason (size, type, age, etc.)
-- Processing results (successful uploads, errors)
-- Timing breakdown for different phases (walk, read, transmit)
+</details>
 
-**Debug Mode:**
-When `--debug` is enabled, the collector prints detailed information for every file:
-- Files that would be sent (with DRY-RUN indicator in dry-run mode)
-- Files that are skipped with specific reasons (too big, wrong type, too old, etc.)
+### Dry-run mode
 
-This makes it easy to understand why files are included or excluded from collection.
+`--dry-run` discovers, opens and filters files but sends **no HTTP requests**; statistics count files that would be sent. It checks the selection, not connectivity or analysis. `--dry-run=false` overrides `dry-run: true` from a configuration.
 
-## Dry-Run Mode
+### Performance
 
-`--dry-run` discovers, opens, and filters files without a server connection or HTTP requests. Add `--debug` to list eligible filenames and skip reasons; statistics report files that would be sent. This checks selection, not connectivity or server-side analysis.
+Analysis runs on the Thunderstorm server, so scope, file sizes, signatures and server capacity decide processing time. Walking, reading and uploading still load the source. Files are streamed, not held in memory.
 
-```sh
-./amd64-linux-thunderstorm-collector -t ./config.yml \
-  -p /absolute/path/to/files --dry-run --debug
-```
+- Start small; check server load and results before widening scope or concurrency.
+- Pick a configuration or profile that fits the scope; set `--max-filesize` to skip very large files.
+- Skip known directories, for example `--exclude "**/node_modules/**"`.
+- Limit upload pressure with `--threads` and `--uploads-per-minute`.
+- Asynchronous acceptance is not analysis completion; check that separately.
 
-After reviewing the preview, use the same configuration and roots for upload. `--dry-run=false` explicitly overrides a configuration with preview mode enabled.
+Transfer volume depends on file selection; see [recurring collection](../docs/SCANNING_APPROACHES.md#recurring-collection).
 
 ## Troubleshooting
 
-### Common Error Messages
+| Message | Cause and fix |
+| --- | --- |
+| `thunderstorm-server: not specified` | Set `-s` or `thunderstorm-server`, or use `--dry-run` |
+| `Unexpected argument(s)` | A value without its option, such as `-s HOST /data`. Give every root its own `-p`; the collector will not guess and walk the whole filesystem |
+| `max-filesize: must be > 0` | Use at least 1 MiB |
+| `max-age: invalid suffix` | Use `s`, `m`, `h` or `d`, for example `--max-age 10h` |
+| `magic header too long` | The limit is **1024 bytes** |
+| `Could not open CA file` | Check the `--ca` path and permissions |
+| `Could not add CA ... to certificate pool` | The file is not valid PEM |
 
-- **"thunderstorm-server: not specified"**: The `--thunderstorm-server` parameter is required (unless using `--dry-run`). Make sure to specify the server address or use `--dry-run` for testing.
-- **"Unexpected argument(s)"**: A value was passed without an option, for example `-s HOST /data`. Every scan root needs its own `-p`/`--path`; the collector refuses to guess instead of silently walking the default root, the whole filesystem.
-- **Thread count options**: Use `-r 4` for a specific number of threads, `-r 0` for all available CPU cores, or negative values to reserve cores (e.g., `-r -2` uses all cores except 2). The minimum is always 1 thread.
-- **"max-filesize: must be > 0"**: The maximum file size must be greater than 0 MB.
-- **"max-age: invalid suffix"**: The max-age parameter supports suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Example: `--max-age 10h`
-- **"magic header too long"**: Magic headers are limited to 1024 bytes. Check your magic header configuration.
-- **"Could not open CA file"**: The specified CA certificate file cannot be opened. Check the file path and permissions.
-- **"Could not add CA to certificate pool"**: The CA certificate file is not in valid PEM format or cannot be parsed.
+## Platform Notes
 
-### Performance Tips
+### Citrix NetScaler and FreeBSD 8.4
 
-- Choose the packaged configuration or an assessment profile appropriate to the collection scope
-- Set appropriate `--max-filesize` to avoid uploading very large files
-- Use `--exclude` patterns to skip known directories (e.g., `--exclude "**/node_modules/**"`)
-- Adjust `--threads` based on your network bandwidth and server capacity
-- Use `--uploads-per-minute` to rate-limit uploads if needed
+The dedicated `amd64-freebsd8-netscaler` binary targets **FreeBSD 8.4/amd64**. It was also VM-tested on FreeBSD 14.3; that is not a firmware boundary, and the two tests do not establish a supported range in between.
 
-### Memory Usage
+#### Choose a collector for your NetScaler
 
-The collector is designed to be memory-efficient:
-- Files are processed in a streaming fashion (not loaded entirely into memory)
-- Metadata checks happen before files are queued, reducing memory pressure
+Identify the **firmware/build**, **underlying OS** and **CPU** on the NetScaler instance itself, not on a management host or hypervisor. In the NetScaler CLI:
 
-## Tested On
+```text
+show ns version
+shell
+```
 
-Historical successful runs were recorded on Debian 10 and Windows 10 without exact revisions or runtime details. For scoped evidence, see the [NetScaler/FreeBSD record](#compatibility-evidence-as-of-2026-10-08) and the [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md).
+Then, in the shell:
+
+```sh
+uname -a
+```
+
+In Citrix's example, `11.4-NETSCALER-13.1` means **FreeBSD 11.4** under **NetScaler 13.1**; `amd64` is 64-bit x86. Vendor notices list FreeBSD 8.4 for NetScaler 13.0 and FreeBSD 11.4 for 13.1 and 14.1. They are component inventories, not test results; select by the appliance's own output.
+
+Sources: [show ns version](https://developer-docs.netscaler.com/en-us/adc-command-reference-int/current-release/ns/ns-version.html) · [CTX495617](https://support.citrix.com/external/article?articleUrl=CTX495617-how-to-check-the-version-of-freebsd-on-netscaler&language=en_US) · notices [13.0](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/Citrix_ADC_ADM_FreeBSD_13.0_Third_Party_Notices.pdf), [13.1](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/NetScaler_ADC_ADM_FreeBSD_13.1_Third_Party_Notices.pdf), [14.1](https://www.citrix.com/content/dam/citrix/en_us/documents/downloads/netscaler-adc/NetScaler_ADC_ADM_FreeBSD_14.1_Third_Party_Notices.pdf)
+
+| Appliance environment | Try first | Alternative |
+| --- | --- | --- |
+| **FreeBSD 8.4, amd64** | Dedicated [`amd64-freebsd8-netscaler` package](#dedicated-netscaler-package-and-downloads) | [Bash NetScaler preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) |
+| **Other FreeBSD**, including 8.4 to 14.3 | [Bash NetScaler preset](../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) | Regular FreeBSD Go package, if the OS meets its compiler's minimum |
+| **Other OS or CPU** | Go package for that OS/CPU | Bash preset; see [platform requirements](../docs/COLLECTOR_RECOMMENDATIONS.md#compatibility-boundaries) |
+
+- **Regular FreeBSD Go packages** (Go 1.10) need **FreeBSD 10.3 or later** ([Go 1.10 requirements](https://github.com/golang/go/blob/go1.10.8/doc/install.html)): a minimum, not a tested firmware range. Newer Go builds have their own minimums. The 14.3 VM test does not make the dedicated binary preferable on modern FreeBSD.
+- **The Bash preset** does not use the Go binary or its YAML. It needs Bash 3.2+, `curl` or GNU wget with `--no-config`, GNU/BSD utilities, readable paths and writable temporary storage ([Bash requirements](../scripts/bash/README.md#requirements)). Name local roots explicitly; its mount exclusions rely on Linux `/proc/mounts`.
+- **No local execution:** copy the relevant files to a workstation and collect them there. Coverage depends on what was copied.
+- **First run:** preview and upload a small directory of synthetic files on the intended appliance; record firmware/build, OS/CPU, collector revision, paths and result. Then follow the [NetScaler assessment guide](../emerging-threats/citrix-netscaler/README.md).
+
+#### Dedicated NetScaler package and downloads
+
+Built with **Go 1.9.7** and `CGO_ENABLED=0` for FreeBSD 8.4/amd64; regular FreeBSD packages are not interchangeable with it.
+
+- **v1.1.0:** **`thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz`** and its `.sha256` in the [release assets](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0).
+- **Later versions:** `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz`.
+- **v1.0.1 and earlier** do not contain it.
+
+The package holds the executable, `config.yml`, compatibility notes and `BUILD-INFO.txt` (source commit, compiler). Verify the checksum. CI artifacts and source builds: [legacy build guide](legacy/README.md). Paths and filters: [NetScaler profile](../emerging-threats/citrix-netscaler/README.md).
+
+#### Compatibility evidence as of 2026-10-08
+
+| What | Status |
+| --- | --- |
+| Dedicated package on FreeBSD 8.4 and 14.3 amd64 | **VM-tested**; 14.3 needs ASLR disabled for the invocation |
+| Go 1.9.7 build and shared source on Linux/amd64 | **Automated** |
+| HTTPS from the dedicated package on FreeBSD | **Not yet tested**; the VM tests used HTTP |
+| Bash NetScaler preset | **Not yet tested** on NetScaler; tested with synthetic files on macOS |
+| Any named NetScaler appliance or firmware | **Not yet tested** |
+
+Tested artifact, VMs, server and checksums: [NetScaler/FreeBSD test evidence](../docs/evidence/netscaler-freebsd.md). Later builds are not automatically VM-tested.
+
+#### ASLR when testing on modern FreeBSD
+
+On FreeBSD 14.3, the dedicated binary failed with `runtime: address space conflict` and ran with ASLR disabled for the invocation:
+
+```sh
+proccontrol -m aslr -s disable ./amd64-freebsd8-netscaler-thunderstorm-collector --help
+```
+
+FreeBSD 8.4 needs no workaround. This is not a required NetScaler configuration change.
+
+> [!WARNING]
+> **Go 1.9.7 is unsupported** under the [Go release policy](https://go.dev/doc/devel/release#policy). Its runtime and standard library, including HTTP/TLS, lack later security fixes; an isolated build job does not change that. Keep certificate verification and server security settings. If secure connections fail, use a supported collector or platform instead of weakening them.
+
+### Unsupported versions
+
+The Go collector does not run on **Windows 2000** or **Windows NT**; use a [script collector](../scripts/README.md#choosing-a-collector) with its own interpreter and utilities.
+
+If a prebuilt binary crashes, find the last Go version for your OS in the [Go platform requirements](https://go.dev/wiki/#platform-specific-information). All `os` and `arch` values: [Go install guide](https://golang.org/doc/install/source#environment). `go version <binary>` shows the compiler if your toolchain recognizes the binary's build information; otherwise check the release or build record.
+
+### AIX on POWER7
+
+The standard AIX binaries require **POWER8 or newer**. For POWER7, use a validated script collector, SSHFS scanning from a supported workstation, the [SFTP collector](../sftp/README.md) on another system, or exported evidence: see the [AIX example](../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example) and the [POWER7 SSHFS guide](../integration-guides/aix/aix-power7-sshfs-scanning.md). Ask Nextron about any special `gccgo` build.
+
+## Build
+
+### Build requirements
+
+- Go, `make`, a Unix-like shell with standard utilities; `tar`, `gzip` and `zip` for release archives. Downloaded collectors need neither Go nor `make`.
+- Regular builds keep **Go 1.10** compatibility where it supports the target; newer targets need a newer compiler. The [NetScaler build](legacy/README.md) uses Go 1.9.7.
+- Dependencies are in `go.mod` and `go.sum`. For Go 1.10, first run `go mod vendor` here with a modern Go, then build with Go 1.10; `vendor/` is not committed. The Makefile provides the GOPATH symlink the old compiler needs. The [CI setup action](../.github/actions/setup-go/action.yml) follows these steps.
+
+### Build steps
+
+From this `go/` directory, run one of:
+
+```sh
+make              # current OS/architecture
+make all          # all supported cross-compilation targets
+make linux/amd64  # one target
+make release      # distribution archives in dist/
+make help         # list targets
+```
+
+`go tool dist list` shows the compiler's targets; the Makefile skips those it does not package. Script packaging and tagged releases: [main build guide](../README.md#build-or-extend-a-collector).
