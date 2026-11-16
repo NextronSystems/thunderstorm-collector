@@ -235,9 +235,6 @@ class BatchRobustness(shared.PowerShellRobustness):
         self.assertEqual(len(uploads), 1, self.paths)
         self.assertTrue(uploads[0].startswith("/api/checkAsync?"), uploads)
 
-    def test_failed_end_marker_is_failure(self):
-        self.skipTest("Batch deliberately has no collection markers")
-
     def test_optional_marker_error_body_id_is_ignored(self):
         self.skipTest("Batch deliberately has no collection markers")
 

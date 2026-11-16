@@ -816,7 +816,8 @@ test_positional_directory_args() {
     assert_eq "submitted" "2" "$submitted" || return 1
 }
 
-# ── 29. Begin-marker failures stay fatal even with no candidate files ───────
+# ── 29. A begin marker without any HTTP answer stays fatal ─────────────────
+# curl exit 7 (connection failed) on both attempts, even with no candidate files.
 
 test_begin_marker_failure_is_fatal() {
     stop_stub
@@ -838,9 +839,10 @@ EOF
 
     assert_eq "exit code" "2" "$rc" || return 1
     assert_contains "begin marker failure message" "begin marker failed after retry" "$out" || return 1
+    assert_not_contains "retry notice only with --debug" "retrying" "$out" || return 1
 }
 
-# ── 30. Wget 404 on /api/collection stays non-fatal ─────────────────────────
+# ── 30. Wget 404 on /api/collection stays non-fatal and silent ─────────────
 
 test_wget_collection_marker_404_nonfatal() {
     stop_stub
@@ -862,8 +864,20 @@ EOF
     set -e
 
     assert_eq "exit code" "0" "$rc" || return 1
-    assert_contains "optional marker warning" "not supported (HTTP 404)" "$out" || return 1
+    # The sample path contains "marker", so match the marker messages themselves.
+    assert_not_contains "no marker output without --debug" "Collection marker" "$out" || return 1
+    assert_not_contains "no endpoint output without --debug" "/api/collection" "$out" || return 1
     assert_not_contains "marker not fatal" "begin marker failed after retry" "$out" || return 1
+
+    set +e
+    out="$(env PATH="$fakebin" bash "$COLLECTOR" \
+        --server 127.0.0.1 --port 8080 --no-log-file --no-progress \
+        --dir "$d" --debug 2>&1)"
+    rc=$?
+    set -e
+
+    assert_eq "exit code with --debug" "0" "$rc" || return 1
+    assert_contains "marker debug line" "[debug] Collection marker 'begin' not supported (HTTP 404)" "$out" || return 1
 }
 
 # ── 31. Redirect upload responses are rejected ───────────────────────────────

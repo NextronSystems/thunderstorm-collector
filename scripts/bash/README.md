@@ -72,8 +72,13 @@ console output. Keep externally captured logs outside the input directories.
   control characters in a part header and the file would never be collected.
   This does not change the uploaded bytes.
 - Source defaults to the hostname; `--source NAME` overrides it and is URL-encoded.
-  Begin/end markers and returned scan IDs are supported. Marker HTTP 404/501 are
-  nonfatal for older services without `/api/collection`.
+  Begin/end markers and returned scan IDs are supported. Marker problems are
+  shown only with `--debug` and never change the exit status: HTTP 404/501 from a
+  service without `/api/collection` (THOR 10 and the current THOR 11 answer 404),
+  any other HTTP status on begin after its retry, an unusable begin answer, and a
+  failed end or interrupted marker. Uploads then carry no scan ID. Only a begin
+  marker without any HTTP answer on both attempts (connection, DNS, TLS, timeout,
+  or truncated reply) stops the run with exit `2` before uploading.
 - Only complete HTTP 2xx uploads count as successful. Redirects are not followed.
   Curl/wget configuration files and proxy environment settings are ignored, so
   they cannot silently disable TLS checks or redirect uploads elsewhere.
@@ -83,8 +88,7 @@ console output. Keep externally captured logs outside the input directories.
   Missing, malformed, or HTTP-date values use a two-second fallback.
 - Failed uploads, unreadable/disappeared files, and incomplete directory scans
   do not prevent other readable files from being processed. They make the overall
-  result nonzero. An end-marker failure also makes the result nonzero even when
-  uploads succeeded; check the service before repeating the run.
+  result nonzero.
 - Dry-run filters files but sends **no HTTP requests**, including markers. It
   works without an upload tool. Its `submitted` count means **would submit**.
 - Private temporary workspace, excluded from collection and removed on exit.
@@ -97,8 +101,8 @@ console output. Keep externally captured logs outside the input directories.
 | Exit Code | Meaning |
 |---|---|
 | `0` | Completed without detected errors; an empty readable directory is valid |
-| `1` | Partial failure, incomplete scan, failed end marker, or interrupted run |
-| `2` | Invalid configuration, missing upload tool, unusable workspace, or failed begin handshake |
+| `1` | Partial failure, incomplete scan, or interrupted run |
+| `2` | Invalid configuration, missing upload tool, unusable workspace, or no HTTP answer to the begin marker |
 
 The summary reports `scanned`, `submitted`, `skipped`, `failed`, and `scan_errors`.
 `failed` counts file failures; `scan_errors` counts incomplete directory scans.
@@ -124,12 +128,13 @@ Missing roots are errors, not successful empty collections.
   and repeated busy responses can take much longer than a smoke test.
 - Responses are limited to 1 MiB. Each transport output file has an additional
   operating-system write limit of at most 2 MiB, including headers and diagnostics.
-  Oversized responses fail the request; error-body logging is limited to 4 KiB.
+  Oversized upload responses fail the request; an oversized marker answer is
+  ignored. Error-body logging is limited to 4 KiB.
   Marker IDs must be top-level JSON strings of at most 256 bytes without control
-  characters. Nested, duplicate, non-string, or malformed IDs are ignored with a
-  warning. Unicode escapes are decoded without changing the identifier.
-  Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID
-  and a warning is emitted. This bounds parser work on older awk runtimes.
+  characters. Nested, duplicate, non-string, or malformed IDs are ignored; only
+  `--debug` reports them. Unicode escapes are decoded without changing the identifier.
+  Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID,
+  reported only with `--debug`. This bounds parser work on older awk runtimes.
 - SIGKILL, power loss, or an unresponsive filesystem can prevent cleanup/markers.
   Retries after ambiguous network failures can duplicate a server-side submission;
   the collector cannot promise exactly-once delivery.
@@ -214,9 +219,10 @@ and special-name payloads. Where available, check client filename sanitization
 and compare downloaded bytes or SHA-256 hashes with the originals.
 
 If markers are supported, verify begin/end, consistent scan ID, and statistics.
-An older service can warn about marker HTTP 404/501 and still succeed. If your
-service rejects empty samples, document the limitation and observed nonzero
-result instead of counting this case as passed.
+A service without markers answers HTTP 404/501; with `--debug`, as here, a debug
+line names the status, and the run still succeeds. If your service rejects empty
+samples, document the limitation and observed nonzero result instead of counting
+this case as passed.
 
 ### 3. Dry-Run and Unreachable Service
 

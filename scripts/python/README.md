@@ -91,9 +91,14 @@ by the collector itself. Always review a dry-run before collecting real data.
 - Async `/api/checkAsync` only; no synchronous mode, and `--async` is accepted
   and ignored so existing command lines keep working. Complete 2xx means
   accepted, not completed analysis. No polling, resume or deduplication.
-- Optional markers: 404/501 is nonfatal, without scan ID. A begin response is only
-  parsed up to 64 KiB; anything larger or malformed gives no scan ID, never a crash. Begin retries once
-  after two seconds then exits 2; end failure exits 1. SIGINT/SIGTERM exits 1
+- Optional markers: an HTTP answer other than 2xx (404/501 from a server without
+  marker support, any other status) is ignored without output; uploads then carry
+  no scan ID, and marker answers never change the exit status. A begin response is only
+  parsed up to 64 KiB; anything larger or malformed gives no scan ID, never a crash. Begin
+  retries once after two seconds unless the answer was 404/501. The begin marker is the
+  first request to the server: if neither attempt gets an HTTP answer (connection
+  refused, DNS/TLS failure, timeout, empty or incomplete reply), the collector exits 2
+  before uploading. A failed end or interrupted marker is ignored. SIGINT/SIGTERM exits 1
   with a best-effort interrupted marker for a live started collection.
 - `--retries 1..10` counts total attempts, including first. 503 Retry-After
   integer seconds clamp to 0..120; other exponential delays cap at 60 seconds.
@@ -107,13 +112,14 @@ by the collector itself. Always review a dry-run before collecting real data.
   via `--tls --insecure`. Python before 2.7.9 refuses verified HTTPS rather than
   silently disabling verification. Old SSL protocol support can still limit it.
 - Port 1..65535; IPv4/DNS and runtime-supported IPv6. Progress is count-based;
-  `--debug` is accepted for compatibility, with path errors already always shown.
+  `--debug` adds `[DEBUG]` lines on stderr for ignored marker answers. Path errors
+  are always shown.
 
 | Exit | Meaning |
 |---|---|
 | 0 | All eligible files accepted, or successful dry-run; intentional skips allowed |
-| 1 | Failed files, traversal/partial-root errors, interruption or failed end marker |
-| 2 | Invalid config/TLS setup, no valid roots or failed begin |
+| 1 | Failed files, traversal/partial-root errors or interruption |
+| 2 | Invalid config/TLS setup, no valid roots or no HTTP answer to the begin marker |
 
 Unreadable directories count as `Scan errors`; unreadable selected files as
 `Failed`. Empty existing roots may succeed; missing roots cannot. Actual legacy

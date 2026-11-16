@@ -38,7 +38,7 @@ MAX_SIZE_KB = 2048       # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact limi
 
 RETRIES = 3             # TOTAL upload attempts including the first, 1..10.
 DRY_RUN = False         # True = preview only; False = uploads (--dry-run / --no-dry-run).
-DEBUG = False           # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
+DEBUG = False           # True = log ignored collection marker answers as [DEBUG] lines (--debug / --no-debug).
 # Progress is automatic on terminals; --progress / --no-progress overrides it.
 # The console log (stderr) includes roots and limits. Capture it outside the scan
 # roots if a persistent log is needed; this collector does not create a log file.
@@ -144,6 +144,10 @@ def _build_multipart_preamble(boundary, filepath):
             name + b'"\r\nContent-Type: application/octet-stream\r\n\r\n')
 
 
+class ResponseTooLarge(ValueError):
+    """A complete HTTP answer whose body exceeds MAX_RESPONSE."""
+
+
 def read_response(response):
     # Python 2's httplib (strict=0) reads a reply without an HTTP status line, such as an
     # SSH banner or HTML sent by a wrong port, as an HTTP/0.9 response with status 200.
@@ -152,7 +156,7 @@ def read_response(response):
         raise ValueError("response is not HTTP/1.x")
     body = response.read(MAX_RESPONSE + 1)
     if len(body) > MAX_RESPONSE:
-        raise ValueError("response exceeds 1 MiB limit")
+        raise ResponseTooLarge("response exceeds 1 MiB limit")
     length = response.getheader("Content-Length")
     if length is not None and (not length.isdigit() or int(length) != len(body)):
         raise ValueError("incomplete or invalid Content-Length response")
@@ -194,7 +198,14 @@ class Collector(object):
             result["in_flight"] = _text(self.in_flight)
         return result
 
+    def debug(self, message):
+        if self.args.debug:
+            log("[DEBUG] " + message)
+
     def marker(self, kind):
+        """Markers are optional: an HTTP answer other than 2xx is ignored and only shown with
+        --debug. Returns False only when no attempt got an HTTP answer at all; for the begin
+        marker, the first contact with the server, that is fatal."""
         if self.args.dry_run:
             return True
         payload = dict(type=kind, source=self.args.source,
@@ -206,6 +217,7 @@ class Collector(object):
         if kind != "begin":
             payload["stats"] = self.stats()
         attempts = 2 if kind == "begin" else 1
+        answered = False
         for attempt in range(attempts):
             connection = None
             try:
@@ -214,13 +226,19 @@ class Collector(object):
                                    body=json.dumps(payload).encode("utf-8"),
                                    headers={"Content-Type": "application/json"})
                 response = connection.getresponse()
-                body = read_response(response)
+                try:
+                    body = read_response(response)
+                except ResponseTooLarge:
+                    # An answer, but no usable one: like an unusable body, not a lost server.
+                    self.debug("Collection {}: answer exceeds the 1 MiB limit; ignoring it".format(kind))
+                    return True
+                answered = True
                 if response.status in (404, 501):
-                    log("[WARN] Collection markers unsupported (HTTP {})".format(response.status))
+                    self.debug("Collection markers unsupported (HTTP {})".format(response.status))
                     return True
                 if 200 <= response.status < 300:
                     if kind == "begin" and len(body) > MAX_MARKER_JSON:
-                        log("[WARN] Ignoring oversized collection marker response")
+                        self.debug("Ignoring oversized collection marker response")
                     elif kind == "begin":
                         try:
                             data = json.loads(body.decode("utf-8"))
@@ -230,16 +248,24 @@ class Collector(object):
                         except (ValueError, UnicodeError, RuntimeError):
                             # RuntimeError (RecursionError): nesting deeper than the recursion limit
                             pass
+                        if not self.scan_id:
+                            self.debug("Collection begin: no usable scan_id in the response")
                     return True
-                raise ValueError("HTTP {}".format(response.status))
+                self.debug("Collection {}: HTTP {}".format(kind, response.status))
             except (IOError, OSError, ValueError, http_client.HTTPException) as error:
-                log("[ERROR] Collection {}: {}".format(kind, error))
+                if kind == "begin" and attempt + 1 == attempts and not answered:
+                    log("[ERROR] Collection begin: {}".format(error))
+                else:
+                    self.debug("Collection {}: {}".format(kind, error))
             finally:
                 if connection is not None:
                     connection.close()
             if attempt + 1 < attempts:
+                self.debug("Collection begin: retrying in 2 seconds")
                 time.sleep(2)
-        return False
+        if kind == "begin" and answered:
+            self.debug("Collection begin: continuing without scan_id")
+        return answered
 
     def interrupted(self, signum, frame):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -420,13 +446,13 @@ class Collector(object):
         self.started = True
         for root in roots:
             self.walk(root)
-        end_ok = self.marker("end")
+        self.marker("end")
         dry_summary = " Would submit: {}".format(self.would_submit) if self.args.dry_run else ""
         log("Thunderstorm Collector Run finished (Checked: {} Submitted: {}{} Failed: {} "
             "Skipped: {} Scan errors: {} Seconds: {})".format(
                 self.scanned, self.submitted, dry_summary, self.failed, self.skipped,
                 self.scan_errors, int(time.time() - self.started_at)))
-        return 1 if self.failed or self.scan_errors or not end_ok else 0
+        return 1 if self.failed or self.scan_errors else 0
 
 
 def main():
@@ -452,7 +478,8 @@ def main():
                         help="Accepted for compatibility; uploads are always asynchronous")
     parser.add_argument("--dry-run", action="store_true", default=DRY_RUN)
     parser.add_argument("--no-dry-run", dest="dry_run", action="store_false")
-    parser.add_argument("--debug", action="store_true", default=DEBUG)
+    parser.add_argument("--debug", action="store_true", default=DEBUG,
+                        help="Log ignored collection marker answers as [DEBUG] lines")
     parser.add_argument("--no-debug", dest="debug", action="store_false")
     parser.add_argument("--progress", dest="progress", action="store_true")
     parser.add_argument("--no-progress", dest="progress", action="store_false")

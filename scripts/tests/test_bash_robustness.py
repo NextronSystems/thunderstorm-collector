@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -37,6 +39,8 @@ class BashRobustnessTests(unittest.TestCase):
         self.part_types = []
         self.upload_statuses = []
         self.marker_status = 200
+        self.begin_statuses = []
+        self.begin_delay = 0
         self.end_status = 200
         self.retry_after = "0"
         self.diagnostic_header = False
@@ -59,6 +63,10 @@ class BashRobustnessTests(unittest.TestCase):
                     test.markers.append(marker)
                     response = test.marker_response
                     status = test.end_status if marker["type"] == "end" else test.marker_status
+                    if marker["type"] == "begin" and test.begin_statuses:
+                        status = test.begin_statuses.pop(0)
+                    if marker["type"] == "begin" and test.begin_delay:
+                        time.sleep(test.begin_delay)
                 else:
                     response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
@@ -132,6 +140,20 @@ class BashRobustnessTests(unittest.TestCase):
 
     def assert_payloads(self, expected):
         self.assertCountEqual(expected, [payload for _, payload in self.uploads], self.output)
+
+    MARKER_TEXT = re.compile(r"marker|scan_id|/api/collection", re.I)
+
+    def assert_no_marker_text(self, *texts):
+        for text in texts:
+            self.assertIsNone(self.MARKER_TEXT.search(text), text)
+
+    def transports(self):
+        transports = [("curl", {})]
+        if shutil.which("wget"):
+            path = self.tool_path()
+            (Path(path) / "wget").symlink_to(shutil.which("wget"))
+            transports.append(("wget", {"PATH": path}))
+        return transports
 
     def test_special_filenames_preserve_every_payload(self):
         names = ["ordinary.txt", "semi;colon.txt", "comma,name.txt", 'double"quote.txt',
@@ -403,13 +425,13 @@ exit 7
             with self.subTest(size=size):
                 self.requests = []
                 self.marker_response = prefix + b'x' * (size - len(prefix) - len(suffix)) + suffix
-                result = self.run_collector()
+                result = self.run_collector("--debug")
                 self.assertEqual(result.returncode, 0, self.output)
                 uploads = [path for path in self.requests if path.startswith("/api/check")]
                 self.assertEqual(len(uploads), 1)
                 self.assertEqual("scan_id=" in uploads[0], size == 65536)
                 if size > 65536:
-                    self.assertIn("Ignoring invalid or oversized collection marker JSON", self.output)
+                    self.assertIn("[debug] Ignoring invalid or oversized collection marker JSON", self.output)
 
     def test_marker_unicode_escapes_are_preserved(self):
         (self.samples / "real.txt").write_bytes(b"readable")
@@ -472,9 +494,17 @@ exit 7
                     if size > 1048576:
                         self.assertIn("submitted=0", self.output)
                     self.assertLess(len(self.output), 20000)
-            self.marker_response = b"x" * 1048577
-            result = self.run_collector(env=env)
-            self.assertEqual(result.returncode, 2, self.output)
+            # An oversized marker answer is still an answer: ignored, uploads go on.
+            self.upload_response = b'{}'
+            for size in (1048577, 4 * 1048576):
+                with self.subTest(transport=name, marker_size=size):
+                    self.requests.clear()
+                    self.marker_response = b"x" * size
+                    result = self.run_collector(env=env)
+                    self.assertEqual(result.returncode, 0, self.output)
+                    self.assertEqual(sum(p.startswith("/api/checkAsync?") for p in self.requests), 1)
+                    self.assertFalse(any("scan_id=" in p for p in self.requests), self.requests)
+                    self.assert_no_marker_text(self.output)
             self.marker_response = b'{}'
 
     def test_internal_files_and_log_are_not_uploaded(self):
@@ -632,21 +662,126 @@ exit 7
         self.assertIn("HTTP 500", self.output)
         self.assertIn("submitted=0", self.output)
 
-    def test_optional_marker_endpoint(self):
-        (self.samples / "real.txt").write_bytes(b"readable")
-        self.marker_status = self.end_status = 404
-        result = self.run_collector()
-        self.assertEqual(result.returncode, 0, self.output)
-        self.assertIn("not supported (HTTP 404)", self.output)
-        self.assert_payloads([b"readable"])
+    # (begin status, end status, marker body, debug line). THOR 10 and the current
+    # THOR 11 answer 404; no marker answer may worry the operator or change the exit.
+    MARKER_ANSWERS = [
+        (404, 404, b'{"scan_id":"untrusted"}', "[debug] Collection marker 'begin' not supported (HTTP 404)"),
+        (501, 501, b'{}', "[debug] Collection marker 'begin' not supported (HTTP 501)"),
+        (500, 200, b'{}', "[debug] Collection marker 'begin' received HTTP 500"),
+        (403, 200, b'{}', "[debug] Collection marker 'begin' received HTTP 403"),
+        (200, 200, b'not json', "[debug] Ignoring invalid or oversized collection marker JSON"),
+        (200, 500, b'{}', "[debug] Collection marker 'end' received HTTP 500"),
+    ]
 
-    def test_failed_end_marker_reports_partial_failure(self):
+    def test_marker_http_answers_are_silent_and_nonfatal(self):
         (self.samples / "real.txt").write_bytes(b"readable")
-        self.end_status = 500
-        result = self.run_collector()
-        self.assertEqual(result.returncode, 1, self.output)
-        self.assertIn("end marker failed", self.output)
+        log = self.root / "collector.log"
+        for transport, env in self.transports():
+            for begin, end, body, _ in self.MARKER_ANSWERS:
+                with self.subTest(transport=transport, begin=begin, end=end, body=body):
+                    self.marker_status, self.end_status, self.marker_response = begin, end, body
+                    self.requests.clear()
+                    self.uploads.clear()
+                    self.markers.clear()
+                    if log.exists():
+                        log.unlink()
+                    result = self.run_collector(env=env, log_file=log)
+                    self.assertEqual(result.returncode, 0, self.output)
+                    self.assert_payloads([b"readable"])
+                    self.assertFalse(any("scan_id=" in p for p in self.requests), self.requests)
+                    begins = 1 if begin in (200, 404, 501) else 2
+                    self.assertEqual([m["type"] for m in self.markers], ["begin"] * begins + ["end"])
+                    self.assert_no_marker_text(self.output, log.read_text())
+
+    def test_marker_problems_are_debug_lines(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        for begin, end, body, line in self.MARKER_ANSWERS:
+            with self.subTest(begin=begin, end=end, body=body):
+                self.marker_status, self.end_status, self.marker_response = begin, end, body
+                result = self.run_collector("--debug")
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assertIn(line, self.output)
+                self.assert_no_marker_text(*(text for text in self.output.splitlines()
+                                             if not text.startswith("[debug] ")))
+                if begin in (500, 403):
+                    self.assertIn("[debug] Begin marker failed (attempt 1/2), retrying in 2s...", self.output)
+
+    def test_marker_debug_lines_stay_out_of_the_scan_id(self):
+        # collection_marker's stdout carries the scan_id; its debug lines must not.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        self.begin_statuses = [500, 200]
+        self.marker_response = b'{"scan_id":"retried-id"}'
+        result = self.run_collector("--debug")
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("[debug] Collection marker 'begin' received HTTP 500", self.output)
+        query = next(p for p in self.requests if p.startswith("/api/check"))
+        self.assertEqual(parse_qs(urlsplit(query).query)["scan_id"], ["retried-id"])
+        self.assertEqual(self.markers[-1]["scan_id"], "retried-id")
+
+    def test_end_marker_without_answer_does_not_change_exit_status(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        path = self.tool_path(curl='''#!/bin/sh
+for arg do
+    case "$arg" in *'"type":"end"'*) exit 7 ;; esac
+done
+exec "$CURL_REAL" "$@"
+''')
+        env = {"PATH": path, "CURL_REAL": shutil.which("curl")}
+        result = self.run_collector(env=env)
+        self.assertEqual(result.returncode, 0, self.output)
         self.assert_payloads([b"readable"])
+        self.assertEqual([m["type"] for m in self.markers], ["begin"])
+        self.assert_no_marker_text(self.output)
+        result = self.run_collector("--debug", env=env)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("[debug] Collection marker 'end' got no complete HTTP answer (curl exit 7)", self.output)
+        self.assertIn("[debug] Collection end marker failed", self.output)
+
+    def test_begin_marker_without_any_answer_stays_fatal(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            unused = str(probe.getsockname()[1])
+        for transport, env in self.transports():
+            with self.subTest(transport=transport):
+                result = self.run_collector("--port", unused, env=env)
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("begin marker failed after retry", self.output)
+                self.assertNotIn("retrying", self.output)
+                self.assertEqual(self.requests, [])
+
+    def test_signal_notice_does_not_mention_markers(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        self.marker_status = 404
+        # Bash runs the trap once the foreground find returns.
+        path = self.tool_path(find='#!/bin/sh\nsleep 3\nexec "$FIND_REAL" "$@"\n')
+        (Path(path) / "curl").symlink_to(shutil.which("curl"))
+        command = [BASH, str(COLLECTOR), "--server", "127.0.0.1", "--port", str(self.server.server_port),
+                   "--no-progress", "--no-log-file", "--dir", str(self.samples)]
+        # "walk": the signal arrives while find runs. "begin": it arrives while the begin
+        # marker waits for its answer, so the trap runs inside collection_marker, whose
+        # stdout the caller redirects into the begin response file.
+        for moment, debug in [(m, d) for m in ("walk", "begin") for d in ([], ["--debug"])]:
+            with self.subTest(moment=moment, debug=bool(debug)):
+                self.markers.clear()
+                self.begin_delay = 1.5 if moment == "begin" else 0
+                process = subprocess.Popen(command + debug, cwd=self.root, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, text=True,
+                                           env={**os.environ, "TMPDIR": str(self.root), "PATH": path,
+                                                "FIND_REAL": shutil.which("find")})
+                deadline = time.time() + 10
+                while not self.markers and time.time() < deadline:
+                    time.sleep(0.05)
+                process.send_signal(signal.SIGTERM)
+                output = process.communicate(timeout=30)[0]
+                self.assertEqual(process.returncode, 1, output)
+                self.assertIn("[warn] Received signal, exiting...", output)
+                self.assertEqual([m["type"] for m in self.markers], ["begin", "interrupted"])
+                if debug:
+                    self.assertIn("[debug] Sending interrupted collection marker", output)
+                    self.assertIn("[debug] Collection marker 'interrupted' not supported (HTTP 404)", output)
+                else:
+                    self.assert_no_marker_text(output)
 
     def test_temp_failure_does_not_delete_preexisting_pid_directory(self):
         foreign = self.root / "thunderstorm.foreign"
