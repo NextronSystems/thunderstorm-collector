@@ -6,7 +6,7 @@ Four routes bring the appliance's files to THOR's signatures:
 
 | Route | What runs on the NetScaler | Requirements | Suited to |
 | --- | --- | --- | --- |
-| [1. Collector on the appliance](#route-1-run-a-collector-on-the-appliance) | The Go or Bash collector, copied for the run and removed afterwards | Shell access, a network path from the appliance to Thunderstorm, a Thunderstorm service | Selective collection, repeat runs, many appliances |
+| [1. Collector on the appliance](#route-1-run-a-collector-on-the-appliance) | The Go or Bash collector, copied for each run and removed afterwards; installed only where cron starts the runs | Shell access, a network path from the appliance to Thunderstorm, a Thunderstorm service | Selective collection, repeat runs, many appliances |
 | [2. SFTP collector on another host](#route-2-pull-files-with-the-sftp-collector) (prototype) | Nothing; files are read over SFTP | A working SFTP subsystem, SSH key login, a Thunderstorm service | Appliances that cannot reach Thunderstorm, or where nothing may run |
 | [3. THOR over SSHFS](#route-3-scan-over-sshfs-with-thor) | Nothing; files are read over SFTP | A working SFTP subsystem, a Linux workstation with SSHFS, a Forensic Lab License | One complete assessment, as in incident response |
 | [4. Exported evidence](#route-4-scan-exported-evidence) | `show techsupport` writes a support archive; a VPX disk copy needs nothing on the instance | SCP access or hypervisor access, a Forensic Lab License | No live access to the files, or a second look at configuration and logs |
@@ -76,35 +76,37 @@ On the workstation, verify and unpack the package, then build a directory that h
 ```bash
 sha256sum -c thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz.sha256
 tar -xzf thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz
-mkdir -p thunderstorm-run/test
-cp thunderstorm-collector-<version>-amd64-freebsd8-netscaler/amd64-freebsd8-netscaler-thunderstorm-collector thunderstorm-run/
+mkdir -p nextron-thunderstorm/test
+cp thunderstorm-collector-<version>-amd64-freebsd8-netscaler/amd64-freebsd8-netscaler-thunderstorm-collector nextron-thunderstorm/
 ```
 
-Put one or two harmless text files into `thunderstorm-run/test` for the test upload. Save the profile's [config.yml](../../emerging-threats/citrix-netscaler/config.yml) as `thunderstorm-run/netscaler-run.yml` and change these settings:
+Put one or two harmless text files into `nextron-thunderstorm/test` for the test upload. Save the profile's [config.yml](../../emerging-threats/citrix-netscaler/config.yml) as `nextron-thunderstorm/netscaler-run.yml` and change these settings:
 
 ```yaml
 thunderstorm-server: "thunderstorm.example.org"
 port: 8080
 exclude:
-  - /var/tmp/thunderstorm-run
+  - /var/nextron-thunderstorm
 ```
 
 The profile collects all of `/var`. Without the exclusion, the collector would also submit its own run directory; a Go exclusion that matches a directory skips everything below it. Keep `dry-run: true` in the file; the upload command below overrides it.
 
+The run directory is deliberately outside `/var/tmp`. Attackers have staged tools there, and Mandiant's NetScaler IoC scanner reports every running process and every cron log line that names `/var/tmp`. [Mandiant scanner checks](https://github.com/mandiant/citrix-ioc-scanner-cve-2023-3519/tree/main/scanners) A recognizable name under `/var` keeps the collector apart from such findings. Citrix's upgrade procedure also uses `/var`: it stores customized configuration files in `/var/nsconfig_backup` while the appliance is upgraded. [Citrix: customized files in /etc](https://docs.netscaler.com/en-us/citrix-adc/current-release/upgrade-downgrade-citrix-adc-appliance/upgrade-considerations-customized-files.html)
+
 ### Copy, test, preview and collect
 
-Copy the run directory to the appliance. With `-r`, `scp` creates `/var/tmp/thunderstorm-run`:
+Copy the run directory to the appliance. With `-r`, `scp` creates `/var/nextron-thunderstorm`:
 
 ```bash
-scp -O -r thunderstorm-run nsadmin@192.0.2.10:/var/tmp/
+scp -O -r nextron-thunderstorm nsadmin@192.0.2.10:/var/
 ```
 
 Open a session with `ssh nsadmin@192.0.2.10` and `shell`, then run these steps in order. `-o` names the node in Thunderstorm; use a distinct name for each node.
 
 ```sh
-cd /var/tmp/thunderstorm-run
+cd /var/nextron-thunderstorm
 ./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-run.yml \
-  -p /var/tmp/thunderstorm-run/test -o ns01-node0 --dry-run=false
+  -p /var/nextron-thunderstorm/test -o ns01-node0 --dry-run=false
 ```
 
 This uploads only the test files. Check that they arrived at Thunderstorm under the source name. Then preview the full profile and write the list of selected files to a log:
@@ -114,7 +116,7 @@ This uploads only the test files. Check that they arrived at Thunderstorm under 
   -o ns01-node0 -l ./preview.log
 ```
 
-Copy `preview.log` to the workstation with `scp -O nsadmin@192.0.2.10:/var/tmp/thunderstorm-run/preview.log .` and review it. The broad scope includes configuration, certificates and private keys. When the selection is right, start the collection:
+Copy `preview.log` to the workstation with `scp -O nsadmin@192.0.2.10:/var/nextron-thunderstorm/preview.log .` and review it. The broad scope includes configuration, certificates and private keys. When the selection is right, start the collection:
 
 ```sh
 ./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-run.yml \
@@ -124,14 +126,14 @@ Copy `preview.log` to the workstation with `scp -O nsadmin@192.0.2.10:/var/tmp/t
 Keep the session open until the collector prints its summary; a dropped connection can end the run. Copy `upload.log` to the case directory, then remove the run directory in the shell:
 
 ```sh
-rm -rf /var/tmp/thunderstorm-run
+rm -rf /var/nextron-thunderstorm
 ```
 
 ### Bash collector instead of Go
 
 Check the runtime first with `bash --version` and `curl --version`. Mandiant ships its NetScaler IoC scanner as a Bash script and calls Bash a common denominator across Citrix ADC appliances; that scanner supports versions 12.0 to 13.1. [Mandiant IoC scanner](https://github.com/mandiant/citrix-ioc-scanner-cve-2023-3519) Check the [Bash requirements](../../scripts/bash/README.md#requirements) on the actual build.
 
-Apply the profile's [Bash header settings](../../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) to a copy of the script and put it into the run directory. Also add `/var/tmp/thunderstorm-run` to `EXCLUDE_PATHS` in that copy. Copy and remove the run directory as above, and run the script from it with `bash ./thunderstorm-collector.sh --dry-run --no-progress`, then with `--no-dry-run`. Use `--source ns01-node0` to name the node.
+Apply the profile's [Bash header settings](../../emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) to a copy of the script and put it into the run directory. Also add `/var/nextron-thunderstorm` to `EXCLUDE_PATHS` in that copy. Copy and remove the run directory as above, and run the script from it with `bash ./thunderstorm-collector.sh --dry-run --no-progress`, then with `--no-dry-run`. Use `--source ns01-node0` to name the node.
 
 ### HA pairs and clusters
 
@@ -139,16 +141,78 @@ Each node of an HA pair or cluster has its own NSIP and its own files. `show ha 
 
 ### Repeat collections
 
-Start repeat runs from a scheduler host rather than with a cron job on the appliance. Attackers have used cron entries in `/etc` and `/nsconfig` for persistence on NetScaler, as the profile's [sources](../../emerging-threats/citrix-netscaler/README.md#sources-for-scope) describe, so a scheduled job there is an unusual change that a later assessment would have to explain. The scheduler host repeats the steps above with SSH key login and Citrix's single-command form:
+Start repeat runs from a scheduler host. Cron on the appliance also works, but it is the second choice:
+
+- **Nothing changes on the appliance between runs.** The scheduler host brings the collector and its configuration for each run and removes them afterwards. Cron needs a lasting change to the system crontab and a collector that stays installed on every node.
+- **Nothing to lose or alter between runs.** A firmware upgrade or HA file sync can drop or overwrite a crontab line. Anyone with shell access can change an installed collector or its configuration, for example to exclude a directory. Fresh copies from the scheduler host confine such changes to a single run, although a compromised appliance can still interfere while the collector runs.
+- **Missing runs show up.** The scheduler host fetches the log of every run, so a failed or skipped run is visible there. A cron line that was removed simply stops sending files.
+- **No look-alike persistence.** Nothing on the appliance resembles the cron and boot persistence that attackers use on NetScaler, so a later assessment has nothing to explain.
+
+The cost is the transfer of the collector, about 6 MB per run and node, and a scheduler host that can log in to every appliance as a superuser. Protect that host and its SSH key like an administrator workstation, and use the key for nothing else. Use cron only where no scheduler host can reach the appliances over SSH.
+
+| | Scheduler host (recommended) | Cron on the appliance |
+| --- | --- | --- |
+| What stays on the appliance | Nothing between runs | The run directory on every node, and one line in the system crontab |
+| What each run needs | Inbound SSH from the scheduler host with key login | Only the network path to Thunderstorm |
+| Upkeep | Credentials on the scheduler host | Reapplying the crontab line after each firmware upgrade; keeping the change recorded |
+
+Neither way has been tested with the collectors on an appliance. Both rest on the Citrix procedures cited below.
+
+#### From a scheduler host
+
+The scheduler host repeats the steps above with SSH key login and Citrix's single-command form:
 
 ```bash
-scp -O -r thunderstorm-run nsadmin@192.0.2.10:/var/tmp/
-ssh nsadmin@192.0.2.10 'shell "cd /var/tmp/thunderstorm-run && ./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-run.yml -o ns01-node0 --dry-run=false -a 2d -l ./upload.log"'
-scp -O nsadmin@192.0.2.10:/var/tmp/thunderstorm-run/upload.log "ns01-node0-$(date -u +%Y%m%dT%H%M%SZ).log"
-ssh nsadmin@192.0.2.10 'shell "rm -rf /var/tmp/thunderstorm-run"'
+scp -O -r nextron-thunderstorm nsadmin@192.0.2.10:/var/
+ssh nsadmin@192.0.2.10 'shell "cd /var/nextron-thunderstorm && ./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-run.yml -o ns01-node0 --dry-run=false -a 2d -l ./upload.log"'
+scp -O nsadmin@192.0.2.10:/var/nextron-thunderstorm/upload.log "ns01-node0-$(date -u +%Y%m%dT%H%M%SZ).log"
+ssh nsadmin@192.0.2.10 'shell "rm -rf /var/nextron-thunderstorm"'
 ```
 
 This sequence follows the documented command form but has not been tested on an appliance. Check each copied log rather than the SSH exit status.
+
+#### With cron on the appliance
+
+Use this only where no scheduler host can reach the appliance over SSH. Citrix documents how to keep a changed system crontab. `crontab` is one of the `/etc` files that the appliance takes from `/nsconfig` at boot, and Citrix's log rotation article edits `/etc/crontab` and then copies it to `/nsconfig/crontab`. [Citrix CTX327915](https://support.citrix.com/external/article/CTX327915/how-to-install-custom-freebsd-configuration-files-on-a-netscaler.html) · [Citrix CTX277306](https://support.citrix.com/external/article/277306/how-to-modify-the-interval-for-nslog-rot.html) FreeBSD's cron rereads `/etc/crontab` within a minute of a change, so a new line takes effect without a restart. [FreeBSD cron(8)](https://man.freebsd.org/cgi/man.cgi?query=cron&sektion=8&manpath=FreeBSD+8.4-RELEASE) Citrix calls the older method of adding crontab entries through `rc.netscaler` obsolete; do not use it.
+
+1. On every node, install the run directory as described in [copy, test, preview and collect](#copy-test-preview-and-collect). Run the test upload and the preview, then leave the directory in place. Remove `test/` and `preview.log` from it.
+2. In the shell of the standalone appliance or the HA primary, check whether the crontab was customized before, and keep a copy of the current one:
+
+   ```sh
+   ls -l /etc/crontab /nsconfig/crontab
+   cp /etc/crontab /var/nextron-thunderstorm/crontab.before
+   ```
+
+   If `/etc/crontab` is a link into `/nsconfig`, the next step changes the persistent copy directly, and step 4 is not needed.
+3. Append the collection line. The system crontab has a user column. The comment names the owner and the change record, so that analysts can tell the line from attacker persistence:
+
+   ```sh
+   cat >> /etc/crontab <<'EOF'
+   # Nextron Thunderstorm collection, change CHG-1234, owner: security operations
+   30 2 * * * root cd /var/nextron-thunderstorm && ./amd64-freebsd8-netscaler-thunderstorm-collector -t ./netscaler-run.yml --dry-run=false -a 2d -l ./last-run.log >/dev/null 2>&1
+   EOF
+   ```
+
+   Without `-o`, each node reports under its own hostname. The Go collector creates its log file anew for each run, so `last-run.log` holds only the latest run. Cron mails a command's output to the crontab's owner; the redirection discards that console copy, while the log file keeps it.
+4. Keep the change across reboots:
+
+   ```sh
+   cp /etc/crontab /nsconfig/crontab
+   ```
+
+   The edited `/etc/crontab` is in effect at once. During boot, the appliance replaces the default `/etc/crontab` with `/nsconfig/crontab`. CTX327915 ends its procedure with a reboot; after the next reboot, check that `/etc/crontab` still contains the line.
+
+For the Bash collector, the line runs the full path that `command -v bash` prints, with `./thunderstorm-collector.sh --no-dry-run --no-progress --max-age 2 > ./last-run.log 2>&1`.
+
+**HA pairs.** HA file sync copies these customized files to the secondary, so Citrix changes them only on the primary. [Citrix CTX327915](https://support.citrix.com/external/article/CTX327915/how-to-install-custom-freebsd-configuration-files-on-a-netscaler.html) The secondary then runs the same line, which is why every node needs the run directory. HA file sync itself runs from the system crontab, as an `nsfsyncd -p` line every minute; leave Citrix's own lines unchanged. [Citrix CTX206613](https://support.citrix.com/external/article/CTX206613/on-netscaler-making-changes-to-rcnetscal.html) Check the line on both nodes after the reboot.
+
+**Firmware upgrades.** The copy in `/nsconfig` replaces the whole system crontab, including Citrix's own lines for log rotation and HA file sync, with the version of the build it was copied on. Before an upgrade, follow Citrix's procedure for customized files: move `/nsconfig/crontab` to `/var/nsconfig_backup/` and delete the `/etc/crontab` link, upgrade, add the collection line to the new release's `/etc/crontab` and copy that file to `/nsconfig` again. [Citrix: customized files in /etc](https://docs.netscaler.com/en-us/citrix-adc/current-release/upgrade-downgrade-citrix-adc-appliance/upgrade-considerations-customized-files.html)
+
+**Look-alike persistence.** Attackers use the same mechanism. Arctic Wolf saw a payload try to add a root cron line that runs every five minutes to `/etc/crontab` or `/nsconfig/crontab`. Rapid7 describes cron and `rc.netscaler` persistence with scripts under `/flash`. [Arctic Wolf report](https://github.com/rtkwlf/wolf-tools/tree/main/pack_alerts/202609-citrix-netscaler-active-exploitation-cve-2026-88771) · [Rapid7 analysis](https://www.rapid7.com/blog/post/ra-netscaler-intrusions-chaining-cve-2026-88771-and-cve-2026-88779) Record the line in change management and tell the teams that assess the appliance. A collection line that nobody documented looks like persistence to the next assessment.
+
+**Removal.** Delete the two lines from `/etc/crontab`. If it is not a link into `/nsconfig`, copy it to `/nsconfig/crontab` again. If the crontab had no other customization, move `/nsconfig/crontab` aside and reboot, as CTX327915 describes for upgrades, so that the appliance uses the release's own crontab again. Then delete `/var/nextron-thunderstorm` on every node.
+
+#### Age limit for repeat runs
 
 `-a 2d` collects files changed in the last two days; with a daily schedule, the runs overlap. On FreeBSD, the Go collector compares the modification, change and birth times of each file and collects it if any of them is recent. [Source: gettime_timespec.go](../../go/gettime_timespec.go) A file whose modification time was set back is therefore still collected after a recent change. The Bash collector's `--max-age` uses only the modification time. Repeat full runs without an age limit at regular intervals.
 
@@ -231,6 +295,7 @@ To analyze exports with Thunderstorm instead of a Forensic Lab License, upload t
 - **Missing and unreadable paths.** Both collectors log missing roots and unreadable directories. A directory below a root that cannot be listed does not change the Go collector's [exit status](../../go/README.md#exit-status). Review the log for the selected files, skip counts and oversized files, not only the success count.
 - **Mounts.** The Go collector's filesystem-type check is not implemented on FreeBSD, and the Bash collector reads mounts from Linux `/proc/mounts`. Neither skips network mounts on NetScaler automatically. Use known local roots and explicit exclusions.
 - **Symbolic links.** Both collectors skip links inside the directory trees. The Go collector does not follow a root that is a link, so the profile lists `/flash/nsconfig` as well as `/nsconfig`.
+- **Persistence files.** The profile's roots include the places where attackers have kept NetScaler persistence, `/etc/crontab`, `/nsconfig/crontab`, `/var/cron/tabs` and `/nsconfig/rc.netscaler`, and the cron log under `/var/log` that records the jobs cron ran. A collection scheduled with cron appears there too, so compare these files with the recorded changes.
 - **Live state.** A file collection is not a snapshot. It does not include deleted files, process memory or network connections.
 - **Scope.** A result without findings applies only to the files examined. Campaign-specific scanners, such as [Mandiant's for CVE-2023-3519](https://github.com/mandiant/citrix-ioc-scanner-cve-2023-3519), check other indicators and complement these routes.
 
