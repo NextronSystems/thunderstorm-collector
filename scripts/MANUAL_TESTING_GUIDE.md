@@ -1,159 +1,96 @@
-# Manual Test Guide for Script Collector PRs
+# Manual Acceptance Guide for Script Collectors
 
-This guide is intended for a human reviewer who wants to check out the stacked script collector PRs locally, test each collector, and decide which collector PRs are ready to merge.
+Use this guide to accept a script collector revision on its target system
+before you deploy it. It covers the shared steps: preparation, pass criteria,
+what to record, test data and the test sequence. Each collector's README has
+the exact commands and expected counts.
 
-The individual collector READMEs contain the detailed command blocks. This document explains the review order, what each PR is expected to change, and what evidence should be collected during manual acceptance.
+> [!NOTE]
+> Run acceptance against a real THOR Thunderstorm service whenever one is
+> available. The stub server checks the upload protocol only.
 
-## PR Stack
-
-Review and merge the PRs in this order:
-
-| Order | PR | Branch | Base | Purpose |
-|---|---:|---|---|---|
-| 1 | [#43](https://github.com/NextronSystems/thunderstorm-collector/pull/43) | `codex/script-test-base` | `master` | Adds the shared script collector test harness and CI workflow. |
-| 2 | [#49](https://github.com/NextronSystems/thunderstorm-collector/pull/49) | `codex/script-layout-docs` | `codex/script-test-base` | Moves script collectors into dedicated subdirectories and adds per-collector documentation. |
-| 3 | [#44](https://github.com/NextronSystems/thunderstorm-collector/pull/44) | `codex/script-bash` | `codex/script-layout-docs` | Replaces the Bash collector. |
-| 4 | [#45](https://github.com/NextronSystems/thunderstorm-collector/pull/45) | `codex/script-ash` | `codex/script-layout-docs` | Adds the POSIX sh / ash collector. |
-| 5 | [#46](https://github.com/NextronSystems/thunderstorm-collector/pull/46) | `codex/script-python` | `codex/script-layout-docs` | Replaces the Python 3 collector and adds the Python 2 collector. |
-| 6 | [#47](https://github.com/NextronSystems/thunderstorm-collector/pull/47) | `codex/script-perl` | `codex/script-layout-docs` | Replaces the Perl collector. |
-| 7 | [#48](https://github.com/NextronSystems/thunderstorm-collector/pull/48) | `codex/script-windows` | `codex/script-layout-docs` | Replaces the PowerShell collector, adds the PowerShell 2 collector, and updates the Batch collector. |
-
-PRs #43 and #49 are prerequisite infrastructure PRs. The actual collector behavior acceptance happens in PRs #44 through #48.
-
-After #49, the collector PRs are independent; their order in the table is not a dependency order. Retarget each dependent PR to `master` once its prerequisite PR has merged. Do not merge collector changes into the harness or documentation branches.
-
-## Local Setup
-
-Fetch all PR branches:
-
-```bash
-cd /path/to/thunderstorm-collector
-git fetch origin
-```
-
-Confirm the real THOR Thunderstorm endpoint that will be used for manual acceptance:
-
-```text
-Thunderstorm server: <hostname-or-ip>
-Thunderstorm port:   <port>
-URL scheme:          http or https
-```
-
-For collector README commands that use `thunderstorm.local`, substitute the real service values. For example:
-
-```text
-server: thunderstorm.example.internal
-port: 8080
-```
-
-Before running destructive or high-volume tests, use a dedicated test source identifier such as:
-
-```text
-manual-bash-acceptance-<tester-name>
-manual-python3-error-paths-<tester-name>
-```
-
-After each acceptance run, inspect the real Thunderstorm service and verify:
-
-- The expected files were received.
-- The source identifier matches the manual test command.
-- Text and binary samples appear as separate uploads where applicable.
-- Nested files appear when recursive traversal is expected.
-- Filtered files are absent when a size, age, or extension filter is being tested.
-- Failed or skipped files are visible in collector output and are not reported as successful uploads.
-
-The local `thunderstorm-stub-server` remains useful for repeatable automated checks and CI-style contract validation, but it is not the primary manual acceptance target when a real THOR Thunderstorm service is available.
-
-## Optional Stub Server Setup
-
-Use this only for automated stub tests or when the real service is temporarily unavailable.
-
-Update and build the local stub server:
-
-```bash
-cd ../thunderstorm-stub-server
-git pull --ff-only
-go build -o thunderstorm-stub-server .
-```
-
-Start the stub server in a separate terminal:
-
-```bash
-cd /path/to/thunderstorm-stub-server
-rm -rf /tmp/thunderstorm-stub-uploads
-mkdir -p /tmp/thunderstorm-stub-uploads
-./thunderstorm-stub-server \
-  --port 8080 \
-  --uploads-dir /tmp/thunderstorm-stub-uploads \
-  --log-file /tmp/thunderstorm-stub-audit.jsonl
-```
-
-For stub-server runs, use:
-
-```text
-server: 127.0.0.1
-port: 8080
-```
-
-Inspect uploads and audit logs with:
-
-```bash
-ls -la /tmp/thunderstorm-stub-uploads
-tail -n 20 /tmp/thunderstorm-stub-audit.jsonl
-```
-
-The stub server validates the HTTP upload contract and records uploaded samples. It does not validate production Thunderstorm scanning behavior, authentication, deployment networking, or real-service operational behavior.
-
-## General Acceptance Criteria
-
-For each collector PR, record whether these points pass:
-
-- The collector runs on the intended runtime and operating system.
-- The collector uploads at least one text file and, where supported, one binary file.
-- Recursive directory traversal works when the collector claims to support it.
-- The configured source identifier appears in the uploaded records.
-- Dry-run mode, if supported, does not contact the server.
-- An unreachable Thunderstorm service fails visibly and does not hang indefinitely.
-- Missing, unreadable, or locked files do not crash the whole collector.
-- File size, age, and extension filters work where the collector claims to support them.
-- The automated stub-server harness passes for the collector selector.
-- Limitations documented in the collector README match observed behavior.
+- Automated suites and CI: [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md)
+- Rules for new collectors: [collector construction guide](../docs/COLLECTOR_CONSTRUCTION_GUIDE.md)
+- Earlier results: [8 October 2026 acceptance report](../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
 
 ## Manual Test Preparation
 
-### Collector-Specific Feature Scope
+1. **Pick the revision.** Test the exact collector file you will deploy, on the
+   target operating system and runtime.
+2. **Note the service.** Write down the Thunderstorm host, port and scheme
+   (HTTP or HTTPS). Replace the example server in README commands with it.
+3. **Agree on the feature scope.** Use the collector's README to list which
+   features it supports and which limitations are accepted. The
+   [acceptance criteria](#acceptance-criteria) are not a uniform contract for
+   every collector.
+4. **Choose a source identifier** per collector and test, so runs do not mix in
+   Thunderstorm:
 
-The general checklist is not a uniform feature contract. Before changing a collector, agree on its supported features and accepted limitations using that collector's README and intended runtime.
+   ```text
+   manual-<collector>-<test-type>-<tester>-<date>
+   ```
 
-Use these statuses for each feature or test:
+   For example `manual-bash-acceptance-alice-2026-05-30` or
+   `manual-powershell-locked-file-alice-2026-05-30`.
+5. **Create small test data** as described in [Manual Test Data](#manual-test-data).
+   Never point a collector at broad production directories during acceptance.
+
+### Result statuses
 
 | Status | Meaning |
 |---|---|
 | PASS | Supported feature verified on the recorded runtime. |
-| FAIL | Supported feature does not behave as specified; fix it before merging. |
+| FAIL | Supported feature does not behave as specified; fix it before deployment. |
 | NOT SUPPORTED | An intentional, reviewed limitation documented in the collector README. |
-| NOT TESTED | Missing runtime, service access, or evidence; this is not a pass. |
+| NOT TESTED | Missing runtime, service access or evidence. This is not a pass. |
 
-Record Python 2 separately from Python 3, and PowerShell 2 separately from PowerShell 3+. A successful PowerShell 2 script run under a modern PowerShell does not prove compatibility with the actual PowerShell 2 runtime. Likewise, dash is not a substitute for acceptance on the intended BusyBox/ash system.
+### Runtimes to record separately
 
-CI's shared smoke-test interface probes only decide which scripts can use that harness during the rollout. They do not define all required collector features. Python 2 is not installed on the default runner, but PR #46 adds focused regressions in pinned actual Python 2.7 and minimum Python 3.4 containers. This does not replace acceptance of the target OS/SSL build. An explicit shared-harness Python 2 selection without that runtime still fails rather than silently skipping.
+- **Python 2** separately from Python 3.
+- **PowerShell 2** separately from PowerShell 3+. A PowerShell 2 script that
+  runs under Windows PowerShell 5.1 or PowerShell 7 does not prove PowerShell 2
+  compatibility.
+- **BusyBox ash** separately from dash. Dash does not replace acceptance on the
+  intended BusyBox/ash system.
 
-The optional focused CI steps are centralized in #43; their collector-specific test files arrive with #44 through #48. Missing test files are skipped during preparation, not described as collector coverage. Windows PowerShell 5.1 and PowerShell 7 results must never be labeled actual PS2 certification. The updated Batch profile in #48 is a standalone cmd/JScript hybrid and requires enabled Windows Script Host, ADODB.Stream and trusted curl 8.4+; it deliberately does not implement collection markers. Check each branch's current README instead of assuming old requirements still apply.
+CI runs the Python regressions in pinned Python 2.7 and Python 3.4 containers.
+That does not replace a test with the target's own OS and SSL build.
 
-### Test Harness Prerequisites
+### Test harness prerequisites
 
-The integration harness in `tests/` requires Bash 4.3 or newer, GNU-compatible file utilities, and the mock server/API proxy. These are test-host requirements, not new dependencies of the collectors. On macOS, ensure the newer Bash and GNU utilities are on `PATH`; the system Bash is too old for this harness.
+The mock-server harness in `tests/` needs Bash 4.3 or newer and GNU-compatible
+file utilities. These are requirements of the test host, not of the collectors.
+On macOS, put a newer Bash and the GNU utilities first on `PATH`; the system
+Bash is too old.
 
-### Acceptance Record
+## Acceptance Criteria
 
-Use one acceptance record per collector PR. Do not mix results from different collectors under the same source identifier.
+Record PASS, FAIL, NOT SUPPORTED or NOT TESTED for each point:
 
-Before testing a collector, write down:
+- The collector runs on the intended runtime and operating system.
+- It uploads at least one text file and, where supported, one binary file.
+- Recursive traversal works where the collector claims it.
+- The configured source identifier appears in Thunderstorm.
+- Dry-run mode, if supported, does not contact the server.
+- An unreachable service fails visibly and does not hang.
+- Missing, unreadable or locked files do not crash the whole run.
+- Size, age and extension filters work where the collector claims them.
+- The [automated stub test](#automated-stub-tests) passes for the collector, or
+  an intentional environment skip is recorded.
+- The README's limitations match what you observed.
+
+A revision passes acceptance when all supported points pass and the tests show
+no silent data loss, no hang and no misleading success report. Add any
+limitation you found to the README.
+
+## Acceptance Record
+
+Keep one record per collector. Do not mix results from different collectors
+under one source identifier.
 
 ```text
-PR:
-Branch:
-Commit:
+Collector and file:
+Revision or release asset (commit or hash):
 Tester:
 Test date:
 Target OS:
@@ -161,50 +98,50 @@ Runtime version:
 Thunderstorm server:
 Thunderstorm port:
 URL scheme:
+Real service or stub:
 Source identifier:
+Files expected / files seen (Thunderstorm or stub uploads directory):
+Checks passed:
+Limitations, warnings, timeouts, unexpected exit codes:
 ```
 
-Use a source identifier that makes the run easy to find in Thunderstorm:
+Leave credentials and secrets out of the record.
 
-```text
-manual-<collector>-<test-type>-<tester>-<date>
-```
+For every run, keep the terminal output. If a command fails, keep the exit code
+and the last error lines. Capture the exit code right after the command:
 
-Examples:
+| Shell | Command |
+|---|---|
+| Unix shell | `echo "exit_code=$?"` |
+| PowerShell | `$LASTEXITCODE` |
+| `cmd.exe` | `echo %ERRORLEVEL%` |
 
-```text
-manual-bash-acceptance-alice-2026-05-30
-manual-python3-size-filter-alice-2026-05-30
-manual-powershell-locked-file-alice-2026-05-30
-```
-
-For every command that is expected to upload files, keep the terminal output. If the command fails, keep the exit code and the last visible error lines.
-
-On Unix-like systems, capture the exit code with:
+Record versions with these commands:
 
 ```bash
-echo "exit_code=$?"
+git rev-parse --short HEAD
+bash --version
+python3 --version
+python --version
+perl -v
+pwsh -v
 ```
-
-On Windows PowerShell, capture the exit code with:
 
 ```powershell
-$LASTEXITCODE
+$PSVersionTable
+cmd /c ver
 ```
 
-On Windows `cmd.exe`, capture the exit code with:
-
-```cmd
-echo %ERRORLEVEL%
-```
+For BusyBox, record the BusyBox version.
 
 ## Manual Test Data
 
-Create small, harmless files. Do not point collectors at broad production directories during acceptance testing. The goal is to validate collector behavior, not to upload a large live system sample set.
+Use small, harmless files. The goal is to check collector behavior, not to
+upload a live system.
 
-### Unix Test Data
+### Unix test data
 
-Use this structure for Bash, ash, Python, and Perl tests:
+For Bash, ash, Python and Perl:
 
 ```bash
 COLLECTOR="bash"
@@ -224,17 +161,20 @@ touch -t 200001010000 "$TEST_ROOT/filter/old.txt"
 chmod 000 "$TEST_ROOT/errors/unreadable"
 ```
 
-After unreadable-file testing, always restore permissions:
+Set `COLLECTOR` to `bash`, `ash`, `python` or `perl`. After the
+unreadable-path test, restore the permissions:
 
 ```bash
 chmod 755 "$TEST_ROOT/errors/unreadable"
 ```
 
-If the test is run as `root`, unreadable-file checks may not behave as expected because `root` can still read most files. Record that limitation instead of treating it as a collector failure.
+Run unreadable-path tests as a normal user. `root` can still read most files,
+so a root run does not test this case; record it as NOT TESTED rather than as
+a collector failure.
 
-### Windows Test Data
+### Windows test data
 
-Use this structure for PowerShell and Batch tests:
+For PowerShell and Batch:
 
 ```powershell
 $Collector = "powershell"
@@ -255,7 +195,8 @@ Set-Content -Path "$TestRoot\errors\ok.txt" -Value "readable"
 Set-Content -Path "$TestRoot\errors\locked.txt" -Value "locked"
 ```
 
-If `fsutil` requires elevation or is unavailable, create a large file with PowerShell instead:
+If `fsutil` needs elevation or is missing, create the large file with
+PowerShell instead:
 
 ```powershell
 [IO.File]::WriteAllBytes("$TestRoot\filter\large.txt", (New-Object byte[] 32768))
@@ -263,472 +204,105 @@ If `fsutil` requires elevation or is unavailable, create a large file with Power
 
 ## Manual Test Sequence
 
-Run these tests for each collector PR unless the collector README explicitly documents that the feature is unsupported.
-
-### Test 1: Help and Runtime Smoke Test
-
-Purpose:
-
-- Confirm that the intended interpreter can start the collector.
-- Confirm that missing dependencies are reported clearly.
-- Confirm that the collector does not require a broad system scan just to display usage or fail validation.
-
-Expected result:
-
-- Help output or validation output is readable.
-- Missing runtime dependencies are explicit, for example missing `curl`, missing Perl `LWP::UserAgent`, or blocked PowerShell execution policy.
-- The command does not upload files.
-
-### Test 2: Basic Upload
-
-Purpose:
-
-- Confirm the collector can upload normal text files.
-- Confirm the collector can upload binary files where supported.
-- Confirm recursive traversal finds nested files.
-- Confirm the configured source identifier appears in Thunderstorm.
-
-Use the collector-specific README command for the manual acceptance test. Set the scan directory to the test data `input` directory and use a unique source identifier.
-
-Expected result in Thunderstorm:
-
-- `sample.txt` is present.
-- `sample.bin` is present where binary upload is supported.
-- `nested.txt` is present for recursive collectors.
-- The source identifier exactly matches the command.
-
-Failure conditions:
-
-- The collector exits successfully but no upload appears in Thunderstorm.
-- The source identifier is missing or wrong.
-- Binary upload is truncated or corrupted on a collector that claims binary-safe upload support.
-- Nested files are missing on a collector that claims recursive traversal support.
-
-### Test 3: Dry Run
-
-Purpose:
-
-- Confirm dry-run mode does not contact Thunderstorm.
-- Confirm dry-run output still shows what would be processed.
-
-Use `127.0.0.1` with port `1` for this test. That endpoint should be unreachable, so any server contact would normally fail.
-
-Expected result:
-
-- The command exits successfully.
-- No new upload appears in Thunderstorm.
-- Output lists files that would be submitted, or clearly reports dry-run processing.
-
-Failure conditions:
-
-- A new upload appears in Thunderstorm.
-- The command fails only because `127.0.0.1:1` is unreachable.
-- Dry-run output is misleading or empty despite matching test files.
-
-### Test 4: Unreachable Thunderstorm Service
-
-Purpose:
-
-- Confirm network failures are visible.
-- Confirm the collector does not hang indefinitely.
-- Confirm failed uploads are not reported as successful.
-
-Use `127.0.0.1` with port `1` and the normal test input directory.
-
-Expected result:
-
-- The command exits non-zero or clearly reports upload failures.
-- The error mentions connection, upload, begin marker, or server failure.
-- The command returns within a reasonable time for that collector.
-- No new upload appears in Thunderstorm.
-
-Failure conditions:
-
-- The command hangs indefinitely.
-- The command exits successfully while all uploads failed.
-- The output hides the network failure.
-
-### Test 5: Missing and Unreadable Paths
-
-Purpose:
-
-- Confirm one bad path does not stop all readable files.
-- Confirm warnings or failed-file counters are visible.
-
-Use one readable directory, one unreadable directory or locked file, and one missing directory.
-
-Expected result:
-
-- The readable file is uploaded.
-- Missing or unreadable paths are reported.
-- The collector does not terminate with an unhandled exception.
-- The final status does not imply that every file was uploaded successfully when some files were skipped or failed.
-
-Failure conditions:
-
-- The readable file is not uploaded because another path failed.
-- The collector crashes without a useful message.
-- The collector silently ignores unreadable input while reporting full success.
-
-### Test 6: Filter Behavior
-
-Purpose:
-
-- Confirm file size, age, and extension filters include and exclude the intended files.
-
-Use the files in the `filter` test directory.
-
-Expected result:
-
-- Small files are uploaded when they match the active filter.
-- Oversized files are skipped when a size limit is set.
-- Old files are skipped when an age limit excludes them.
-- Extension filters include only the requested extensions.
-
-Failure conditions:
-
-- Filtered-out files appear in Thunderstorm.
-- Expected included files are missing.
-- The collector output does not explain skipped files where the collector claims to report filtering.
-
-### Test 7: README Accuracy
-
-Purpose:
-
-- Confirm documentation matches observed behavior.
-
-After testing, compare the collector README with actual results.
-
-Expected result:
-
-- Intended use, requirements, capabilities, and limitations are accurate.
-- Any observed runtime limitation is already documented or should be added before merge.
-
-Failure conditions:
-
-- README claims support for behavior that failed during testing.
-- README omits a material dependency or limitation found during testing.
-
-## Checking Out a PR
-
-Use a local branch that tracks the remote PR branch:
-
-```bash
-git checkout -B codex/script-bash origin/codex/script-bash
-```
-
-Replace `codex/script-bash` with the branch under review.
-
-Before testing, confirm the expected branch:
-
-```bash
-git status --short --branch
-```
-
-## PR #43: Shared Test Harness
-
-Checkout:
-
-```bash
-git checkout -B codex/script-test-base origin/codex/script-test-base
-```
-
-What to review:
-
-- `.github/workflows/script-collectors.yml` adds Linux and Windows script collector test jobs.
-- `scripts/tests/` contains shared operational, detection, filter, and compliance tests.
-- The harness can run selected collectors instead of forcing every collector to exist in every branch.
-
-Suggested checks:
-
-```bash
-bash -n scripts/tests/run_detection_tests.sh \
-  scripts/tests/run_e2e_compliance.sh \
-  scripts/tests/run_filter_tests.sh \
-  scripts/tests/run_operational_tests.sh
-
-ruby -e 'require "yaml"; YAML.load_file(".github/workflows/script-collectors.yml")'
-```
-
-Manual collector acceptance is not required for this PR. This PR is about test infrastructure.
-
-## PR #49: Layout and Documentation
-
-Checkout:
-
-```bash
-git checkout -B codex/script-layout-docs origin/codex/script-layout-docs
-```
-
-What to review:
-
-- Collectors are organized below `scripts/bash`, `scripts/ash`, `scripts/python`, `scripts/perl`, `scripts/powershell`, and `scripts/batch`.
-- `scripts/README.md` explains which collector should be used in which scenario.
-- Each collector directory has a README with intended use, requirements, capabilities, limitations, manual acceptance tests, robustness tests, and automated stub test commands.
-- `Makefile` packages the new script directory layout for releases.
-
-Suggested checks:
-
-```bash
-bash -n scripts/tests/run_detection_tests.sh \
-  scripts/tests/run_e2e_compliance.sh \
-  scripts/tests/run_filter_tests.sh \
-  scripts/tests/run_operational_tests.sh
-
-ruby -e 'require "yaml"; YAML.load_file(".github/workflows/script-collectors.yml")'
-
-make -n release-scripts
-```
-
-Manual collector acceptance is optional on this PR because it should not change collector behavior. It should be reviewed primarily for structure, documentation quality, and release packaging.
-
-## PR #44: Bash Collector
-
-Checkout:
-
-```bash
-git checkout -B codex/script-bash origin/codex/script-bash
-```
-
-Detailed manual test instructions:
-
-```text
-scripts/bash/README.md
-```
-
-Manual test procedure:
-
-- Set `COLLECTOR="bash"` when creating Unix test data.
-- Run the README manual acceptance command against the real Thunderstorm service with `--dir "$TEST_ROOT/input"`.
-- Verify `sample.txt`, `sample.bin`, and `nested/nested.txt` in Thunderstorm.
-- Run the README dry-run command with `--server 127.0.0.1 --port 1` and verify no Thunderstorm upload appears.
-- Run the unreachable-service command with `--server 127.0.0.1 --port 1` and verify visible failure.
-- Run the missing/unreadable path command with the readable, unreadable, and missing test directories.
-- Run the file size filter command with the `filter` directory and verify `small.txt` is uploaded while `large.bin` is skipped.
-- Record whether warnings, failed counters, and exit codes match the README expectations.
-
-Automated stub test:
+Run each test unless the collector's README documents the feature as
+unsupported. Use the README's commands with the test data above. After each run,
+check in Thunderstorm which files arrived and under which source identifier.
+
+| # | Test | Run with | Pass | Fail |
+|---|---|---|---|---|
+| 1 | Help and runtime | Help or an invalid option | Readable output; missing dependencies named (for example `curl`, Perl `LWP::UserAgent`, a blocked execution policy); no upload | Crash, unclear error, or an upload |
+| 2 | Basic upload | The `input` directory | `sample.txt`, `sample.bin` (where binary upload is supported) and `nested.txt` (for recursive collectors) arrive under the exact source identifier | Success exit without uploads; wrong or missing source; truncated binary; missing nested file |
+| 3 | Dry run | Server `127.0.0.1`, port `1` | Exit 0; output lists the files it would submit; no upload | An upload; a failure caused by the unreachable port; empty or misleading output |
+| 4 | Unreachable service | Server `127.0.0.1`, port `1`, the `input` directory | Non-zero exit or clearly reported failures; the error names the connection, upload, begin marker or server; returns in reasonable time; no upload | Hangs; exits 0 although all uploads failed; hides the network error |
+| 5 | Missing and unreadable paths | One readable directory, one unreadable directory or locked file, one missing directory | The readable file arrives; bad paths are reported; no unhandled exception; the final status does not claim full success | The readable file is missing; crash without a useful message; silent success |
+| 6 | Filters | The `filter` directory | Small files arrive when they match; oversized files skipped with a size limit; old files skipped with an age limit; only requested extensions with an extension filter | Filtered files arrive; expected files missing; skipped files unexplained where the collector claims to report them |
+| 7 | README accuracy | Compare the README with the results | Requirements, capabilities and limitations match | A claimed feature failed; a dependency or limitation is missing |
+
+For test 4, collectors that send [collection markers](../docs/COLLECTION_MARKERS.md)
+exit 2 when the begin marker gets no HTTP answer. Collectors or transports
+without markers report failed uploads instead. Each README states the exact
+exit code.
+
+## Collector-Specific Checks
+
+Run these in addition to the [test sequence](#manual-test-sequence). The README
+of each collector has the detailed cases.
+
+| Collector | Checks |
+|---|---|
+| [Bash](bash/README.md) | Run the size filter on `filter`: `small.txt` arrives, `large.bin` is skipped. Record whether warnings, failure counters and exit codes match the README. |
+| [POSIX sh / ash](ash/README.md) | See the list below the table. |
+| [Python](python/README.md) | Repeat the basic upload and dry run with the Python 2 collector on a real Python 2.7 runtime if Python 2 is in scope. For HTTPS, test `--tls`; test `--insecure` only if disabling verification is acceptable in that environment, and record it. Record Python 2 TLS or Unicode/path limitations as runtime limitations. |
+| [Perl](perl/README.md) | Check the dependency first with `perl -MLWP::UserAgent -e 1`. If the target needs HTTPS, test that host's own Perl SSL stack against the real service. |
+| [PowerShell](powershell/README.md) | Repeat the basic upload with the PowerShell 2 collector on a real PowerShell 2 host if it is in scope. Locked file: `ok.txt` arrives, `locked.txt` is skipped or reported failed. Extension filter: `include.exe` arrives, `skip.tmp` does not. Record the execution policy used, for example `-ExecutionPolicy Bypass`. |
+| [Batch](batch/README.md) | Run from `cmd.exe`; use PowerShell only to create the test files. Confirm that Windows Script Host and ADODB.Stream are enabled and that the collector uses a trusted `curl.exe` 8.4 or later. Extension filter: `include.txt` arrives, `skip.tmp` does not. Size filter: `small.txt` arrives, `large.txt` is skipped. Batch sends no collection markers. Weak error reporting is acceptable only if an operator can still see the failure. |
+
+POSIX sh / ash has the most transport-dependent behavior. Follow the README's
+isolated fixture, exact upload counts and exit codes, and check:
+
+- **Shell:** run every command with the target's shell (`sh`, `ash`, `dash` or
+  `busybox sh`).
+- **Transport:** record curl, GNU wget, or nc with `timeout`. BusyBox or
+  unknown wget alone must be refused before any upload. nc supports plain HTTP
+  only, sends no collection markers and needs strictly length-framed responses.
+- **Binary integrity:** for every supported transport, compare received size
+  or hash of text, binary, empty, nested and special-name files. Record a
+  transport you could not test as NOT TESTED.
+- **Unreachable service:** exit 2 with curl or GNU wget, exit 1 with nc, no
+  uploads. Warnings alone are not a pass.
+- **Missing or unreadable paths:** exit 1 while readable files are still
+  processed. Test permissions as a non-root user.
+- **Also test:** newline-path rejection, temporary/log/symlink exclusions, age
+  and size boundaries, and TLS where supported.
+
+## Automated Stub Tests
+
+The shared suite starts the
+[stub server](https://github.com/Nextron-Labs/thunderstorm-stub-server) itself.
+Build the stub in a sibling checkout, then run one selector per collector:
 
 ```bash
 THUNDERSTORM_TEST_COLLECTORS=bash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
   scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
-## PR #45: POSIX sh / ash Collector
+| Collector | Selector | Note |
+|---|---|---|
+| Bash | `bash` | |
+| POSIX sh / ash | `ash` | Also set `THUNDERSTORM_TEST_REQUIRE_ALL=1` |
+| Python 3 | `python3` | |
+| Python 2 | `python2` | Fails without a Python 2 runtime; skip only if Python 2 is intentionally missing on the test host, and record that |
+| Perl | `perl` | |
+| PowerShell 3+ | `ps3` | Needs PowerShell Core on a Unix-like host |
+| Batch | none | Use the GitHub Actions Windows job |
 
-Checkout:
+The GitHub Actions Windows job is the main automated check for the Windows
+collectors. The [testing overview](../docs/COLLECTOR_TESTING_OVERVIEW.md) has
+the full commands and explains which stub revision to use.
 
-```bash
-git checkout -B codex/script-ash origin/codex/script-ash
-```
+### Manual runs against the stub
 
-Detailed manual test instructions:
-
-```text
-scripts/ash/README.md
-```
-
-Manual test procedure:
-
-- Set `COLLECTOR="ash"` when creating Unix test data.
-- Run all commands with the shell that represents the target environment, for example `sh`, `ash`, `dash`, or `busybox sh`.
-- Run the README manual acceptance command against the real Thunderstorm service with the test `input` directory.
-- Follow the current ash README's isolated eight-file fixture, exact upload counts, exit codes and eleven acceptance sections rather than treating this overview as the detailed test procedure.
-- Binary integrity is required for every supported ash transport. Verify text, binary, empty, nested and special-name files by received size/hash; record unavailable backend evidence as NOT TESTED.
-- Run the dry-run test against `127.0.0.1:1` and verify no upload appears.
-- Unreachable-service testing must produce exit 2 with curl/GNU wget or exit 1 with nc, with no uploads. Warnings alone are not a pass.
-- Missing/unreadable paths must produce exit 1 while readable files are still processed. Test permissions as non-root.
-- Test rejection of newline paths, temporary/log/symlink exclusions, age/size boundaries and TLS trust where supported.
-- Record the actual transport: curl, GNU wget, or nc plus timeout. BusyBox/unknown wget alone must be refused before uploads. Netcat supports only plain HTTP, no collection markers, and strict length-framed responses.
-
-Automated stub test:
+Use this only when the real service is unavailable. Start the stub in a
+separate terminal:
 
 ```bash
-THUNDERSTORM_TEST_COLLECTORS=ash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  THUNDERSTORM_TEST_REQUIRE_ALL=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
+cd /path/to/thunderstorm-stub-server
+go build -o thunderstorm-stub-server .
+rm -rf /tmp/thunderstorm-stub-uploads
+mkdir -p /tmp/thunderstorm-stub-uploads
+./thunderstorm-stub-server \
+  --port 8080 \
+  --uploads-dir /tmp/thunderstorm-stub-uploads \
+  --log-file /tmp/thunderstorm-stub-audit.jsonl
 ```
 
-## PR #46: Python Collectors
-
-Checkout:
+Point the collector at server `127.0.0.1`, port `8080`. Inspect what arrived:
 
 ```bash
-git checkout -B codex/script-python origin/codex/script-python
+ls -la /tmp/thunderstorm-stub-uploads
+tail -n 20 /tmp/thunderstorm-stub-audit.jsonl
 ```
 
-Detailed manual test instructions:
-
-```text
-scripts/python/README.md
-```
-
-Manual test procedure:
-
-- Set `COLLECTOR="python"` when creating Unix test data.
-- Run the Python 3 README manual acceptance command against the real Thunderstorm service with the test `input` directory.
-- Verify `sample.txt`, `sample.bin`, and `nested/nested.txt` in Thunderstorm.
-- Repeat the same basic upload test with the Python 2 collector on a real Python 2.7 runtime if Python 2 support is in scope.
-- Run the dry-run test against `127.0.0.1:1` for Python 3, and repeat for Python 2 if in scope.
-- Run the unreachable-service test and verify a visible connection failure.
-- Run missing/unreadable path testing and verify readable files still upload.
-- Run the file size filter test and verify `small.txt` uploads while `large.bin` is skipped.
-- If HTTPS is required, test `--tls`; if the certificate is private or self-signed, test the documented insecure mode only if that is acceptable for the environment.
-- Record any Python 2 TLS or Unicode/path limitation as a runtime limitation.
-
-Automated stub tests:
-
-```bash
-THUNDERSTORM_TEST_COLLECTORS=python3 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
-
-THUNDERSTORM_TEST_COLLECTORS=python2 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
-```
-
-Skip the Python 2 automated test only if Python 2 is intentionally unavailable on the test machine. Record that as a test environment limitation.
-
-## PR #47: Perl Collector
-
-Checkout:
-
-```bash
-git checkout -B codex/script-perl origin/codex/script-perl
-```
-
-Detailed manual test instructions:
-
-```text
-scripts/perl/README.md
-```
-
-Manual test procedure:
-
-- Set `COLLECTOR="perl"` when creating Unix test data.
-- Verify the runtime dependency before testing with `perl -MLWP::UserAgent -e 1`.
-- Run the README manual acceptance command against the real Thunderstorm service with the test `input` directory.
-- Verify `sample.txt`, `sample.bin`, and `nested/nested.txt` in Thunderstorm.
-- Run the dry-run test against `127.0.0.1:1` and verify no upload appears.
-- Run the unreachable-service test and verify a visible connection failure.
-- Run missing/unreadable path testing and verify readable files still upload.
-- Run the file size filter test and verify `small.txt` uploads while `large.bin` is skipped.
-- If HTTPS is required on the target host, explicitly test that host's Perl SSL stack against the real service.
-
-Automated stub test:
-
-```bash
-THUNDERSTORM_TEST_COLLECTORS=perl THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
-```
-
-## PR #48: Windows Collectors
-
-Checkout:
-
-```bash
-git checkout -B codex/script-windows origin/codex/script-windows
-```
-
-Detailed manual test instructions:
-
-```text
-scripts/powershell/README.md
-scripts/batch/README.md
-```
-
-Manual test procedure for PowerShell:
-
-- Set `$Collector = "powershell"` when creating Windows test data.
-- Run the README PowerShell 3+ manual acceptance command against the real Thunderstorm service with `$TestRoot\input`.
-- Verify `sample.txt` and `sample.bin` in Thunderstorm.
-- Repeat the basic upload test with the PowerShell 2 collector on a real PowerShell 2 host if PowerShell 2 support is in scope.
-- Run the unreachable-service test against `127.0.0.1:1` and verify visible failure.
-- Run the missing-folder test and verify the collector reports the issue without an unhandled exception.
-- Run the locked-file test and verify `ok.txt` uploads while `locked.txt` is skipped or reported failed.
-- Run the extension filter test and verify `include.exe` uploads while `skip.tmp` is absent.
-- Record the execution policy used, for example `-ExecutionPolicy Bypass`.
-
-Manual test procedure for Batch:
-
-- Run tests from `cmd.exe`, not PowerShell, unless PowerShell is only used to prepare test files.
-- Confirm `curl.exe` is available with `where curl`.
-- Run the README Batch manual acceptance command against the real Thunderstorm service with `%TEMP%\ts-batch-acceptance` or the prepared `$TestRoot\input` path translated to `%TESTDIR%`.
-- Verify the matching `.txt` file appears in Thunderstorm.
-- Run the unreachable-service test against `127.0.0.1:1` and verify curl/upload errors are visible.
-- Run the missing-folder test and verify the collector reports no matching files or invalid input without crashing the shell.
-- Run the extension filter test and verify `include.txt` uploads while `skip.tmp` is absent.
-- Run the file size filter test and verify `small.txt` uploads while `large.txt` is skipped.
-- Treat weak Batch error reporting as acceptable only if the failure is visible enough for an operator to detect.
-
-Automated checks:
-
-- Use the GitHub Actions Windows job as the primary automated Windows validation.
-- If PowerShell Core is available on a Unix-like machine, run:
-
-```bash
-THUNDERSTORM_TEST_COLLECTORS=ps3 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
-```
-
-## Evidence to Record
-
-For each collector PR, record:
-
-- Branch and commit SHA tested.
-- Operating system and runtime version, for example Bash version, BusyBox version, Python version, Perl version, PowerShell version, or Windows version.
-- Whether the real Thunderstorm service and/or the stub server was used.
-- Thunderstorm endpoint details, excluding credentials or secrets.
-- The source identifier used in the test.
-- Number of files expected and number of files observed in Thunderstorm.
-- For stub runs, number of files observed in `/tmp/thunderstorm-stub-uploads`.
-- Which robustness checks passed.
-- Any limitation, warning, timeout, or unexpected exit code.
-
-Useful commands:
-
-```bash
-git rev-parse --short HEAD
-bash --version
-python3 --version
-python --version
-perl -v
-pwsh -v
-```
-
-On Windows:
-
-```powershell
-$PSVersionTable
-cmd /c ver
-```
-
-## Merge Decision
-
-A collector PR is ready to merge when:
-
-- The automated CI checks are green.
-- The automated stub-server test for that collector passes or an intentional environment skip is documented.
-- The manual acceptance test from the collector README passes against the real THOR Thunderstorm service.
-- The robustness checks do not reveal silent data loss, hangs, or misleading success reports.
-- The README accurately describes any limitation found during testing.
-
-Recommended merge sequence after acceptance remains:
-
-1. Merge #43.
-2. Merge #49.
-3. Merge accepted collector PRs #44 through #48.
-
-If a collector fails manual acceptance, keep its PR open and merge only the PRs that passed.
-
-## Collector Construction Guide
-
-The separate documentation-only [PR #52](https://github.com/NextronSystems/thunderstorm-collector/pull/52)
-provides the collector construction guide for coding agents targeting other
-languages, runtime versions, operating systems or architectures. It covers the
-verified upload protocol, selectors, failure/security/resource semantics, optional
-capability profiles, acceptance matrix and a reusable agent assignment.
-
-It is not another collector implementation and does not certify untested platforms.
-Optional markers and the full feature set of one language remain optional; actual
-target tests and human acceptance are still required. After merging the guide,
-find it at `docs/COLLECTOR_CONSTRUCTION_GUIDE.md`.
+The stub checks the HTTP upload contract and stores samples. It does not check
+real scanning, authentication, deployment networking or how the real service
+behaves in operation.

@@ -85,7 +85,7 @@ Uploads are always asynchronous; check received samples and analysis results on 
 
 ## Manual Acceptance Testing
 
-Each language guide contains acceptance cases for that collector. Run them against the exact source revision or release asset you intend to deploy, starting with synthetic files and explicit directories.
+Each language guide contains or links to acceptance cases for that collector (Bash: [TESTING.md](bash/TESTING.md)). Run them against the exact source revision or release asset you intend to deploy, starting with synthetic files and explicit directories.
 
 Use the shared [test preparation](MANUAL_TESTING_GUIDE.md#manual-test-preparation) and [acceptance record](MANUAL_TESTING_GUIDE.md#acceptance-record) to capture runtime, service, revision/hash, collection scope, and server-side results. The older PR-stack sections in that document describe the original review process; the collectors are now merged.
 

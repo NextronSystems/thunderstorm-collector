@@ -234,3 +234,5 @@ protocol, optional features, limits, acceptance tests and a reusable
 coding-agent assignment. Server developers find the run start/end protocol in
 [collection markers](docs/COLLECTION_MARKERS.md). For custom integrations, see
 the [thunderstormAPI Python library](https://github.com/NextronSystems/thunderstormAPI).
+
+Documentation changes follow the [documentation style guide](docs/DOCUMENTATION_STYLE.md).
