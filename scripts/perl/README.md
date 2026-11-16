@@ -1,271 +1,165 @@
 # Perl Collector
 
-Use on Unix-like or legacy hosts where Perl and LWP are available. The standalone script has a Perl 5.8.1 syntax floor and requires LWP::UserAgent 6+, LWP::Protocol::http, HTTP::Request, JSON::PP, Encode and Sys::Hostname. It also loads the standard Getopt::Long, Cwd, File::Spec, Fcntl and POSIX modules. HTTPS additionally requires LWP::Protocol::https and IO::Socket::SSL with a usable CA store. Tests on modern Perl do not certify every 5.8/SSL build; validate the actual target.
+[thunderstorm-collector.pl](thunderstorm-collector.pl) uploads files from a
+Unix-like or legacy system to a THOR Thunderstorm service, which analyzes them.
 
-For alternatives, use the [script chooser](../README.md#choosing-a-collector).
-See [download guidance](../../README.md#download-a-collector) for release availability;
-the options below describe the current source collector.
+Alternatives: [script chooser](../README.md#choosing-a-collector) ·
+[scanning without a collector](../../docs/SCANNING_APPROACHES.md) ·
+[AIX SSHFS guide](../../integration-guides/aix/aix-power7-sshfs-scanning.md)
 
-For systems where running a collector is impractical, compare
-[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
-SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
-The guide also covers [AIX on POWER7](../../docs/SCANNING_APPROACHES.md#aix-on-power7-as-an-example).
-For that platform's mount and permission details, see the
-[AIX SSHFS scanning guide](../../integration-guides/aix/aix-power7-sshfs-scanning.md).
+> [!NOTE]
+> Tested against real THOR with Perl 5.34.1 and LWP 6.44. Older Perl and SSL
+> builds are not yet tested; test the actual target. For release downloads, see
+> the [download guidance](../../README.md#download-a-collector).
 
-### Dependency Setup
+## Requirements
 
-JSON::PP ships with upstream Perl 5.14+, but distribution packages can split out
-core modules even on current Perl. Do not assume that installing the interpreter
-provides JSON::PP or Sys::Hostname. On Fedora, install the relevant packages:
+| Requirement | Detail |
+|---|---|
+| Runtime | Perl **5.8.1** or newer |
+| Modules | LWP::UserAgent 6+, LWP::Protocol::http, HTTP::Request, JSON::PP, Encode, Sys::Hostname, plus the standard Getopt::Long, Cwd, File::Spec, Fcntl, POSIX |
+| HTTPS | LWP::Protocol::https and IO::Socket::SSL with a usable CA store |
+
+Distributions can package JSON::PP and Sys::Hostname separately, even on
+current Perl. On Fedora:
 
 ```sh
 sudo dnf install perl-libwww-perl perl-JSON-PP perl-Sys-Hostname
 ```
 
-Fedora lists [LWP](https://packages.fedoraproject.org/pkgs/perl-libwww-perl/perl-libwww-perl/),
-[JSON::PP](https://packages.fedoraproject.org/pkgs/perl-JSON-PP/perl-JSON-PP/)
-and [Sys::Hostname](https://packages.fedoraproject.org/pkgs/perl/perl-Sys-Hostname/)
-as separate packages. Other distributions and minimal installations may need
-additional module packages. From this directory, check all startup imports
-without scanning or uploading files:
+Check the modules without collecting:
 
 ```sh
 perl -c ./thunderstorm-collector.pl
-```
-
-For HTTPS, also check the optional modules, then test the target's CA store and
-TLS behavior as described below:
-
-```sh
 perl -MLWP::Protocol::https -MIO::Socket::SSL -e 'print "HTTPS modules available\n"'
 ```
 
-## Configuration and Startup Output
+Sources: Fedora packages
+[LWP](https://packages.fedoraproject.org/pkgs/perl-libwww-perl/perl-libwww-perl/) ·
+[JSON::PP](https://packages.fedoraproject.org/pkgs/perl-JSON-PP/perl-JSON-PP/) ·
+[Sys::Hostname](https://packages.fedoraproject.org/pkgs/perl/perl-Sys-Hostname/)
 
-The `USER CONFIGURATION` block near the top contains one commented setting per
-line. Set `$THUNDERSTORM_SERVER` (hostname/IP without scheme/port/path), optionally
-`$SOURCE`, and `@SCAN_DIRS`, for example `('/var/www', '/home/alice')`. The broad
-default root is `/`. Missing server configuration exits 2 with instructions.
-Command-line values override header values; the first `--dir` replaces the whole
-header root list, and further `--dir` options add roots. `--no-tls`, `--verify-tls`,
-`--no-dry-run` and `--no-debug` disable corresponding header choices.
+## Quick Start
 
-Defaults are **30 days since modification** and **2048 KiB (2 MiB)**; older/larger
-files are intentionally not collected. The console log shows resolved roots and
-effective limits before collection, including with `--dry-run`. To retain console
-output, append `2>&1 | tee /path/outside-input/collector.log` to your command, but
-capture the collector exit code separately: the pipeline may report tee's status.
-The collector does not create a log file itself. Keep captured logs outside the
-input directories and review a dry-run before enabling uploads.
-`--debug` adds `[DEBUG]` lines on stderr for collection marker answers, which are
-otherwise ignored without output. Errors and the startup scope are always reported.
+Copy the script to the system and change to its directory. Replace the server
+and the directory, then preview which files would be uploaded:
 
-## Capability Profile
+```sh
+perl ./thunderstorm-collector.pl \
+  --server thunderstorm.example.internal \
+  --dir /path/to/collection --source incident-123 --dry-run
+```
 
-- Iterative recursive regular-file collection, binary/empty/Unicode/newline names. Symlink entries and special files are skipped; explicit roots resolve physically. Queued directories and their ancestor identities are rechecked before traversal and around file reads; detected replacements fail rather than upload their contents. These portable path checks are not an atomic filesystem sandbox: a hostile process can still race between checks. Use a read-only snapshot or a quiescent, trusted tree when strict containment is required. Descriptor-relative traversal would require a different platform/dependency profile than the Perl 5.8.1 baseline.
-- Built-in exclusions: /proc, /dev, /sys, /run, /snap, /.snapshots, Linux detected special/network mounts, known cloud folders, /mnt trees, .dat, .npm and .lck paths. These are best effort, not a security boundary.
-- Default age 30 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
-- Default size 2048 KiB; --max-size-kb 1..204800 includes exact limit. Bounded in-memory snapshot precedes network access; multipart construction needs several times the configured file size in RAM. Replaced/changed/unreadable files fail; newly oversized files are skipped. Not a filesystem-wide atomic snapshot.
-- Async /api/checkAsync only; no synchronous mode, and --async is accepted and ignored so existing command lines keep working. Complete 2xx means accepted, not finished analysis; no polling/resume/deduplication. Lost responses/retries can duplicate uploads.
-- Optional markers: an HTTP answer other than 2xx (404/501 from a server without marker support, any other status) is ignored without output; uploads then carry no scan ID, and marker answers never change the exit status. Real JSON parsing rather than regex extraction. Only a top-level JSON string is used as the scan ID; numbers, booleans, arrays and objects are ignored. Begin retries once after two seconds unless the answer was 404/501. The begin marker is the first request to the server: if neither attempt gets an HTTP answer (connection refused, DNS/TLS failure, timeout, empty or incomplete reply), the collector exits 2 before uploading. A failed end or interrupted marker is ignored. SIGINT/SIGTERM sets an interruption flag; network I/O completes or times out before best-effort interrupted marker and exit 1. No further uploads after interruption is observed.
-- --retries 1..10 counts total attempts; 503 integer Retry-After caps at 120 seconds, exponential delays at 60. No automatic redirects or environment-proxy discovery.
-- Upload timeout 30 seconds and marker timeout 10 are LWP idle-I/O limits, not whole-run deadlines. Response limit 1 MiB; aborted or length-incomplete 2xx responses fail. Chunked HTTP/HTTPS responses must include complete chunks, a terminating zero chunk and complete trailers; socket EOF cannot substitute for those delimiters, including on older LWP/Net::HTTP installations.
-- --ssl verifies hostname and peer explicitly; --ca-cert FILE selects a CA; --insecure is explicit bypass. TLS-only options without --ssl are rejected, never silently converted to plaintext.
-- Dry-run sends no network requests, including markers, and does not prove file readability. Repeated --dir/-d options accumulate. Default root is /; use explicit approved roots.
-- Source (`--source` or legacy `--so`) is UTF-8 encoded in the query and JSON. Invalid filename bytes are replaced in metadata only; payloads remain unchanged. Port 1..65535; DNS/IPv4 or bracketed IPv6 such as `[::1]` or `[::ffff:127.0.0.1]`, subject to installed LWP/SSL support.
-- A reply must start with a real HTTP/1.x status line. LWP would read an SSH banner, SMTP greeting, TLS alert or HTML sent by a wrong port as an HTTP/0.9 success, so such a reply is a transport failure (exit 2 at the begin marker, otherwise a failed file).
-- The multipart file name has quotes, backslashes, semicolons and all control characters (including TAB, CR, LF and DEL) replaced by `_`; a strict multipart parser rejects control characters in a part header and the upload would never succeed. File bytes are untouched.
+The preview contacts no server and does not check readability. If the list
+looks right, upload:
 
-| Exit | Meaning |
+```sh
+perl ./thunderstorm-collector.pl \
+  --server thunderstorm.example.internal \
+  --dir /path/to/collection --source incident-123
+```
+
+For HTTPS, add `--ssl` and the HTTPS port.
+
+By default, the collector takes files changed in the **last 30 days**, up to
+**2048 KiB (2 MiB)**.
+
+## Configuration
+
+Edit defaults in the top `USER CONFIGURATION` block; options override them.
+
+- **Server:** `$THUNDERSTORM_SERVER`; a DNS name, IPv4 address or bracketed
+  IPv6 address, no scheme, port or path. Required.
+- **Directories:** `@SCAN_DIRS` defaults to `/`; set explicit roots. The first
+  `--dir` replaces the list; more `--dir` options add to it.
+- `--no-tls`, `--verify-tls`, `--no-dry-run` and `--no-debug` reverse header
+  settings.
+
+## Common Options
+
+`--help` lists all options.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-s`, `--server HOST` | none | Thunderstorm server |
+| `-p`, `--port PORT` | 8080 | Server port |
+| `-d`, `--dir PATH` | `/` | Directory to collect; repeatable |
+| `--max-age DAYS` | 30 | Modified within N days; `0` disables |
+| `--max-size-kb KIB` | 2048 | Largest file, inclusive |
+| `--source NAME` | hostname | Source name; legacy alias `--so` |
+| `--dry-run` | off | List files, send nothing |
+| `--ssl`, `--tls` | off | Use HTTPS |
+| `--ca-cert FILE` | system trust | PEM CA file for HTTPS |
+| `-k`, `--insecure` | off | No TLS verification; testing only |
+| `--retries N` | 3 | Attempts per file, 1 to 10 |
+
+Progress shows on a terminal; `--no-progress` hides it. `--async` is ignored.
+
+## Exit Codes
+
+| Code | Meaning |
 |---|---|
-| 0 | All eligible files accepted or successful dry-run; intentional skips allowed |
-| 1 | Failed files, traversal/partial-root errors or interruption |
-| 2 | Invalid config/dependencies, no valid roots or no HTTP answer to the begin marker |
+| `0` | All selected files accepted, or a successful dry run |
+| `1` | Failed files, scan errors (such as one missing root) or interruption |
+| `2` | Invalid configuration, missing HTTPS modules, no usable root, or no HTTP answer to the begin marker |
 
-Unreadable directories count as Scan errors; unreadable selected files as Failed. Existing empty roots can succeed; missing roots cannot. A missing interpreter or startup module can fail before the collector's exit-code handling runs. Record the diagnostic and actual nonzero exit status rather than expecting a fixed value such as 255; these startup failures are outside the table above. Legacy Perl/SSL and Windows builds require their own target-system acceptance. Transport limits follow the [LWP documentation](https://metacpan.org/pod/LWP::UserAgent).
+Unreadable directories count as `Scan errors`, unreadable files as `Failed`. A
+missing module stops Perl itself, with its own nonzero code.
 
-## Basic Usage
+## Behavior Details
 
-From the directory containing the standalone script, replace the server and
-approved input path, then preview the selected files:
+### File selection
 
-```sh
-perl ./thunderstorm-collector.pl \
-  --server thunderstorm.example.internal --port 8080 \
-  --dir /path/to/approved/input --source host-example --dry-run
-```
+- Recursive, regular files only; symlinks and special files are skipped.
+- **Age** uses modification time. **Size** is inclusive; empty files count.
+- **Excluded:** `/proc`, `/dev`, `/sys`, `/run`, `/snap`, `/.snapshots`, `/mnt`,
+  `.dat`, `.npm`, `.lck`, cloud-sync folders and Linux network or special
+  mounts. Best effort only.
+- Directories are rechecked during the walk; a detected replacement fails.
 
-After reviewing the preview, enable uploads explicitly:
+### Uploads
 
-```sh
-perl ./thunderstorm-collector.pl \
-  --server thunderstorm.example.internal --port 8080 \
-  --dir /path/to/approved/input --source host-example --no-dry-run
-```
+- Each file is read into memory first; allow several times the size limit in
+  RAM. A file that changes meanwhile fails.
+- Uploads use `/api/checkAsync`: a 2xx answer means accepted, not analyzed.
+- Retry waits double, up to 60 s. HTTP 503 honors `Retry-After`, up to 120 s.
+- Redirects are not followed; proxy environment variables are ignored.
+- Quotes, backslashes, semicolons and control characters in the sent file name
+  become `_`; invalid UTF-8 in it is replaced. File contents are unchanged.
 
-Use `--help` for all options; for HTTPS, add `--ssl` and the appropriate port,
-with `--ca-cert /path/to/ca.pem` if a custom CA is required.
+### TLS
 
-## Manual Acceptance
+- `--ssl` verifies certificate and host name. `--ca-cert` and `--insecure` need
+  `--ssl`; they never fall back to plain HTTP.
 
-Test the exact collector revision to be deployed. Follow the shared [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
-and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record). Record the
-commit, OS/architecture, Perl/LWP/SSL/service versions, outputs and exit codes.
-Repeat the cases below on the actual target runtime.
+### Collection markers
 
-### 1. Isolated Setup
+Marker problems are shown only with `--debug` and never change the exit code.
+Exception: if the begin marker gets no HTTP answer on both attempts, the run
+exits with 2 before uploading. See
+[collection markers](../../docs/COLLECTION_MARKERS.md).
 
-From this folder, substitute service values. Use a shell without `set -e` for
-expected failures. Windows Perl builds require equivalent isolated fixtures and path tests.
+On SIGINT or SIGTERM, the current request finishes or times out; then the
+collector sends no more files, tries an "interrupted" marker and exits with 1.
 
-```sh
-PERL=perl
-COLLECTOR="$(pwd)/thunderstorm-collector.pl"
-SERVER=thunderstorm.example.internal
-PORT=8080
-SOURCE=manual-perl-yourname
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ts-perl.XXXXXX")
-mkdir -p "$ROOT/input/sub"
-printf 'text\n' > "$ROOT/input/plain.txt"
-printf '\000\001\377THUNDER\n' > "$ROOT/input/binary.bin"
-: > "$ROOT/input/empty.bin"
-printf 'nested\n' > "$ROOT/input/sub/nested.txt"
-printf 'spaces\n' > "$ROOT/input/file with spaces.txt"
-printf 'semicolon\n' > "$ROOT/input/semi;colon.txt"
-printf 'quote\n' > "$ROOT/input/double\"quote.txt"
-collect() {
-  "$PERL" "$COLLECTOR" -s "$SERVER" -p "$PORT" --source "$SOURCE" \
-    --max-age 0 --retries 1 --no-dry-run --no-progress "$@"
-  code=$?; printf 'exit_code=%s\n' "$code"; return "$code"
-}
-```
+### Logging and limits
 
-### 2. Positive Upload
+- Roots, limits and errors go to stderr; there is no log file. When piping to
+  `tee`, check the collector's own exit code.
+- LWP idle timeouts: uploads 30 s, markers 10 s; not run deadlines.
+- Answers over 1 MiB, incomplete or not HTTP/1.x fail. Chunked answers need
+  the final zero chunk and trailers; socket EOF does not count.
 
-```sh
-collect -d "$ROOT/input"
-```
+Sources: [LWP::UserAgent](https://metacpan.org/pod/LWP::UserAgent)
 
-Expect exit 0 and seven accepted files including empty. Verify stored SHA-256/size
-of every payload, wait for async completion, check source if exposed (otherwise
-NOT OBSERVABLE). Optional marker 404/501 is acceptable. Empty-file rejection is
-a real backend failure, not a successful skip. Change SOURCE for subsequent runs.
+## Limitations
 
-### 3. No-network Dry-run and Unreachable Service
+- The path checks are not an atomic sandbox; a hostile process can still race
+  them. Use a read-only snapshot or a quiet, trusted tree when that matters.
+- No deduplication, resume or extension filter.
+- Retries after a lost answer can duplicate uploads.
+- Windows Perl builds need testing on the target.
 
-```sh
-collect -d "$ROOT/input" --dry-run -s 127.0.0.1 -p 1
-collect -d "$ROOT/input" -s 127.0.0.1 -p 1
-```
+## Testing
 
-Dry-run: exit 0, seven would-submit lines, zero requests. Live: exit 2 at begin,
-zero uploads and connection errors. Port 1 must actually be closed. Use an
-external watchdog for slow networks; idle timeouts are not run deadlines.
-
-### 4. Missing Roots and Repeated Options
-
-```sh
-collect -d "$ROOT/input" -d "$ROOT/missing"
-collect -d "$ROOT/missing"
-```
-
-Mixed: exit 1, seven uploads, one scan error. All missing: exit 2/no requests.
-The second `-d` must not discard the first.
-
-### 5. Permissions (Non-root/Non-administrator)
-
-```sh
-mkdir -p "$ROOT/permissions/blocked-dir"
-printf readable > "$ROOT/permissions/ok.txt"
-printf blocked > "$ROOT/permissions/blocked.txt"
-chmod 000 "$ROOT/permissions/blocked.txt" "$ROOT/permissions/blocked-dir"
-collect -d "$ROOT/permissions"
-chmod 600 "$ROOT/permissions/blocked.txt"
-chmod 700 "$ROOT/permissions/blocked-dir"
-```
-
-Exit 1, only ok.txt accepted, one failed file and one scan error. Always restore
-permissions. Root results do not validate this test.
-
-### 6. Exact Size and Age
-
-```sh
-mkdir "$ROOT/size" "$ROOT/age"
-dd if=/dev/zero of="$ROOT/size/limit.bin" bs=1024 count=1 2>/dev/null
-cp "$ROOT/size/limit.bin" "$ROOT/size/over.bin"
-printf x >> "$ROOT/size/over.bin"
-collect -d "$ROOT/size" --max-size-kb 1
-printf recent > "$ROOT/age/recent.txt"
-printf old > "$ROOT/age/old.txt"
-touch -t 202001010000 "$ROOT/age/old.txt"
-collect -d "$ROOT/age" --max-age 1
-collect -d "$ROOT/age" --max-age 0
-```
-
-Exit 0 each. Size: only 1024, not 1025 bytes. Age 1: recent only; age 0: both.
-
-### 7. Links and Special Names
-
-```sh
-printf outside > "$ROOT/outside.txt"
-ln -s "$ROOT/outside.txt" "$ROOT/input/link.txt"
-ln -s "$ROOT/input" "$ROOT/input/loop"
-collect -d "$ROOT/input"
-```
-
-Still seven uploads, exit 0; no outside data/loop. In fresh fixtures add Unicode
-and literal-newline names and verify all payload hashes and sanitized headers.
-
-### 8. TLS
-
-Use a test HTTPS service, its actual CA paths and the correct PORT:
-
-```sh
-collect -d "$ROOT/input" --ssl
-collect -d "$ROOT/input" --ssl --ca-cert /path/to/unrelated-valid-ca.pem
-collect -d "$ROOT/input" --ssl --ca-cert /path/to/correct-ca.pem
-collect -d "$ROOT/input" --ssl --insecure
-```
-
-For private untrusted certificates: first two exit 2/no uploads; correct CA and
-explicit insecure exit 0/seven uploads. Public trust can legitimately pass the
-first case. Missing HTTPS modules must fail visibly. Do not install test CAs
-globally; remove private keys afterwards.
-
-### 9. Interruption and Injected Failures
-
-Interrupt a slow run: exit 1, no normal end marker, best-effort interrupted
-marker if supported. Do not disrupt a shared real service for failure injection.
-The isolated regression suite covers 503 bounds, end HTTP 500, incomplete 2xx,
-malformed marker JSON and SIGTERM on the actual interpreters:
-
-```sh
-python3 -B ../tests/test_perl_robustness.py
-```
-
-The suite must execute without unexpected skips. Modern CI cannot establish every
-old OS/SSL build's compatibility. Keep remaining target-system checks explicit.
-
-## Shared Stub E2E
-
-For shared setup and test-host requirements, see the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md#shared-stub-integration).
-Run these collector-specific commands from the repository root:
-
-```sh
-THUNDERSTORM_TEST_COLLECTORS=perl THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  THUNDERSTORM_TEST_REQUIRE_ALL=1 scripts/tests/run_e2e_compliance.sh /path/to/stub
-```
-
-For the separate large-payload acceptance check:
-
-```sh
-STUB_BIN_PATH=/path/to/stub bash scripts/tests/test_perl_large.sh
-```
-
-This starts its own stub on a temporary port and uploads a generated file slightly
-larger than 3 MiB. It requires a successful collector exit and exactly one current-run
-audit entry with the expected source, unique filename, size, and SHA-256. Existing
-services/audit logs are not reused. The owned process and fixtures are removed on
-success and failure. An optional `STUB_LOG` must name a new file and is retained;
-otherwise the audit stays in the temporary workspace and is removed with it.
+[TESTING.md](TESTING.md): manual acceptance cases and automated tests.
