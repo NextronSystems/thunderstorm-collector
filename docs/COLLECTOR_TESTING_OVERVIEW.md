@@ -237,16 +237,16 @@ excludes uncommitted fixes. Example:
 ## Real THOR Acceptance
 
 Use the [manual acceptance guide](../scripts/MANUAL_TESTING_GUIDE.md) with the
-collector's guide; each guide's testing section points to its manual cases.
+collector's own manual cases:
 
 | Profile | Target-specific instructions |
 |---|---|
-| Bash | [Bash README](../scripts/bash/README.md) |
-| POSIX sh / ASH | [ASH README](../scripts/ash/README.md) |
-| Python 3 and 2 | [Python README](../scripts/python/README.md) |
-| Perl | [Perl README](../scripts/perl/README.md) |
-| PowerShell, both versions | [PowerShell README](../scripts/powershell/README.md) |
-| Windows Batch | [Batch README](../scripts/batch/README.md) |
+| Bash | [Bash tests](../scripts/bash/TESTING.md) |
+| POSIX sh / ASH | [ASH tests](../scripts/ash/TESTING.md) |
+| Python 3 and 2 | [Python tests](../scripts/python/TESTING.md) |
+| Perl | [Perl tests](../scripts/perl/TESTING.md) |
+| PowerShell, both versions | [PowerShell tests](../scripts/powershell/TESTING.md) |
+| Windows Batch | [Batch tests](../scripts/batch/TESTING.md) |
 
 > [!WARNING]
 > Use only small generated fixtures and explicit approved directories. Do not

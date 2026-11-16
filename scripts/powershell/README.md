@@ -1,24 +1,45 @@
 # PowerShell Collectors
 
-Use [thunderstorm-collector.ps1](thunderstorm-collector.ps1) with PowerShell 3
-or later. The standalone [thunderstorm-collector-ps2.ps1](thunderstorm-collector-ps2.ps1)
-is for hosts limited to PowerShell 2. Both use .NET and run without curl.
+The PowerShell collectors upload files from a Windows system to a THOR
+Thunderstorm service, which analyzes them. They use .NET and need no curl. They
+do not scan files locally.
 
-These instructions describe the current source files. Check the
-[release availability note](../../README.md#download-a-collector) before using a
-published asset; older releases have different options. See
-[script selection](../README.md#choosing-a-collector) for alternatives.
+- [thunderstorm-collector.ps1](thunderstorm-collector.ps1): PowerShell 3 or later
+- [thunderstorm-collector-ps2.ps1](thunderstorm-collector-ps2.ps1): standalone
+  file for PowerShell 2, with the same parameters
 
-For systems where running a collector is impractical, compare
-[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
-SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+Other collectors: [script chooser](../README.md#choosing-a-collector). If
+running a collector is impractical, compare
+[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md);
+SSHFS needs suitable SSH/SFTP access on the source, but no local collector.
+
+> [!NOTE]
+> Tested against real THOR with PowerShell 7.5.0 on macOS; Windows PowerShell
+> 5.1 has synthetic Windows CI checks only. Real PowerShell 2, PowerShell 3 and
+> old CLR versions are not yet tested: test the intended Windows/CLR
+> combination. This guide describes the current source; for a published asset,
+> check the [release availability note](../../README.md#download-a-collector),
+> because older releases have different options.
+> [Validation status](TESTING.md#validation-status)
+
+## Requirements
+
+| Requirement | `thunderstorm-collector.ps1` | `thunderstorm-collector-ps2.ps1` |
+|---|---|---|
+| Runtime | PowerShell language 3 or later | PowerShell language 2.0 with Add-Type and the full .NET Framework |
+| Collection markers | Supported | Need .NET 3.5 `System.Web.Extensions`; without it markers are off and uploads still work |
+| `-CACert`, `-Insecure` | .NET 4.5 or later | .NET 4.5 or later |
+| Service | HTTP/HTTPS Thunderstorm, no authentication | Same |
+
+Old systems without TLS 1.2 may not connect to modern HTTPS servers.
 
 ## Quick Start
 
-Copy `scripts/powershell/thunderstorm-collector.ps1` from the source checkout to
-a working directory on the target. In a new PowerShell session, change to that
-directory. Replace the server and `C:\Samples` with your endpoint and an existing
-absolute directory containing a few synthetic files. Preview the selection:
+1. Copy `thunderstorm-collector.ps1` (or `thunderstorm-collector-ps2.ps1` for
+   PowerShell 2) from the source checkout to a working directory on the target.
+2. Open a new PowerShell session and change to that directory.
+3. Replace the server and `C:\Samples` with your server and an existing
+   absolute directory with a few test files, then preview the selection:
 
 ```powershell
 .\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.example.internal `
@@ -26,7 +47,8 @@ absolute directory containing a few synthetic files. Preview the selection:
   -MaxAge 14 -MaxSize 2 -DryRun
 ```
 
-Review the selected paths, then enable uploads explicitly:
+The preview sends no requests. It does not check whether files are readable or
+whether TLS works. If the file list looks right, upload:
 
 ```powershell
 .\thunderstorm-collector.ps1 -ThunderstormServer thunderstorm.example.internal `
@@ -34,265 +56,191 @@ Review the selected paths, then enable uploads explicitly:
   -MaxAge 14 -MaxSize 2 -DryRun:$false
 ```
 
-For PowerShell 2, copy and invoke `thunderstorm-collector-ps2.ps1` with the same
-parameters. For HTTPS, add `-UseSSL` and the endpoint's port; `-CACert` supports a
-private CA on .NET 4.5 or later, as detailed below. Dry-run makes no requests and
-does not check payload readability or TLS connectivity. Uploads are always
-asynchronous; check received files and analysis results on the server. Follow the
-organization's execution policy for downloaded scripts and invoke the collector
-as a script, without dot-sourcing it.
+- **HTTPS:** add `-UseSSL` and the server's HTTPS port. For a private CA, add
+  `-CACert` (.NET 4.5 or later), see [TLS](#tls).
+- **Execution policy:** follow your organization's policy for downloaded
+  scripts. Run the collector as a script; do not dot-source it.
+- **Results:** uploads are asynchronous. Check received files and analysis
+  results on the server.
 
-## Configuration and Startup Output
+## Configuration
 
-Both files have a commented `USER CONFIGURATION` parameter block at the top.
-Set `ThunderstormServer` to a hostname/IP without scheme/port/path and review
-`Folder`, for example `@("C:\Samples", "D:\Evidence")`. The shipped root is `C:\`.
-Always pass explicit roots. An empty server exits 2 with instructions. Named
-parameters override header defaults; `-Folder` replaces the list. To turn off a
-switch enabled in the header, use `-DryRun:$false`, `-UseSSL:$false` or the corresponding switch name.
-`Extensions = @()` uses the visible `DefaultExtensions` list below the parameters;
-`-AllExtensions` disables suffix filtering. Exclusions still apply.
+Each file has a commented `USER CONFIGURATION` parameter block at the top.
+Named parameters override its defaults.
 
-Defaults are **30 days since modification** and **2 MiB (2048 KiB)**. Older/larger
-files are not collected. Startup output lists resolved roots, limits, and the
-extension selection, including in `-DryRun`. For a persistent console log on
-legacy PowerShell, use `Start-Transcript -Path C:\Logs\collector.log` before running
-the collector and `Stop-Transcript` afterwards. Store the transcript OUTSIDE the
-selected roots. The collector does not create its own log file.
+- **Server:** a hostname or IP address only: no scheme, port or path. Without
+  a server, the collector exits with **2** and instructions.
+- **Directories:** the shipped default is **`C:\`**. Always pass explicit
+  roots, for example `-Folder 'C:\Samples','D:\Evidence'`. `-Folder` replaces
+  the whole list.
+- **Extensions:** `Extensions = @()` uses the `DefaultExtensions` list just
+  below the parameters. A nonempty list replaces it; `-AllExtensions` turns
+  suffix filtering off. Directory exclusions still apply.
+- **Turning off header switches:** use `-DryRun:$false`, `-UseSSL:$false` and
+  so on.
 
-## Capability Profile
+At startup, the collector prints the resolved roots, the limits and the
+extension selection, also in a dry run. By default it collects files changed in
+the **last 30 days** and up to **2 MiB (2048 KiB)**.
 
-| Item | Behavior / limitation |
+## Common Options
+
+This is the complete list; the parameter block comments each one.
+
+| Parameter | Alias | Default | Purpose |
+|---|---|---|---|
+| `-ThunderstormServer HOST` | `-TS` | none | Thunderstorm server |
+| `-ThunderstormPort PORT` | `-TP` | 8080 | Server port, 1 to 65535 |
+| `-Folder PATH[,PATH]` | `-F` | `C:\` | Directories to collect recursively |
+| `-Source NAME` | `-S` | computer name | Source name shown in Thunderstorm |
+| `-MaxAge DAYS` | `-MA` | 30 | Days since last modification, 0 to 36500; `0` disables the filter |
+| `-MaxSize MIB` | `-MS` | 2 | Largest file in **MiB**, inclusive, 1 to 200 |
+| `-Extensions LIST` | | `DefaultExtensions` | Suffixes to collect, e.g. `'.exe','.ps1'` |
+| `-AllExtensions` | | off | Collect files with any suffix |
+| `-DryRun` | | off | List files without contacting the server |
+| `-UseSSL` | `-SSL` | off | Use HTTPS with certificate and hostname verification |
+| `-CACert FILE` | | system trust | Use this CA certificate for HTTPS; needs `-UseSSL` |
+| `-Insecure` | `-k` | off | Turn off TLS verification; testing only |
+| `-Retries N` | | 3 | Total upload attempts per file, 1 to 10 |
+| `-ServerWait SECONDS` | | 600 | How long to wait for an unreachable server, 0 to 86400 |
+| `-Debugging` | `-D` | off | Show marker diagnostics |
+| `-Progress` | | off | Print the submitted count; `-NoProgress` overrides it |
+
+## Exit Codes
+
+| Code | Meaning |
 |---|---|
-| Runtime | Modern: PowerShell language 3+. Legacy: language 2.0, Add-Type and full .NET required. |
-| Selection | Recursive literal paths; no junctions/symlinks; built-in extension allowlist or explicit Extensions / AllExtensions. Known cloud folder names excluded. Files that are reparse points are skipped too, except Data Deduplication, Windows Overlay Filter (CompactOS, `compact /exe`) and Single Instance Storage files, whose content is ordinary file data and is read normally. |
-| Age | Default 30 days; last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
-| Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
-| Upload | Binary-safe multipart file; empty files included. Async `/api/checkAsync` only; does not poll analysis results. |
-| Collection markers | Optional /api/collection. 404/501 disable markers. Any other HTTP answer to begin (after the retry) is ignored and uploads go without scan_id; only a begin that gets no HTTP answer to either attempt (no connection, timeout, TLS failure, closed or truncated reply) is fatal, exit 2, because it is the first contact with the service. End and interrupted marker failures never change the exit status. Marker problems are shown only with -Debugging. |
-| Marker IDs | Only top-level JSON object string IDs are used. Arrays, including single-element arrays, nested-only IDs and non-string IDs are ignored. |
-| Legacy JSON | PS2 needs .NET 3.5 System.Web.Extensions for marker parsing; if absent, markers are explicitly disabled (noted with -Debugging), not parsed with regex. Uploads still work. |
-| TLS | OS certificate AND hostname verification by default. TLS 1.2 enabled where the OS/.NET supports it; old systems may not connect to modern servers. Process-wide validation overrides left in the session by other scripts (`ServicePointManager` callback, legacy `CertificatePolicy`) are cleared for the run and restored afterwards. |
-| Custom TLS | CACert (one PEM/DER public root) and Insecure need per-request callbacks, available on .NET 4.5+. Older CLR rejects these options; use OS trust instead. No global trust installation. |
-| Custom CA limits | Platform hostname check retained, chain anchored at the supplied root, validity/server-auth checked; revocation checking is not implemented for this custom-root mode. Intermediate certificates sent by the server are used to build the chain, which must still end at the supplied root. |
-| Retries | Retries 1..10 is TOTAL upload attempts, default 3. HTTP 503 integer Retry-After capped at 120 seconds; no independent second retry budget. |
-| Server loss | After 3 files in a row got no answer other than 503 (busy), sending stops and `/api/status` is polled (2, 4, 8 ... up to 60 seconds apart) for up to ServerWait seconds, default 600, 0..86400. If the service answers, the run continues with the next file; otherwise it stops, sends a best-effort interrupted marker and exits 1. ServerWait 0 stops at once. |
-| Timeouts | Each read or write may stall for at most 30 seconds. An upload attempt may take 30 seconds plus the time to send its body at 64 KiB/s, so a large file over a slow link is not cut off. Markers use 10 seconds; begin retries once after 2 seconds. DNS/OS scheduling can add overhead. |
-| Exit | 0 = transfer/selection run completed, 1 = partial failures/interruption/service unreachable for ServerWait, 2 = invalid config/no usable roots/no answer to the begin marker. Marker HTTP answers never set the exit status. Parser/runtime launch errors can use the interpreter's code. |
-| Logging | Console only; no self-generated scan log beside the collector to accidentally upload. Debugging adds marker diagnostics; without it, marker problems (THOR 10 and current THOR 11 answer 404) are not shown. NoProgress overrides Progress. |
+| `0` | Run completed without failed uploads or scan errors |
+| `1` | Partial failure (failed uploads or scan errors, such as one missing root), interruption, or service unreachable for `ServerWait` |
+| `2` | Invalid configuration, no usable roots, or no HTTP answer to the begin marker |
 
-Snapshots are read before connecting, under a Windows read lock, then checked for
-size/mtime changes. Memory can be several times the largest selected file. Link and
-cloud exclusions are best effort, not an adversarial filesystem sandbox. Do not
-scan network shares, special files or actively hostile/mutating trees assuming
-those safeguards provide a security boundary. Windows paths are intended targets;
-Unix tests use regular isolated fixtures, not arbitrary Unix filesystem objects.
+Marker HTTP answers never set the exit status. Parser or runtime launch errors
+can return the interpreter's own code.
 
-A 32-bit PowerShell on 64-bit Windows runs under file-system redirection: %windir%\System32 shows the contents of %windir%\SysWOW64, so the real System32 is not collected. The collector prints a warning in that case; use 64-bit PowerShell (from a 32-bit host: %windir%\SysNative\WindowsPowerShell\v1.0\powershell.exe).
+The summary line reports `Checked`, `Submitted`, `Failed`, `Skipped` and
+`Scan errors`.
 
-Multipart filename metadata contains the full path with backslash, quote,
-semicolon and control characters replaced by underscores; file bytes are untouched.
-Use a new PowerShell process for deployment; TLS protocol settings are restored on
-normal exit. Ctrl+C is best effort; forced termination/host shutdown cannot guarantee
-an interrupted marker. No deduplication, resumable scans, syslog, parallel uploads
-or retry idempotency. Success means upload accepted, NOT that analysis completed or
-a detection was produced.
+## Behavior Details
 
-## Validation Status
+### File selection
 
-The [8 October 2026 acceptance report](../../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
-records both files running against real THOR under PowerShell 7.5.0 on macOS, and
-synthetic Windows CI checks under Windows PowerShell 5.1. Those results apply to
-the recorded revisions and assets; they do not establish actual PowerShell 2,
-PowerShell 3 or old CLR compatibility. Test the intended Windows/CLR combination.
+- **Walk:** recursive, literal paths. Junctions and symlinks are not followed.
+- **Reparse-point files** are skipped, except Data Deduplication, Windows
+  Overlay Filter (CompactOS, `compact /exe`) and Single Instance Storage files.
+  Their content is ordinary file data and is read normally.
+- **Cloud folders:** known cloud folder names are excluded, even when named as
+  a root.
+- **Age:** last **modification time** (UTC) at or after the start time minus
+  `MaxAge` days. A newer creation time does not override an old modification
+  time.
+- **Size:** inclusive, in MiB; out-of-range values are rejected, not clamped.
+  Empty files are included.
+- **Snapshots:** each file is read into memory under a Windows read lock before
+  connecting, then checked for size and modification-time changes. Memory use
+  can be several times the largest selected file.
+- **32-bit PowerShell on 64-bit Windows:** file-system redirection shows
+  `%windir%\SysWOW64` as `%windir%\System32`, so the real System32 is not
+  collected. The collector prints a warning. Use 64-bit PowerShell; from a
+  32-bit host: `%windir%\SysNative\WindowsPowerShell\v1.0\powershell.exe`.
 
-## Manual Acceptance Setup
+### Uploads and retries
 
-Follow the [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
-and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record) guidance. Transfer the chosen standalone file to the
-actual target, change into its directory, and run the following in PowerShell
-as a normal user. Choose one file and repeat the complete sequence separately
-for each profile on its intended host:
+- Uploads use asynchronous `/api/checkAsync` as one binary-safe multipart file.
+  The collector does not poll analysis results. Success means the upload was
+  accepted, **not** that analysis finished or produced a detection.
+- Redirects are not followed, and no proxy is used.
+- `Retries` counts **total** attempts, also for HTTP 503. A 503 `Retry-After`
+  in whole seconds is honored, capped at **120 seconds**; otherwise the
+  collector waits 2 seconds.
+- Backslashes, quotes, semicolons and control characters in the uploaded file
+  name become underscores. The file contents are unchanged.
 
-```powershell
-$Collector = (Join-Path $PWD 'thunderstorm-collector.ps1')
-# Legacy alternative:
-# $Collector = (Join-Path $PWD 'thunderstorm-collector-ps2.ps1')
-$PSVersionTable.PSVersion
-[Environment]::Version
-$Server = 'thunderstorm.example.internal'  # your authorized real service
-$Port = 8080
-$Tag = 'manual-ps-' + [Guid]::NewGuid().ToString('N')
-$Root = Join-Path $env:TEMP $Tag
-New-Item -ItemType Directory -Path $Root | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $Root 'input') | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $Root 'input\nested') | Out-Null
-[IO.File]::WriteAllText((Join-Path $Root 'input\plain.txt'), "harmless text")
-[IO.File]::WriteAllBytes((Join-Path $Root 'input\binary.bin'), [byte[]](0,1,255,84,72,10))
-[IO.File]::WriteAllBytes((Join-Path $Root 'input\empty.bin'), (New-Object byte[] 0))
-[IO.File]::WriteAllText((Join-Path $Root 'input\nested\space name.txt'), 'nested')
-[IO.File]::WriteAllText((Join-Path $Root 'input\semi;percent%PATH%!&.txt'), 'literal name')
-$InputDir = Join-Path $Root 'input'
-```
+### Server loss
 
-Keep the collector and logs outside the input directory.
+After **3 files in a row** got no answer other than 503 (busy), the collector
+stops sending and polls `/api/status`. Polls are 2, 4, 8 and up to 60 seconds
+apart, for up to `ServerWait` seconds (default **600**).
 
-For HTTPS, add -UseSSL to EVERY service command below, and -CACert with an approved
-public CA on a supported CLR if needed. Never copy the service license to the
-collector machine. HTTP transmits sample contents unencrypted.
+- If the service answers, the run continues with the next file.
+- Otherwise the run stops, sends a best-effort `interrupted` marker and exits
+  with **1**.
+- `-ServerWait 0` stops at once.
 
-## 1. Dry Run Without a Service
+### TLS
 
-```powershell
-& $Collector -ThunderstormServer 127.0.0.1 -ThunderstormPort 1 -Folder $InputDir -Source "$Tag-dry" -MaxAge 0 -AllExtensions -DryRun
-$LASTEXITCODE
-```
+- Certificate **and** hostname verification are on by default. TLS 1.2 is
+  enabled where the OS and .NET support it.
+- Process-wide validation overrides left by other scripts in the session
+  (`ServicePointManager` callback, legacy `CertificatePolicy`) are cleared for
+  the run and restored afterwards. The collector installs no global trust.
+- `-CACert` takes one public root certificate (PEM or DER). The chain must end
+  at that root; intermediates sent by the server are used to build it. The
+  hostname check, validity and server-auth usage are still checked;
+  **revocation is not checked** in this mode.
+- `-Insecure` turns verification off and prints a warning. Use it for testing
+  only.
+- `-CACert` and `-Insecure` need per-request callbacks (.NET 4.5 or later).
+  An older CLR rejects them with exit 2; use OS trust there.
 
-Expected: exit 0, five would-submit entries, submitted counter 0, NO HTTP requests
-including markers. The nonexistent service must not cause a failure.
+### Collection markers
 
-## 2. Real Upload, Bytes and Source
+The collector sends begin and end markers to `/api/collection` and tags uploads
+with the scan ID the server returns.
 
-```powershell
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $InputDir -Source "$Tag-basic" -MaxAge 0 -AllExtensions -Retries 1
-$LASTEXITCODE
-```
+- HTTP 404 or 501 turns markers off for the run. THOR 10 and current THOR 11
+  answer 404.
+- Any other HTTP answer to begin, after one retry, is ignored; uploads go
+  without a scan ID.
+- Marker problems never change the exit status, with one exception: if the
+  begin marker gets **no HTTP answer** on both attempts (no connection,
+  timeout, TLS failure, closed or truncated reply), the run stops with exit 2.
+  It is the first contact with the service.
+- Only a string `scan_id` at the top level of a JSON object is used. Arrays,
+  including one-element arrays, nested IDs and non-string IDs are ignored.
+- PowerShell 2 without `System.Web.Extensions` turns markers off; it does not
+  parse them with regular expressions.
+- Marker problems are shown only with `-Debugging`.
 
-Expected: exit 0, Checked 5 / Submitted 5 / Failed 0 / Scan errors 0. Independently
-confirm five stored files, including nested and empty. Compare SHA256 and sizes
-against the originals with service-side stored samples or audit output. On PS4+,
-Get-FileHash can hash the originals; on PS2 use an approved independent hash tool.
-Confirm the source string exactly where server output exposes it. Empty finding
-arrays are NOT proof of source metadata or byte integrity. Wait for async completion
-in the service before deciding whether scanning succeeded.
+See [collection markers](../../docs/COLLECTION_MARKERS.md) for the protocol.
 
-PS2 without a JSON parser disables collection markers; -Debugging shows it. Record
-NOT SUPPORTED rather than declaring the marker test passed.
+### Logging
 
-## 3. Extension, Age and Size Boundaries
+The collector logs to the console only, so it creates no log file it could
+upload. To keep a log, record a transcript **outside** the collected
+directories:
 
 ```powershell
-$Filter = Join-Path $Root 'filter'
-New-Item -ItemType Directory -Path $Filter | Out-Null
-[IO.File]::WriteAllText((Join-Path $Filter 'include.exe'), 'include')
-[IO.File]::WriteAllText((Join-Path $Filter 'skip.bin'), 'skip')
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $Filter -Source "$Tag-ext" -MaxAge 0 -Extensions '.exe' -Retries 1
-$LASTEXITCODE
-$Ages = Join-Path $Root 'age'
-New-Item -ItemType Directory -Path $Ages | Out-Null
-[IO.File]::WriteAllText((Join-Path $Ages 'old.txt'), 'old')
-[IO.File]::WriteAllText((Join-Path $Ages 'recent.txt'), 'recent')
-[IO.File]::SetLastWriteTimeUtc((Join-Path $Ages 'old.txt'), [DateTime]::Parse('2000-01-01').ToUniversalTime())
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $Ages -Source "$Tag-age" -MaxAge 1 -AllExtensions -Retries 1
-$LASTEXITCODE
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $Ages -Source "$Tag-age-off" -MaxAge 0 -AllExtensions -Retries 1
-$LASTEXITCODE
-$Sizes = Join-Path $Root 'size'
-New-Item -ItemType Directory -Path $Sizes | Out-Null
-[IO.File]::WriteAllBytes((Join-Path $Sizes 'limit.bin'), (New-Object byte[] 1048576))
-[IO.File]::WriteAllBytes((Join-Path $Sizes 'over.bin'), (New-Object byte[] 1048577))
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $Sizes -Source "$Tag-size" -MaxAge 0 -MaxSize 1 -AllExtensions -Retries 1
-$LASTEXITCODE
+Start-Transcript -Path C:\Logs\collector.log
+# run the collector
+Stop-Transcript
 ```
 
-Expected: all exit 0. Extension run uploads only include.exe; age run only recent.txt;
-age-off run both; size run only exactly 1 MiB limit.bin. Check rejected samples are
-absent from the service, not merely mentioned as skipped locally.
+### Timeouts and limits
 
-## 4. Unreachable Service and Invalid Configuration
+| Item | Limit |
+|---|---|
+| Read or write stall | 30 s each |
+| Upload attempt | 30 s plus the time to send the body at 64 KiB/s |
+| Marker requests | 10 s each; begin is retried once after 2 s |
+| Status polls during server loss | 10 s each |
+| Server answer | 1 MiB; a larger upload answer fails, a larger marker answer gives no scan ID |
 
-```powershell
-& $Collector -ThunderstormServer 127.0.0.1 -ThunderstormPort 1 -Folder $InputDir -Source "$Tag-offline" -MaxAge 0 -AllExtensions -Retries 1
-$LASTEXITCODE
-& $Collector -ThunderstormServer $Server -ThunderstormPort 0 -Folder $InputDir -DryRun
-$LASTEXITCODE
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $InputDir -MaxSize 201 -DryRun
-$LASTEXITCODE
-```
+DNS and OS scheduling can add time.
 
-Expected: invalid configurations exit 2 before network. Offline exits 2 after bounded
-begin attempts when markers are supported, or 1 for failed uploads when PS2 markers
-are disabled. No successful submissions; time the command. Do not test a broad C:\ scan.
+## Limitations
 
-## 5. Missing Roots and a Locked File
+- Link and cloud exclusions are best effort, not a security boundary. Do not
+  rely on them for network shares, special files or hostile, changing trees.
+- Windows paths are the intended targets. Unix tests use regular, isolated
+  fixtures only.
+- Use a new PowerShell process for deployment. TLS protocol settings are
+  restored on normal exit.
+- Ctrl+C is best effort. Forced termination or host shutdown cannot guarantee
+  an `interrupted` marker.
+- No deduplication, resumable scans, syslog, parallel uploads or retry
+  idempotency.
 
-```powershell
-$Missing = Join-Path $Root 'does-not-exist'
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder @($InputDir,$Missing) -Source "$Tag-missing" -MaxAge 0 -AllExtensions -Retries 1
-$LASTEXITCODE
-& $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $Missing -DryRun
-$LASTEXITCODE
-$Errors = Join-Path $Root 'errors'
-New-Item -ItemType Directory -Path $Errors | Out-Null
-[IO.File]::WriteAllText((Join-Path $Errors 'ok.txt'), 'readable')
-[IO.File]::WriteAllText((Join-Path $Errors 'locked.txt'), 'locked')
-$Lock = [IO.File]::Open((Join-Path $Errors 'locked.txt'),'Open','ReadWrite','None')
-try {
-  & $Collector -ThunderstormServer $Server -ThunderstormPort $Port -Folder $Errors -Source "$Tag-lock" -MaxAge 0 -AllExtensions -Retries 1
-  $LASTEXITCODE
-} finally { $Lock.Close() }
-```
+## Testing
 
-Expected: mixed roots exit 1 but all five readable files upload; all missing exit 2
-without network. Locked-file run exits 1, only ok.txt uploads, Failed 1. Always release
-the lock. Run the lock case on Windows; Unix sharing semantics are not equivalent.
-
-For an ACL-denied directory, use a separate throwaway non-admin account/test directory,
-deny only that directory under organizational policy, then restore the exact original
-ACL. Readable siblings should upload, scan_errors should increase and exit should be 1.
-Do not alter real user folders or consider an administrator/root permission test a pass.
-
-## 6. Junction Scope and Cloud Exclusion
-
-Create a junction using the target's approved tool (mklink /J or New-Item -ItemType
-Junction on newer PowerShell), pointing from the fixture input to a separate directory
-containing a unique harmless sentinel. Re-run the basic test with a new source.
-Expected: original five files only; sentinel absent; no loop/hang. Do NOT use recursive
-cleanup on the junction target: remove the junction itself first.
-
-Create Root\Dropbox\local.txt; scan Root\Dropbox explicitly. Expected: zero uploads,
-exit 0, because the known cloud root is excluded even when explicitly supplied.
-This is name-based protection, not detection of every cloud provider/offline placeholder.
-
-## 7. TLS Negative Tests
-
-Against an authorized HTTPS test endpoint with a valid public certificate, repeat
-the basic test with -UseSSL: five uploads, exit 0. For a private test CA, add -CACert
-C:\test\approved-root.pem on .NET 4.5+. Repeat with an unrelated CA: nonzero, no uploads.
-Use a deliberately wrong hostname on the TEST endpoint only: nonzero, no uploads,
-including with the approved CA. Do not change a production DNS entry.
-
-An untrusted test certificate must fail by default. -UseSSL -Insecure is an explicit
-test-only exception on a supported CLR; it prints a warning. Do not use it to make
-production acceptance pass. Actual old CLR must reject unsupported custom TLS options
-with exit 2 rather than disabling verification. Record old TLS endpoints separately.
-
-## 8. Retries, Incomplete Replies and Interruption
-
-Do NOT destabilize the real service. Run the synthetic loopback regression suite from
-the repository root (Python 3 is a TEST-HOST dependency, not a collector dependency):
-
-```powershell
-$env:POWERSHELL_RUNTIME = (Get-Process -Id $PID).Path
-python -B scripts/tests/test_powershell_robustness.py
-$env:POWERSHELL_COLLECTOR = (Resolve-Path scripts/powershell/thunderstorm-collector-ps2.ps1).Path
-python -B scripts/tests/test_powershell_robustness.py
-Remove-Item Env:\POWERSHELL_COLLECTOR
-Remove-Item Env:\POWERSHELL_RUNTIME
-```
-
-This checks complete/truncated replies, ignored redirects, bounded 503 retries and
-recovery, ignored marker failures, bytes, source escaping, filters and missing/locked files.
-Read skips: PS5.1/PS7 runs are not PS2 certification.
-
-For Ctrl+C, use a deliberately larger synthetic test tree against an authorized
-test service, interrupt once while uploading, and check no later files are sent.
-Expect nonzero exit and a best-effort interrupted marker only if supported.
-Record terminal/host behavior: killing the process is NOT the same as graceful Ctrl+C.
-
-## Cleanup and Acceptance Record
-
-Delete only this run's unique Root after releasing locks/removing junctions.
-Keep commit hash, OS, PowerShell AND CLR version, exact commands, exit codes,
-server-side byte/source evidence and each PASS/FAIL/NOT SUPPORTED/NOT TESTED result.
-Use the legacy file only after the intended old runtime has been tested.
+[TESTING.md](TESTING.md) has the validation status, the manual acceptance
+cases against a real Thunderstorm service and the automated loopback suite.

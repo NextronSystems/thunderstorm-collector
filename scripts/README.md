@@ -119,10 +119,10 @@ including licensing and evidence coverage.
 
 ## Testing
 
-**Manual acceptance:** each language guide's testing section contains or links
-to that collector's cases: [Bash](bash/README.md), [ash](ash/README.md),
-[Python](python/README.md), [Perl](perl/README.md),
-[PowerShell](powershell/README.md), [Batch](batch/README.md). Run them on the
+**Manual acceptance:** each collector has its cases in a `TESTING.md` next to
+its guide: [Bash](bash/TESTING.md), [ash](ash/TESTING.md),
+[Python](python/TESTING.md), [Perl](perl/TESTING.md),
+[PowerShell](powershell/TESTING.md), [Batch](batch/TESTING.md). Run them on the
 exact revision or release asset you will deploy, with synthetic files and
 explicit directories. Record the results with the shared
 [test preparation](MANUAL_TESTING_GUIDE.md#manual-test-preparation) and
