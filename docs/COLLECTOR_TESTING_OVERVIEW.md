@@ -273,7 +273,7 @@ and the README from the **same collector branch**:
 
 | Profile | Target-specific instructions |
 |---|---|
-| Bash | [Bash README](../scripts/bash/README.md) |
+| Bash | [Bash TESTING](../scripts/bash/TESTING.md) |
 | POSIX sh / ASH | [ASH README](../scripts/ash/README.md) |
 | Python 3 and 2 | [Python README](../scripts/python/README.md) |
 | Perl | [Perl README](../scripts/perl/README.md) |
