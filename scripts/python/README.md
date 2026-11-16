@@ -1,311 +1,159 @@
 # Python Collectors
 
-Use [thunderstorm-collector.py](thunderstorm-collector.py) with Python 3.4 or
-later. The standalone [thunderstorm-collector-py2.py](thunderstorm-collector-py2.py)
-is for legacy hosts with Python 2.7. Both need only the standard library; prefer
-Python 3 where available.
+Upload files to a THOR Thunderstorm service for analysis. Both scripts need
+only the standard library and take the same options:
 
-These instructions describe the current source files. Check the
-[release availability note](../../README.md#download-a-collector) before using a
-published asset; older releases have different options. For other runtimes, see
-[script selection](../README.md#choosing-a-collector). For VMware ESXi interpreter
-and deployment considerations, see the [ESXi guide](../README.md#vmware-esxi-use-the-python-collector).
+- [thunderstorm-collector.py](thunderstorm-collector.py): Python 3.4 or later;
+  prefer it
+- [thunderstorm-collector-py2.py](thunderstorm-collector-py2.py): Python 2.7
 
-For systems where running a collector is impractical, compare
-[SSHFS scanning from an analysis workstation and offline analysis](../../docs/SCANNING_APPROACHES.md).
-SSHFS requires suitable SSH/SFTP access on the source, without a local collector.
+Alternatives: [script chooser](../README.md#choosing-a-collector) ·
+[ESXi notes](../README.md#vmware-esxi-use-the-python-collector) ·
+[scanning without a collector](../../docs/SCANNING_APPROACHES.md)
+
+> [!NOTE]
+> Tested against real THOR with Python 3.9.6, 3.4.10 and 2.7.18; ESXi and other
+> legacy OS or SSL builds are not yet tested
+> ([validation status](TESTING.md#validation-status)). For release downloads,
+> see the [download guidance](../../README.md#download-a-collector).
+
+## Requirements
+
+| Requirement | Python 3 file | Python 2 file |
+|---|---|---|
+| Python | 3.4 or later | 2.7 |
+| Verified HTTPS | Supported | **2.7.9** or later; older versions refuse it |
 
 ## Quick Start
 
-Copy `scripts/python/thunderstorm-collector.py` from the source checkout to a
-working directory on the target, then run these commands from that directory.
-Replace the server and input path with your endpoint and an existing absolute
-directory containing a few synthetic files. Use the target's actual interpreter
-path if it is not `python3`.
+Copy `thunderstorm-collector.py` to the system, change to its directory and
+preview the selection with your server and directory:
 
 ```sh
 python3 ./thunderstorm-collector.py \
-  --server thunderstorm.example.internal --port 8080 \
-  --dirs /absolute/path/to/collector-test --source host-example \
-  --max-age 14 --max-size-kb 2048 --dry-run
+  --server thunderstorm.example.internal \
+  --dir /path/to/collection --source incident-123 --dry-run
 ```
 
-Review the selected paths, then enable uploads explicitly:
+The preview contacts no server and does not check readability. If the list
+looks right, upload:
 
 ```sh
 python3 ./thunderstorm-collector.py \
-  --server thunderstorm.example.internal --port 8080 \
-  --dirs /absolute/path/to/collector-test --source host-example \
-  --max-age 14 --max-size-kb 2048 --no-dry-run
+  --server thunderstorm.example.internal \
+  --dir /path/to/collection --source incident-123
 ```
 
-For the legacy variant, copy `scripts/python/thunderstorm-collector-py2.py` and
-substitute that filename and a Python 2.7 interpreter. For HTTPS, add `--tls` and
-the endpoint's port; use `--ca-cert /path/to/ca.pem` for a private CA. Python
-before 2.7.9 refuses verified HTTPS. Dry-run makes no requests and does not check
-payload readability or TLS connectivity. Uploads are always asynchronous;
-check received files and analysis results on the server.
+For Python 2.7, run `thunderstorm-collector-py2.py` instead. For HTTPS, add
+`--tls` and the HTTPS port.
 
-## Configuration and Startup Output
+By default, the collector takes files changed in the **last 30 days**, up to
+**2048 KiB (2 MiB)**.
 
-Both standalone files have the same commented `USER CONFIGURATION` block near
-the top. Set `THUNDERSTORM_SERVER` (hostname/IP, without scheme/port/path) and review
-`SCAN_DIRS`, for example `["/var/www", "/home/alice"]`. The default is the entire
-filesystem root, subject to exclusions below. Missing server configuration exits
-2 with an instruction; supplying `--server HOST` also satisfies the requirement.
-Always select explicit roots. CLI values override header values. `--dirs`,
-`--dir` and `-d` are aliases: supplying any of them replaces the header root
-list, and repeated options accumulate. `--no-tls`, `--verify-tls`,
-`--no-dry-run` and `--no-debug` disable corresponding enabled header flags.
-`SERVER_WAIT` (`--server-wait`) bounds how long a run waits for a lost server; see
-the capability profile below.
+## Configuration
 
-Defaults are **30 days since modification** and **2048 KiB (2 MiB)**. Older/larger
-files are intentionally excluded. The console log on stderr shows resolved roots
-and effective limits before collection, also with `--dry-run`. For a persistent
-log while keeping output visible, append `2>&1 | tee /path/outside-input/collector.log`
-to your chosen command. That pipeline's status may be tee's status;
-capture the collector's exit code separately when testing. No log file is created
-by the collector itself. Always review a dry-run before collecting real data.
+Edit defaults in the top `USER CONFIGURATION` block; options override them.
 
-## Capability Profile
+- **Server:** `THUNDERSTORM_SERVER`; a hostname or IP address, no scheme, port
+  or path. Required.
+- **Directories:** `SCAN_DIRS` defaults to the **filesystem root**; set
+  explicit roots. The first `--dir` replaces the list; more `--dir` options add
+  to it.
+- `--no-tls`, `--verify-tls`, `--no-dry-run` and `--no-debug` reverse header
+  settings.
 
-- Recursive regular files, walked iteratively so even a pathologically deep tree
-  cannot hit the recursion limit; symlink entries/special files are skipped, and a
-  directory is checked again right before it is listed, so one replaced by a symlink
-  in the meantime is skipped too (`[SKIP] No longer a directory`). Explicit roots
-  resolve physically. All extensions except built-in exclusions: `/proc`, `/dev`,
-  `/sys`, `/run`, `/snap`, `/.snapshots` and `/mnt` trees (WSL drives and mounted
-  shares often live below `/mnt`), `.dat`, `.npm`, and VM artifacts ending in `.vmdk`,
-  `.vswp`, `.nvram`, `.vmsd`, `.lck`. Cloud folders and Linux network/special mounts
-  are best-effort exclusions, not a security boundary. Explicit excluded roots remain
-  excluded.
-- Excluded trees and the network/special mounts listed in `/proc/mounts` are
-  skipped by path, before anything is stat()ed, and symlinks are never followed.
-  A stat on the mount point of an unresponsive hard NFS mount would block in the
-  kernel, where not even SIGINT/SIGTERM can end the run. Filesystem types outside
-  the built-in network/special list (for example `ceph` or `glusterfs`), and every
-  mount on systems without `/proc/mounts`, are walked like local directories.
-  `/proc/mounts` is read as bytes, so a non-ASCII mount path also works
-  under the C/POSIX locale of cron jobs, systemd units and many SSH sessions; there
-  a non-ASCII `--source` is sent as the same UTF-8 text in markers and uploads.
-- Age defaults to 30 days; `--max-age 0..36500`, zero disables filtering.
-  Positive values compare mtime to run start minus N times 86400 seconds.
-- Size defaults to 2048 KiB; `--max-size-kb 1..204800`, exact limit included.
-  Binary/empty/Unicode/newline files work. Unsafe multipart filename characters
-  (quotes, semicolons and every control character, including TAB, CR, LF, ESC and
-  DEL) are replaced by underscores, not payload bytes; a strict multipart parser
-  rejects control characters in a part header and the file would never be collected.
-  Metadata may not survive the backend verbatim.
-- Bounded in-memory snapshots before network access; allow selected size plus
-  overhead in RAM. Changed/replaced/unreadable files fail. Files that grow past
-  selectors before reading are skipped. No atomic filesystem snapshot or defense
-  against privileged races.
-- Async `/api/checkAsync` only; no synchronous mode, and `--async` is accepted
-  and ignored so existing command lines keep working. Complete 2xx means
-  accepted, not completed analysis. No polling, resume or deduplication.
-- Optional markers: an HTTP answer other than 2xx (404/501 from a server without
-  marker support, any other status) is ignored without output; uploads then carry
-  no scan ID, and marker answers never change the exit status. A begin response is only
-  parsed up to 64 KiB; anything larger or malformed gives no scan ID, never a crash. Begin
-  retries once after two seconds unless the answer was 404/501. The begin marker is the
-  first request to the server: if neither attempt gets an HTTP answer (connection
-  refused, DNS/TLS failure, timeout, empty or incomplete reply), the collector exits 2
-  before uploading. A failed end or interrupted marker is ignored. SIGINT/SIGTERM exits 1
-  with a best-effort interrupted marker for a live started collection.
-- `--retries 1..10` counts total attempts, including first. 503 Retry-After
-  integer seconds clamp to 0..120; other exponential delays cap at 60 seconds.
-  Lost responses/retries can duplicate samples.
-- Lost server: when 3 files in a row could not be delivered (no attempt got an HTTP
-  answer other than 503), the collector stops sending and checks `GET /api/status`
-  after 2, 4, 8 ... up to 60 seconds, for at most `SERVER_WAIT` seconds
-  (`--server-wait 0..86400`, default 600; 0 stops at once). When the server
-  answers 2xx, it continues with the next file; the files that failed stay failed.
-  When the time runs out, it logs `Thunderstorm unreachable for N seconds`, sends a
-  best-effort interrupted marker, does not send the remaining files and exits 1.
-  Dry-run never waits.
-- Socket idle-I/O timeouts: uploads 30 seconds, markers 10. **Not whole-attempt
-  or run deadlines**: the sample is sent in 64 KiB chunks, so a slow but steady
-  link is not cut off after 30 seconds. Responses over 1 MiB, incomplete responses
-  and replies without an HTTP/1.x status line (an SSH banner from a wrong port, for
-  example) fail.
-- TLS verifies CA/hostname; custom CA via `--tls --ca-cert FILE`, explicit bypass
-  via `--tls --insecure`. Python before 2.7.9 refuses verified HTTPS rather than
-  silently disabling verification. Old SSL protocol support can still limit it.
-- Port 1..65535; IPv4/DNS and runtime-supported IPv6. Progress is count-based;
-  `--debug` adds `[DEBUG]` lines on stderr for ignored marker answers. Path errors
-  are always shown.
+## Common Options
 
-| Exit | Meaning |
+`--help` lists all options.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-s`, `--server HOST` | none | Thunderstorm server |
+| `-p`, `--port PORT` | 8080 | Server port |
+| `-d`, `--dir`, `--dirs PATH` | `/` | Directory to collect; repeatable |
+| `--max-age DAYS` | 30 | Modified within N days; `0` disables |
+| `--max-size-kb KIB` | 2048 | Largest file, inclusive |
+| `-S`, `--source NAME` | hostname | Source name |
+| `--dry-run` | off | List files, send nothing |
+| `-t`, `--tls` | off | Use HTTPS |
+| `--ca-cert FILE` | system trust | PEM CA file for HTTPS |
+| `-k`, `--insecure` | off | No TLS verification; testing only |
+| `--retries N` | 3 | Attempts per file, 1 to 10 |
+| `--server-wait SEC` | 600 | Wait for a lost server, 0 to 86400; `0` stops at once |
+
+Progress shows on a terminal; `--no-progress` hides it. `--async` is ignored.
+
+## Exit Codes
+
+| Code | Meaning |
 |---|---|
-| 0 | All eligible files accepted, or successful dry-run; intentional skips allowed |
-| 1 | Failed files, traversal/partial-root errors, interruption or server unreachable for `SERVER_WAIT` |
-| 2 | Invalid config/TLS setup, no valid roots or no HTTP answer to the begin marker |
+| `0` | All selected files accepted, or a successful dry run |
+| `1` | Failed files, scan errors (such as one missing root), interruption, or server unreachable for `SERVER_WAIT` |
+| `2` | Invalid configuration, wrong Python version, no usable root, or no HTTP answer to the begin marker |
 
-Unreadable directories count as `Scan errors`; unreadable selected files as
-`Failed`. Empty existing roots may succeed; missing roots cannot. Actual legacy
-SSL and Windows paths require target-system verification, not modern CI inference.
+Unreadable directories count as `Scan errors`, unreadable files as `Failed`.
 
-## Validation Status
+## Behavior Details
 
-The [8 October 2026 acceptance report](../../docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md)
-records HTTP/HTTPS checks against real THOR with Python 3.9.6 on macOS and actual
-Python 3.4.10 and 2.7.18 in containers. Evidence applies to the exact revisions
-and assets recorded there. It does not establish ESXi or every legacy OS/SSL
-combination's compatibility.
+### File selection
 
-## Manual Acceptance
+- Recursive, regular files only; symlinks and special files are skipped.
+- **Age** uses modification time. **Size** is inclusive; empty files count.
+- **Excluded:** `/proc`, `/dev`, `/sys`, `/run`, `/snap`, `/.snapshots`, `/mnt`
+  (WSL drives, mounted shares), `.dat`, `.npm`, VM files (`.vmdk`, `.vswp`, `.nvram`, `.vmsd`, `.lck`),
+  cloud-sync folders and Linux network or special mounts. Best effort only.
+- **Mounts are skipped by path:** excluded trees and the network or special
+  mounts in `/proc/mounts` are skipped before any stat, so an unresponsive hard
+  NFS mount cannot block the run. Other filesystem types (such as `ceph` or
+  `glusterfs`), and every mount on systems without `/proc/mounts`, are walked
+  like local directories.
+- `/proc/mounts` is read as bytes, so non-ASCII mount paths also work under the
+  C/POSIX locale of cron jobs, systemd units and many SSH sessions; a non-ASCII
+  `--source` is then sent as the same UTF-8 text.
 
-Follow the [manual test preparation](../MANUAL_TESTING_GUIDE.md#manual-test-preparation)
-and [acceptance record](../MANUAL_TESTING_GUIDE.md#acceptance-record) guidance. Record the exact collector revision or asset
-hash, OS/architecture and interpreter/SSL versions. Repeat the applicable cases
-below on each interpreter and target you intend to deploy.
+### Uploads
 
-### 1. Isolated Setup
+- Each file is read into memory first; a file that changes meanwhile fails.
+- Uploads use `/api/checkAsync`: a 2xx answer means accepted, not analyzed.
+- Retry waits double, up to 60 s. HTTP 503 honors `Retry-After`, up to 120 s.
+- **Lost server:** when 3 files in a row could not be delivered (no attempt got
+  an HTTP answer other than 503), the collector stops sending and checks
+  `/api/status` after 2, 4, 8 … up to 60 s, for at most `SERVER_WAIT` seconds. A
+  2xx answer resumes with the next file; failed files stay failed. When the time
+  runs out, it logs `Thunderstorm unreachable for N seconds`, sends an
+  "interrupted" marker, skips the remaining files and exits 1. A dry run never
+  waits.
+- Quotes, semicolons and control characters in the sent file name become `_`.
 
-From this folder, substitute service values. Use a shell without `set -e` for
-expected failures. On Windows use equivalent isolated files and Python arguments.
+### TLS
 
-```sh
-PYTHON=python3
-COLLECTOR="$(pwd)/thunderstorm-collector.py"
-# Legacy: PYTHON=python2; COLLECTOR="$(pwd)/thunderstorm-collector-py2.py"
-SERVER=thunderstorm.example.internal
-PORT=8080
-SOURCE=manual-python-yourname
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ts-python.XXXXXX")
-mkdir -p "$ROOT/input/sub"
-printf 'text\n' > "$ROOT/input/plain.txt"
-printf '\000\001\377THUNDER\n' > "$ROOT/input/binary.bin"
-: > "$ROOT/input/empty.bin"
-printf 'nested\n' > "$ROOT/input/sub/nested.txt"
-printf 'spaces\n' > "$ROOT/input/file with spaces.txt"
-printf 'semicolon\n' > "$ROOT/input/semi;colon.txt"
-printf 'quote\n' > "$ROOT/input/double\"quote.txt"
-collect() {
-  "$PYTHON" "$COLLECTOR" -s "$SERVER" -p "$PORT" --source "$SOURCE" \
-    --max-age 0 --retries 1 --no-dry-run --no-progress "$@"
-  code=$?; printf 'exit_code=%s\n' "$code"; return "$code"
-}
-```
+- `--tls` verifies certificate and host name. `--ca-cert` and `--insecure` need
+  `--tls`.
+- **Python before 2.7.9** refuses verified HTTPS (exit 2) instead of skipping
+  verification.
 
-### 2. No-network Dry-run and Unreachable Service
+### Collection markers
 
-```sh
-collect -d "$ROOT/input" --dry-run -s 127.0.0.1 -p 1
-collect -d "$ROOT/input" -s 127.0.0.1 -p 1
-```
+Marker problems are shown only with `--debug` and never change the exit code.
+Exception: if the begin marker gets no HTTP answer on both attempts, the run
+exits with 2 before uploading. SIGINT or SIGTERM sends an "interrupted"
+marker if possible. See
+[collection markers](../../docs/COLLECTION_MARKERS.md).
 
-Dry-run: exit 0, seven would-submit lines, `Submitted: 0 Would submit: 7` in the
-summary, zero requests. Live: exit 2 at begin,
-zero uploads and connection errors. Port 1 must actually be closed. Use an
-external watchdog for slow networks; idle timeouts are not run deadlines.
+### Logging and limits
 
-### 3. Positive Upload
+- Logs go to stderr only, starting with roots and limits. When piping to
+  `tee`, check the collector's own exit code.
+- Idle timeouts: uploads 30 s, markers 10 s; a slow, steady upload continues.
+- Answers over 1 MiB, incomplete or not HTTP/1.x fail.
 
-```sh
-collect -d "$ROOT/input"
-```
+## Limitations
 
-Expect exit 0 and seven accepted files including empty. Verify stored SHA-256/size
-of every payload, wait for async completion, check source if exposed (otherwise
-NOT OBSERVABLE). Optional marker 404/501 is acceptable. Empty-file rejection is
-a real backend failure, not a successful skip. Change SOURCE for subsequent runs.
+- Files are read from a live filesystem, not a snapshot.
+- No deduplication, resume or extension filter.
+- Retries after a lost answer can duplicate uploads.
+- Windows paths need testing on the target.
 
-### 4. Missing Roots and Repeated Options
+## Testing
 
-```sh
-collect -d "$ROOT/input" -d "$ROOT/missing"
-collect -d "$ROOT/missing"
-```
-
-Mixed: exit 1, seven uploads, one scan error. All missing: exit 2/no requests.
-The second `-d` must not discard the first.
-
-### 5. Permissions (Non-root/Non-administrator)
-
-```sh
-mkdir -p "$ROOT/permissions/blocked-dir"
-printf readable > "$ROOT/permissions/ok.txt"
-printf blocked > "$ROOT/permissions/blocked.txt"
-chmod 000 "$ROOT/permissions/blocked.txt" "$ROOT/permissions/blocked-dir"
-collect -d "$ROOT/permissions"
-chmod 600 "$ROOT/permissions/blocked.txt"
-chmod 700 "$ROOT/permissions/blocked-dir"
-```
-
-Exit 1, only ok.txt accepted, one failed file and one scan error. Always restore
-permissions. Root results do not validate this test.
-
-### 6. Exact Size and Age
-
-```sh
-mkdir "$ROOT/size" "$ROOT/age"
-dd if=/dev/zero of="$ROOT/size/limit.bin" bs=1024 count=1 2>/dev/null
-cp "$ROOT/size/limit.bin" "$ROOT/size/over.bin"
-printf x >> "$ROOT/size/over.bin"
-collect -d "$ROOT/size" --max-size-kb 1
-printf recent > "$ROOT/age/recent.txt"
-printf old > "$ROOT/age/old.txt"
-touch -t 202001010000 "$ROOT/age/old.txt"
-collect -d "$ROOT/age" --max-age 1
-collect -d "$ROOT/age" --max-age 0
-```
-
-Exit 0 each. Size: only 1024, not 1025 bytes. Age 1: recent only; age 0: both.
-
-### 7. Links and Special Names
-
-```sh
-printf outside > "$ROOT/outside.txt"
-ln -s "$ROOT/outside.txt" "$ROOT/input/link.txt"
-ln -s "$ROOT/input" "$ROOT/input/loop"
-collect -d "$ROOT/input"
-```
-
-Still seven uploads, exit 0; no outside data/loop. In fresh fixtures add Unicode
-and literal-newline names and verify all payload hashes and sanitized headers.
-
-### 8. TLS
-
-Use a test HTTPS service, its actual CA paths and the correct PORT:
-
-```sh
-collect -d "$ROOT/input" --tls
-collect -d "$ROOT/input" --tls --ca-cert /path/to/unrelated-valid-ca.pem
-collect -d "$ROOT/input" --tls --ca-cert /path/to/correct-ca.pem
-collect -d "$ROOT/input" --tls --insecure
-```
-
-For private untrusted certificates: first two exit 2/no uploads; correct CA and
-explicit insecure exit 0/seven uploads. Public trust can legitimately pass the
-first case. Python <2.7.9 must refuse verified HTTPS. Do not install test CAs
-globally; remove private keys afterwards.
-
-### 9. Interruption and Injected Failures
-
-Interrupt a slow run: exit 1, no normal end marker, best-effort interrupted
-marker if supported. Do not disrupt a shared real service for failure injection.
-The isolated regression suite covers 503 bounds, end HTTP 500, incomplete 2xx,
-malformed marker JSON, a lost server (wait, resume, stop) and SIGTERM on the
-actual interpreters:
-
-```sh
-python3 -B ../tests/test_python_robustness.py
-python2 -B ../tests/test_python_robustness.py
-```
-
-Both must execute without unexpected skips. Modern CI cannot establish every
-old OS/SSL build's compatibility. Keep remaining target-system checks explicit.
-
-## Shared Stub E2E
-
-Use the [testing overview](../../docs/COLLECTOR_TESTING_OVERVIEW.md) for stub setup
-and shared options. From the repository root, select each installed interpreter:
-
-```sh
-THUNDERSTORM_TEST_COLLECTORS=python3 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  THUNDERSTORM_TEST_REQUIRE_ALL=1 scripts/tests/run_e2e_compliance.sh /path/to/stub
-THUNDERSTORM_TEST_COLLECTORS=python2 THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
-  THUNDERSTORM_TEST_REQUIRE_ALL=1 scripts/tests/run_e2e_compliance.sh /path/to/stub
-```
+[TESTING.md](TESTING.md): manual acceptance cases and automated tests.
