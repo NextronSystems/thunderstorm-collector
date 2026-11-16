@@ -2,34 +2,39 @@
 
 # THOR Thunderstorm Collector
 
-Thunderstorm collectors provide lightweight, agentless file collection for analysis by the [THOR Thunderstorm](https://www.nextron-systems.com/thor-thunderstorm/) service. They walk configured directories on an endpoint, apply filters for file size, age, and type, and send matching file samples to the service.
+Thunderstorm collectors send selected files from endpoints to the
+[THOR Thunderstorm](https://www.nextron-systems.com/thor-thunderstorm/) service,
+which analyzes them. Each run walks the configured directories, selects files by
+size, age and type, uploads the matches and exits.
 
 ![The Go collector or a script collector runs on the source system, walks the configured paths, selects files by size, age, extension and header, and uploads the matches over HTTP(S) to Thunderstorm, which analyzes each sample with THOR and serves many sources.](images/collector-flow.svg)
 
-Selective collection keeps endpoint workload and network traffic low. Metadata filters exclude unsuitable files without reading their full contents, and only matching samples are sent for analysis. For recurring collection, an age filter can focus each run on recently created or modified files. This supports frequent checks with broad coverage of relevant files within the configured scope, while the Thunderstorm service performs the computationally intensive analysis.
+- **No agent:** a portable binary or a standalone script; nothing to install.
+  Start it remotely, for example with Ansible, or schedule it with cron or
+  Windows Task Scheduler.
+- **Light on the source:** metadata filters skip unsuitable files without
+  reading them. An age filter lets frequent runs send only new or changed files.
+- **Heavy work on the server:** Thunderstorm does the analysis.
 
-No collector installation or permanently running endpoint agent is required. Collectors run as portable binaries or standalone scripts using the required runtime and tools available on the endpoint. They can be started remotely through Ansible or another automation script, or placed on the endpoint and scheduled with cron or Windows Task Scheduler. Each invocation performs a collection pass and exits.
-
-This repository provides a compiled Go collector, standalone script collectors, a prototype SFTP collector for systems on which nothing can run, and assessment guides with collection configurations. Available filters, dependencies, and capabilities vary by collector.
+This repository contains the Go collector, standalone script collectors, a
+prototype SFTP collector for systems on which nothing can run, and assessment
+profiles.
 
 ## See How It Works
 
-Why some systems cannot run a security agent, and how collectors bring their files to THOR Thunderstorm (a 93-second animation, no sound; the findings in it are illustrative):
+A 93-second animation, without sound, on why some systems cannot run a security
+agent and how collectors bring their files to THOR Thunderstorm. The findings in
+it are illustrative.
 
 https://github.com/user-attachments/assets/eb23f1e6-a6b0-4367-a5e1-fa2e93e4b331
 
 ## Choose a Scanning Approach
 
-A Thunderstorm collector is one of several ways to cover a system with THOR.
-THOR can run on the system itself, a collector can send the system's files to
-Thunderstorm, or another system can read the files over SSH or from an export:
-
 ![Five ways to cover a system: THOR or THOR Legacy on the system itself; a Go or script collector on the system sending selected files to Thunderstorm; the SFTP collector reading selected files from a system that only offers SSH; THOR scanning an SSHFS mount; and THOR scanning exported evidence on a workstation.](images/coverage-methods.svg)
 
-Several methods often work for the same system. Where THOR can run and is
-permitted, prefer it: only a native scan adds THOR's live system checks.
-Otherwise, use the method that needs the least on the source while still
-covering what you need:
+**Where THOR can run and is permitted, run THOR:** only a native scan adds the
+live system checks. Otherwise, pick the method that needs the least on the
+source:
 
 | Situation | Recommended | Alternative |
 | --- | --- | --- |
@@ -41,111 +46,109 @@ covering what you need:
 | Only SSH/SFTP is available; repeated collection, many systems or slow links | [SFTP collector](sftp/README.md) (prototype) | THOR over SSHFS |
 | No live access, an isolated network, or files only as a vendor export | [Exported evidence](docs/SCANNING_APPROACHES.md#offline-analysis-of-exported-evidence) scanned with THOR | Upload the exports with a collector on another system |
 
-[Choosing a THOR scanning approach](docs/SCANNING_APPROACHES.md) lists the
-advantages and disadvantages of each method, the reasons behind these
-recommendations, an SSHFS example, licensing and evidence coverage.
-
-For legacy AIX hosts, see the dedicated
-[AIX on POWER7 SSHFS scanning guide](integration-guides/aix/aix-power7-sshfs-scanning.md),
-with a quick path-allowlist scan for incident response and a thorough assessment
-procedure covering root access, mount inventory and exclusions.
+- **Reasons, licensing and coverage of each method:** [Choosing a THOR scanning approach](docs/SCANNING_APPROACHES.md)
+- **Legacy AIX hosts:** [AIX on POWER7 SSHFS scanning guide](integration-guides/aix/aix-power7-sshfs-scanning.md)
 
 ## Choose a Collector
 
-| Starting point | When to use it | Documentation |
+| Collector | When to use it | Documentation |
 | --- | --- | --- |
-| **Go collector** | Recommended for most general-purpose systems with a compatible OS and CPU architecture. Runs as a compiled binary without an installed Go runtime. | [Go usage, configuration, and platform compatibility](go/README.md) |
-| **Script collectors** | Use an available scripting runtime when a compiled binary is impractical or you need to adapt the collection logic. | [Script selection and requirements](scripts/README.md#choosing-a-collector) |
-| **SFTP collector** (prototype) | Nothing can run on the source, but SSH with SFTP is available. Runs on the Thunderstorm host or another system and pulls the selected files; the source needs no route to Thunderstorm. Linux amd64 and arm64 packages in releases after v1.1.0; other platforms build from source. | [Use cases, differences, and comparison with SSHFS](sftp/README.md) |
+| **Go collector** | Most systems with a compatible OS and CPU. A compiled binary; no Go runtime needed. | [Go collector guide](go/README.md) |
+| **Script collectors** | A compiled binary is impractical, or you want to adapt the logic. Bash, POSIX sh / ash, Python, Perl, PowerShell and Batch. | [Script chooser](scripts/README.md#choosing-a-collector) |
+| **SFTP collector** (prototype) | Nothing can run on the source, but SSH with SFTP is available. Runs on another system and pulls the selected files; the source needs no route to Thunderstorm. | [SFTP collector guide](sftp/README.md) |
 
-The eight standalone scripts are organized into [Bash](scripts/bash/README.md), [POSIX sh / ash](scripts/ash/README.md), [Python](scripts/python/README.md), [Perl](scripts/perl/README.md), [PowerShell](scripts/powershell/README.md), and [Batch](scripts/batch/README.md) directories. Python and PowerShell each include a separate legacy variant.
+- **By product or platform** (Windows, Linux, macOS, VMware, edge appliances,
+  NAS, BSD, Solaris, AIX and more): [collector recommendations](docs/COLLECTOR_RECOMMENDATIONS.md),
+  including the [CPU targets of the published binaries](docs/COLLECTOR_RECOMMENDATIONS.md#published-go-binary-targets).
+- **VMware ESXi:** [Python collector quick start](scripts/README.md#vmware-esxi-use-the-python-collector).
+- **Citrix NetScaler:** [identify the firmware and OS first](go/README.md#choose-a-collector-for-your-netscaler),
+  then use the dedicated binary (FreeBSD 8.4 / amd64) or the
+  [Bash assessment preset](emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector).
+- **ARM64:** THOR 11 is planned to add Windows ARM64 and Linux ARM64 support,
+  which reduces the need for collectors on those systems. [Details](docs/COLLECTOR_RECOMMENDATIONS.md#direct-thor-scanning-and-arm64)
 
-For platform-specific selection, start with the **[collector recommendations](docs/COLLECTOR_RECOMMENDATIONS.md)**. They are ordered approximately by deployment prevalence, with related products grouped together:
+## Emerging Threats: Assessment Profiles
 
-- **Common systems and infrastructure:** Windows, Linux (including legacy kernels), macOS, VMware, Amazon Linux, and Kubernetes.
-- **Edge appliances and NAS:** Cisco, Fortinet, Palo Alto Networks, Citrix NetScaler, F5, Check Point, Sophos, Ivanti, SonicWall, Synology, QNAP, pfSense/OPNsense, and OpenWrt.
-- **Specialist platforms:** Nutanix, FreeBSD, OpenBSD, NetBSD, Solaris/illumos, and IBM AIX. The [binary inventory](docs/COLLECTOR_RECOMMENDATIONS.md#published-go-binary-targets) covers their available CPU targets, including ARM, MIPS, PowerPC, s390x, RISC-V, and LoongArch on applicable systems.
-
-Prefer direct THOR scanning where the target is supported and local scanning is permitted. **THOR 11 is planned to add Windows ARM64 and Linux ARM64 support**, reducing the need for collectors on those supported systems. Collectors remain useful for legacy systems, appliances, other architectures, and central file-analysis workflows. See the [announcement and selection guidance](docs/COLLECTOR_RECOMMENDATIONS.md#direct-thor-scanning-and-arm64).
-
-For VMware ESXi, use the [Python quick start](scripts/README.md#vmware-esxi-use-the-python-collector). For Citrix NetScaler, follow the [firmware/OS identification and collector selection steps](go/README.md#choose-a-collector-for-your-netscaler): use the dedicated binary for confirmed FreeBSD 8.4/amd64, or the [Bash assessment preset](emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) when its requirements are met.
-
-## Emerging Threats: Assessment Guides and Collection Profiles
-
-Use the [Emerging Threats guides](emerging-threats/README.md) to choose the files and directories to collect for a particular assessment. Profiles configure existing collectors; analysis uses the signatures installed on the Thunderstorm server.
+[Assessment profiles](emerging-threats/README.md) tell an existing collector
+which files to collect for a particular threat. Analysis uses the signatures on
+the Thunderstorm server.
 
 | Assessment | Guide and configuration |
 | --- | --- |
-| **Citrix NetScaler** | [Broad assessment guide](emerging-threats/citrix-netscaler/README.md), with a [Go configuration](emerging-threats/citrix-netscaler/config.yml) and a [preset for the existing Bash collector](emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector). |
+| **Citrix NetScaler** | [Assessment guide](emerging-threats/citrix-netscaler/README.md), with a [Go configuration](emerging-threats/citrix-netscaler/config.yml) and a [Bash preset](emerging-threats/citrix-netscaler/README.md#option-2-existing-bash-collector) |
 
-These profiles are optional and downloaded separately from release packages. Each guide documents its scope, limits, execution requirements, and validation status. For Go, download the profile YAML using GitHub's **Download raw file** control and load it with `-t`; for Bash, apply the guide's preset to a deployment copy of the script.
+Profiles are not part of the release packages. For Go, download the YAML with
+GitHub's **Download raw file** button and load it with `-t`. For Bash, apply
+the preset to a copy of the script.
 
 ## Download a Collector
 
-Use [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases) for published versions. Under **Assets**, select the package matching your OS and architecture: `amd64` means x86-64, and `arm64` means AArch64. Follow the documentation for that release.
+Download from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases).
+Under **Assets**, pick your OS and architecture (`amd64` = x86-64,
+`arm64` = AArch64), and use the documentation of that release.
 
-- **Go packages** contain the executable and a default `config.yml`. Windows packages use ZIP; other platforms use `.tar.gz`. The standalone `config-<version>.yml` asset is an additional copy of that configuration.
-- **Script assets** are individual, versioned files. Download the selected collector and check its runtime requirements. Each script runs independently; the repository's test harness is not required on the target.
-- **SFTP collector packages**, in releases after v1.1.0, contain the Linux binary for amd64 or arm64 and the [SFTP collector README](sftp/README.md). They run on the Thunderstorm host or another system with SSH access to the sources, not on the sources.
+| Package | Contents |
+| --- | --- |
+| **Go** | Executable and default `config.yml`; ZIP on Windows, `.tar.gz` elsewhere. `config-<version>.yml` is a separate copy of that file. |
+| **Scripts** | One versioned file per collector. The target needs only that file and its runtime, not the test harness. |
+| **NetScaler** | `thunderstorm-collector-<version>-amd64-freebsd8-netscaler.tar.gz` with a `.sha256` file. Check the [target requirements](go/README.md#choose-a-collector-for-your-netscaler) first. |
+| **SFTP** (releases after v1.1.0) | Linux binary for amd64 or arm64 and its README. Runs on the Thunderstorm host or another system with SSH access to the sources. |
 
-**Release availability, 19 October 2026:** [v1.1.0](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0) is the latest stable release. It includes the revised script collectors, additional legacy script variants, and dedicated NetScaler package. `master` may contain further changes; use the documentation matching your download.
-
-- **Current scripts:** open the collector file linked in the [script selection table](scripts/README.md#choosing-a-collector) and use GitHub's **Download raw file** control, preserving the filename and extension. A single script is sufficient; no repository clone or build is needed. Follow its language guide for runtime requirements and settings.
-- **NetScaler binary:** download `thunderstorm-collector-1.1.0-amd64-freebsd8-netscaler.tar.gz` and its `.sha256` file from the [v1.1.0 release assets](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0), after checking the [target requirements](go/README.md#choose-a-collector-for-your-netscaler). For newer validation builds, follow the [CI artifact download steps](go/legacy/README.md#download-and-select). Local compilation is optional.
-- **Published v1.1.0 Go binaries:** use the [matching Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.1.0/go/README.md).
+> [!NOTE]
+> **v1.1.0** is the latest release. `master` may contain newer changes:
+> - **Current scripts:** open the file from the [script chooser](scripts/README.md#choosing-a-collector)
+>   and use **Download raw file**, keeping the filename.
+> - **Newer NetScaler builds:** follow the [CI artifact steps](go/legacy/README.md#download-and-select).
+> - **v1.1.0 Go binaries:** use the [v1.1.0 Go guide](https://github.com/NextronSystems/thunderstorm-collector/blob/v1.1.0/go/README.md).
 
 ## Quick Start
 
-For the **Linux amd64 Go package from v1.1.0**, download the archive from [Releases](https://github.com/NextronSystems/thunderstorm-collector/releases/tag/v1.1.0), extract it, and enter the package directory:
+For the Linux amd64 Go package from v1.1.0:
 
 ```sh
 tar -xzf thunderstorm-collector-1.1.0-amd64-linux.tar.gz
 cd thunderstorm-collector-amd64-linux
-```
-
-Start collecting by supplying just your Thunderstorm server's hostname or IP address:
-
-```sh
 ./amd64-linux-thunderstorm-collector -s thunderstorm.example.internal
 ```
 
-Replace `thunderstorm.example.internal` with your server. The collector automatically loads `config.yml` from the **current directory**, uses its file filters and limits, and uploads matching readable files. With the bundled configuration, collection starts at `/` on Linux/Unix or `C:\` on Windows; HTTP port **8080** and the local hostname as the source name are already the defaults. No other options or configuration edits are needed for that setup.
+Replace `thunderstorm.example.internal` with your server. Nothing else is
+needed:
 
-### Save the server once
+- `config.yml` is loaded from the **current directory** and supplies the file
+  filters and limits.
+- Collection starts at `/` on Linux/Unix and `C:\` on Windows.
+- Port **8080** and the local hostname as source name are the defaults.
 
-For repeated use, add this line to the **existing** `config.yml`, keeping its filters and other settings:
+**Save the server once:** add `thunderstorm-server: thunderstorm.example.internal`
+to the existing `config.yml`. Then `./amd64-linux-thunderstorm-collector` needs
+no options. Give a hostname or IP only; HTTPS and other ports have their own
+settings.
 
-```yaml
-thunderstorm-server: thunderstorm.example.internal
-```
-
-Then, from the package directory, simply run:
-
-```sh
-./amd64-linux-thunderstorm-collector
-```
-
-The server setting can be supplied in YAML or with `-s`; it does not need to be specified in both places. Use a hostname or IP only; HTTPS and non-default ports have separate settings below.
-
-### Optional preview
-
-To see which files would be uploaded without contacting the server:
+**Preview without uploading:**
 
 ```sh
 ./amd64-linux-thunderstorm-collector --dry-run --debug
 ```
 
-Normal runs upload files by default. `--dry-run=false` is only needed when overriding `dry-run: true` in a loaded configuration, such as a preview-enabled assessment profile.
+Normal runs upload. `--dry-run=false` is only needed to override `dry-run: true`
+in a loaded configuration, such as an assessment profile.
 
 ### Command-line help
 
-Run `--help` to list every available option and the effective defaults for your loaded configuration:
+`--help` lists every option with the effective defaults of the loaded
+configuration. Command-line values override YAML. Long option names are also
+YAML keys (`thunderstorm-server`, `port`, `path`; lists as `path: ["/var/www", "/home"]`),
+except `--help` and `--template`. See the [Go configuration guide](go/README.md#configuration-files).
 
-```sh
-./amd64-linux-thunderstorm-collector --help
-```
+These options apply to the Go collector only. Script collectors have their own;
+see the [language guides](scripts/README.md).
 
-Reference output with built-in Unix defaults; the executable name and hostname are generalized below. The bundled `config.yml` overrides the file-size limit to **64 MiB**, while the built-in limit shown here is **100 MiB**.
+<details>
+<summary>Reference output with built-in Unix defaults</summary>
+
+The executable name and hostname are generalized. The bundled `config.yml`
+lowers the file-size limit to **64 MiB**; the built-in limit shown here is
+**100 MiB**.
 
 ```text
 Usage: thunderstorm-collector [OPTION]...
@@ -185,35 +188,51 @@ Usage: thunderstorm-collector [OPTION]...
       --uploads-per-minute int       Delay uploads to only upload samples with the given frequency of uploads per minute. Zero means no delays.
 ```
 
-Only the server address is required for uploads, either in `config.yml` or with `-s`. Other settings are optional. Command-line values override YAML settings. Long option names also serve as YAML keys, such as `thunderstorm-server`, `port`, and `path`; `--help` and `--template` are command-line controls only. List-valued settings use YAML lists, for example `path: ["/var/www", "/home"]`. See the [Go configuration guide](go/README.md#configuration-files) for examples and filter behavior.
-
-These settings apply to the **Go collector**. Script collectors have their own defaults and option names; use the selected [language guide](scripts/README.md). For an assessment profile, follow its guide and load its configuration with `-t`.
+</details>
 
 ## Product Integration Guides
 
-[Product integration guides](integration-guides/README.md) describe deployment, networking, and recurring collection on particular systems, and list [related Nextron repositories](integration-guides/README.md#related-nextron-repositories) for container scanning, mail filtering, API clients, and test servers. The existing [ESXi 7 without Secure Boot guide](integration-guides/esxi/esxi7-wo-secure-boot.md) covers a persistent Python deployment. Start with the current [ESXi collector requirements and quick start](scripts/README.md#vmware-esxi-use-the-python-collector) before scheduling collection.
+[Integration guides](integration-guides/README.md) cover deployment, networking
+and recurring collection on particular systems, such as
+[ESXi 7 without Secure Boot](integration-guides/esxi/esxi7-wo-secure-boot.md).
+The index also lists [related Nextron repositories](integration-guides/README.md#related-nextron-repositories)
+for container scanning, mail filtering, API clients and test servers.
 
 ## Testing and Compatibility
 
-- [Testing overview](docs/COLLECTOR_TESTING_OVERVIEW.md): automated checks, local HTTP/HTTPS test backends, runtime coverage, and commands for running focused tests.
-- [Script acceptance report, 8 October 2026](docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md): real-THOR results for the exact revisions and assets recorded there, plus remaining checks.
-- [NetScaler compatibility and FreeBSD VM evidence](go/README.md#citrix-netscaler-and-freebsd-84): the tested legacy binary, OS versions, and the FreeBSD 14.3 ASLR note.
+- [Testing overview](docs/COLLECTOR_TESTING_OVERVIEW.md): automated checks, test backends and how to run them.
+- [Script acceptance report, 8 October 2026](docs/SCRIPT_COLLECTOR_ACCEPTANCE_2026-10-08.md): real-THOR results for the revisions recorded there.
+- [NetScaler and FreeBSD compatibility](go/README.md#citrix-netscaler-and-freebsd-84): the tested legacy binary and OS versions.
 
-Automated checks and recorded VM/runtime tests have specific scopes. Confirm the collector and collection profile on the intended product and firmware; each guide identifies remaining target-system validation.
+Recorded tests cover specific revisions and systems. Test the collector and
+profile on the intended product and firmware before relying on it.
 
 ## Build or Extend a Collector
 
-Downloaded binaries and standalone scripts can be run directly; building is optional. For source builds, follow the [Go build requirements](go/README.md#build-requirements). From the repository root, choose the target you need; these commands are independent:
+Building is optional. For source builds, see the
+[Go build requirements](go/README.md#build-requirements). From the repository
+root:
 
 ```sh
-make -C go           # Build the Go collector for the current platform
-make release-scripts # Package individual script assets
-make release         # Package all regular targets supported by the installed Go compiler, plus scripts
-make help            # List available targets
+make -C go           # Go collector for the current platform → go/bin/
+make release-scripts # Versioned script assets
+make release         # All regular targets the installed Go supports, plus scripts
+make help            # List all targets
 ```
 
-A current-platform build writes its executable to `go/bin/`. To use the packaged filters, pass `-t go/config.yml` when running it from the repository root. Regular binary archives are created in `go/dist/`; versioned release assets are assembled locally in `release/`. `make release` prepares files locally; the tagged workflow below uploads them to a draft release. The dedicated NetScaler package has a separate [legacy build procedure](go/legacy/README.md). The [tagged-release workflow](.github/workflows/release.yml) builds both regular and legacy packages, verifies the required assets, and attaches them with checksums to a **draft release** after its required jobs succeed. A maintainer reviews the draft and publishes it separately in GitHub Releases.
+- Run a local build from the repository root with `-t go/config.yml` to use the
+  packaged filters.
+- Archives go to `go/dist/`; versioned release assets to `release/`.
+- The dedicated NetScaler package has its own [legacy build procedure](go/legacy/README.md).
+- Releases: the [tagged-release workflow](.github/workflows/release.yml) builds
+  regular and legacy packages, checks them and attaches them with checksums to a
+  **draft release**. A maintainer reviews and publishes it.
 
-To add a language or platform, follow the [collector construction guide](docs/COLLECTOR_CONSTRUCTION_GUIDE.md). It covers the upload protocol, optional features, resource limits, acceptance tests, and a reusable coding-agent assignment. [Collection markers](docs/COLLECTION_MARKERS.md) describes, for server developers, how the script collectors mark the start and end of a run. The separate [thunderstormAPI Python library](https://github.com/NextronSystems/thunderstormAPI) is another resource for custom integrations.
+To build a collector for another language or platform, follow the
+[collector construction guide](docs/COLLECTOR_CONSTRUCTION_GUIDE.md): upload
+protocol, optional features, limits, acceptance tests and a reusable
+coding-agent assignment. Server developers find the run start/end protocol in
+[collection markers](docs/COLLECTION_MARKERS.md). For custom integrations, see
+the [thunderstormAPI Python library](https://github.com/NextronSystems/thunderstormAPI).
 
 Documentation changes follow the [documentation style guide](docs/DOCUMENTATION_STYLE.md).
