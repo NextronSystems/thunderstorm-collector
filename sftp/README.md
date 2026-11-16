@@ -214,18 +214,18 @@ analysis side, where a current toolchain is available.
   an `interrupted` marker when it stopped early (a signal, Thunderstorm
   unreachable for `--server-wait`, a lost SSH connection). A server without the
   endpoint answers 404 or 501, as THOR 10 and the current THOR 11 versions do;
-  the collector then logs one line and the run is the same as without markers.
-  A `begin` that fails otherwise is tried once more after 2 seconds; if it
-  fails again, the files are still sent, without a scan ID. The markers name
-  the `--source` and, as `hostname`, the system that runs this collector.
+  the run is then the same as without markers. A `begin` that fails otherwise
+  is tried once more after 2 seconds; if it fails again, the files are sent
+  without a scan ID. Failed markers are never logged and never change the exit
+  status; `--debug` shows the answers. The markers name the `--source` and, as
+  `hostname`, the system that runs this collector.
   [Collection markers](../docs/COLLECTION_MARKERS.md) describes the format.
 
 Run `--help` for all options. Exit status 1 means that a selected file could
 not be read or sent, a root could not be read, the configuration was invalid,
 the SSH connection failed or was lost during the run, Thunderstorm could not be
-reached or stayed unreachable for `--server-wait`, the run was interrupted, or
-a Thunderstorm that supports collection markers did not accept the `begin` or
-`end` marker. The statistics then show what is incomplete.
+reached or stayed unreachable for `--server-wait`, or the run was interrupted.
+The statistics then show what is incomplete.
 
 ## Limits
 

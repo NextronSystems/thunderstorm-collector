@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -92,6 +93,10 @@ func markerTypes(markers []map[string]interface{}) []string {
 // markerCollector returns a collector for a source with two small files that
 // sends everything to server, with the begin marker already sent.
 func markerCollector(t *testing.T, server *markerServer) (*Collector, *bytes.Buffer) {
+	return markerCollectorWithDebug(t, server, false)
+}
+
+func markerCollectorWithDebug(t *testing.T, server *markerServer, debug bool) (*Collector, *bytes.Buffer) {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "a.txt"), "first", 0o644, time.Now())
@@ -105,6 +110,7 @@ func markerCollector(t *testing.T, server *markerServer) (*Collector, *bytes.Buf
 		MaxFileSize:   1 << 20,
 		Threads:       1,
 		WalkThreads:   1,
+		Debug:         debug,
 		Source:        "src 01&x",
 		UploadURL:     server.URL + "/api/checkAsync?source=src+01%26x",
 		CollectionURL: server.URL + "/api/collection",
@@ -114,6 +120,41 @@ func markerCollector(t *testing.T, server *markerServer) (*Collector, *bytes.Buf
 	collector.retrySleep = func(time.Duration) {}
 	collector.BeginRun()
 	return collector, &output
+}
+
+var markerLogLine = regexp.MustCompile(`(?i)collection (\w+ )?markers?|scan ID`)
+
+// markerLog returns the log lines that mention collection markers or scan IDs.
+func markerLog(output string) []string {
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		if markerLogLine.MatchString(line) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// checkSilentUnlessDebug runs a collection against a fresh server from
+// newServer twice. Without --debug, the log must not mention markers; with
+// --debug, it must contain debugText. Neither run may count an error.
+func checkSilentUnlessDebug(t *testing.T, label string, newServer func() *markerServer, debugText string) {
+	t.Helper()
+	for _, debug := range []bool{false, true} {
+		collector, output := markerCollectorWithDebug(t, newServer(), debug)
+		runWithin(t, collector, 10*time.Second)
+		collector.FinishRun()
+		if got := collector.Stats.ErrorCount(); got != 0 {
+			t.Errorf("%s (debug=%v): a marker failure must not fail the run, got %d error(s)\n%s", label, debug, got, output)
+		}
+		lines := markerLog(output.String())
+		if !debug && len(lines) != 0 {
+			t.Errorf("%s: without --debug the log must not mention markers, got %q", label, lines)
+		}
+		if debug && !strings.Contains(output.String(), debugText) {
+			t.Errorf("%s: --debug log does not contain %q:\n%s", label, debugText, output)
+		}
+	}
 }
 
 func TestMarkersUnsupportedServerIsHandledGracefully(t *testing.T) {
@@ -134,9 +175,11 @@ func TestMarkersUnsupportedServerIsHandledGracefully(t *testing.T) {
 		if got := collector.Stats.ErrorCount(); got != 0 {
 			t.Errorf("HTTP %d: an unsupported marker endpoint must not fail the run, got %d error(s)", status, got)
 		}
-		if !strings.Contains(output.String(), "does not support collection markers") {
-			t.Errorf("HTTP %d: unexpected log:\n%s", status, output)
+		if lines := markerLog(output.String()); len(lines) != 0 {
+			t.Errorf("HTTP %d: without --debug the log must not mention markers, got %q", status, lines)
 		}
+		reply := markerReply{status, "404 page not found"}
+		checkSilentUnlessDebug(t, fmt.Sprintf("HTTP %d", status), func() *markerServer { return newMarkerServer(t, reply) }, "does not support collection markers")
 	}
 }
 
@@ -191,10 +234,10 @@ func TestMarkersRunWithScanID(t *testing.T) {
 	}
 }
 
-func TestMarkersFailedBeginDoesNotStopUploads(t *testing.T) {
-	for _, status := range []int{400, 403, 500, 503, http.StatusFound} {
+func TestMarkersFailedBeginIsIgnored(t *testing.T) {
+	for _, status := range []int{400, 403, 405, 500, 503, http.StatusFound} {
 		server := newMarkerServer(t, markerReply{status, "no"})
-		collector, output := markerCollector(t, server)
+		collector, _ := markerCollector(t, server)
 		runWithin(t, collector, 10*time.Second)
 		collector.FinishRun()
 		markers, uploads := server.recorded()
@@ -205,22 +248,22 @@ func TestMarkersFailedBeginDoesNotStopUploads(t *testing.T) {
 		if len(uploads) != 2 || strings.Contains(strings.Join(uploads, " "), "scan_id") {
 			t.Errorf("HTTP %d: the files must still be sent, without scan_id: %v", status, uploads)
 		}
-		if got := collector.Stats.ErrorCount(); got != 1 || collector.Stats.MarkerErrors != 1 {
-			t.Errorf("HTTP %d: a refused begin must fail the run once, got %d error(s)", status, got)
-		}
-		if !strings.Contains(output.String(), "Could not send the collection begin marker") {
-			t.Errorf("HTTP %d: log does not report the failed begin:\n%s", status, output)
-		}
+		reply := markerReply{status, "no"}
+		checkSilentUnlessDebug(t, fmt.Sprintf("HTTP %d", status), func() *markerServer { return newMarkerServer(t, reply) },
+			fmt.Sprintf("[DEBUG] Could not send the collection begin marker to Thunderstorm: HTTP %d", status))
 	}
 }
 
 func TestMarkersBeginRetrySucceeds(t *testing.T) {
 	server := newMarkerServer(t, markerReply{503, "busy"}, markerReply{200, `{"scan_id": "abc"}`}, markerReply{200, ""})
-	collector, _ := markerCollector(t, server)
+	collector, output := markerCollector(t, server)
 	runWithin(t, collector, 10*time.Second)
 	collector.FinishRun()
 	markers, uploads := server.recorded()
 
+	if lines := markerLog(output.String()); len(lines) != 1 || !strings.Contains(lines[0], "assigned scan ID abc") {
+		t.Errorf("without --debug only the scan ID may be logged, got %q", lines)
+	}
 	if got := markerTypes(markers); strings.Join(got, ",") != "begin,begin,end" {
 		t.Errorf("expected begin, begin, end; got %v", got)
 	}
@@ -232,17 +275,23 @@ func TestMarkersBeginRetrySucceeds(t *testing.T) {
 	}
 }
 
-func TestMarkersFailedEndFailsTheRun(t *testing.T) {
-	server := newMarkerServer(t, markerReply{200, `{"scan_id": "abc"}`}, markerReply{500, "oops"})
-	collector, output := markerCollector(t, server)
-	runWithin(t, collector, 10*time.Second)
-	collector.FinishRun()
+func TestMarkersFailedEndIsIgnored(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		server := newMarkerServer(t, markerReply{200, `{"scan_id": "abc"}`}, markerReply{500, "oops"})
+		collector, output := markerCollectorWithDebug(t, server, debug)
+		runWithin(t, collector, 10*time.Second)
+		collector.FinishRun()
 
-	if got := collector.Stats.MarkerErrors; got != 1 {
-		t.Errorf("a refused end must fail the run, got %d marker error(s)", got)
-	}
-	if !strings.Contains(output.String(), "Could not send the collection end marker to Thunderstorm: HTTP 500") {
-		t.Errorf("log does not report the failed end:\n%s", output)
+		if got := collector.Stats.ErrorCount(); got != 0 {
+			t.Errorf("debug=%v: a refused end must not fail the run, got %d error(s)", debug, got)
+		}
+		lines := markerLog(output.String())
+		if !debug && (len(lines) != 1 || !strings.Contains(lines[0], "assigned scan ID abc")) {
+			t.Errorf("without --debug only the scan ID may be logged, got %q", lines)
+		}
+		if debug && !strings.Contains(output.String(), "[DEBUG] Could not send the collection end marker to Thunderstorm: HTTP 500") {
+			t.Errorf("--debug log does not report the failed end:\n%s", output)
+		}
 	}
 }
 
@@ -250,7 +299,7 @@ func TestMarkersInterruptedRunSendsInterrupted(t *testing.T) {
 	server := newMarkerServer(t, markerReply{200, `{"scan_id": "abc"}`}, markerReply{500, ""})
 	server.block = make(chan struct{})
 	defer close(server.block)
-	collector, output := markerCollector(t, server)
+	collector, output := markerCollectorWithDebug(t, server, true)
 	go func() {
 		<-server.arrived
 		collector.Interrupt()
@@ -265,11 +314,8 @@ func TestMarkersInterruptedRunSendsInterrupted(t *testing.T) {
 	if markers[1]["scan_id"] != "abc" || markers[1]["stats"] == nil {
 		t.Errorf("interrupted must carry scan_id and stats: %v", markers[1])
 	}
-	if collector.Stats.MarkerErrors != 0 {
-		t.Errorf("a refused interrupted marker is logged, not counted")
-	}
-	if !strings.Contains(output.String(), "Could not send the collection interrupted marker") {
-		t.Errorf("log does not report the failed interrupted marker:\n%s", output)
+	if !strings.Contains(output.String(), "[DEBUG] Could not send the collection interrupted marker") {
+		t.Errorf("--debug log does not report the failed interrupted marker:\n%s", output)
 	}
 }
 

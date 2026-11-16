@@ -21,10 +21,10 @@ import (
 // marker; a run that stops early (a signal, Thunderstorm unreachable for
 // server-wait, or a lost source connection) ends with an interrupted marker.
 //
-// Markers never stop a collection. A server that answers begin with 404 or 501
-// does not support them (THOR 10 and the current THOR 11 versions), and the run
-// continues exactly as without markers. A begin or end marker that a server
-// supporting them does not accept is reported and makes the exit status 1.
+// Markers never affect a collection. A server that answers begin with 404 or
+// 501 does not support them (THOR 10 and the current THOR 11 versions). Any
+// failed marker, whatever the answer, is ignored: the run continues as without
+// markers, the exit status does not change, and only --debug logs the answer.
 
 const (
 	collectorLabel = "sftp"
@@ -139,8 +139,9 @@ func (c *Collector) sendMarker(marker collectionMarker) markerAnswer {
 }
 
 // BeginRun sends the begin marker and, if the server returns a usable scan ID,
-// adds it to the upload URL. A failed begin is tried once more after
-// markerRetryDelay. Call it before Run.
+// adds it to the upload URL. A failed begin, other than 404 or 501, is tried
+// once more after markerRetryDelay. Failures are only logged with --debug.
+// Call it before Run.
 func (c *Collector) BeginRun() {
 	for attempt := 1; ; attempt++ {
 		answer := c.sendMarker(c.newMarker("begin"))
@@ -148,7 +149,7 @@ func (c *Collector) BeginRun() {
 			c.markersActive = true
 			scanID, problem := parseScanID(answer)
 			if problem != "" {
-				c.logger.Printf("Thunderstorm accepted the collection begin marker, but %s; uploads carry no scan ID", problem)
+				c.debugf("Thunderstorm accepted the collection begin marker, but %s; uploads carry no scan ID", problem)
 				return
 			}
 			c.scanID = scanID
@@ -157,15 +158,14 @@ func (c *Collector) BeginRun() {
 			return
 		}
 		if answer.unsupported() {
-			c.logger.Printf("Thunderstorm does not support collection markers (%s); continuing without a scan ID", answer)
+			c.debugf("Thunderstorm does not support collection markers (%s); continuing without a scan ID", answer)
 			return
 		}
 		if attempt == 2 {
-			atomic.AddInt64(&c.Stats.MarkerErrors, 1)
-			c.logger.Printf("Could not send the collection begin marker to Thunderstorm: %s; uploading without a scan ID", answer)
+			c.debugf("Could not send the collection begin marker to Thunderstorm: %s; ignoring it and uploading without a scan ID", answer)
 			return
 		}
-		c.logger.Printf("Could not send the collection begin marker to Thunderstorm, will try again in %v: %s", markerRetryDelay, answer)
+		c.debugf("Could not send the collection begin marker to Thunderstorm, will try again in %v: %s", markerRetryDelay, answer)
 		c.retrySleep(markerRetryDelay)
 	}
 }
@@ -202,8 +202,8 @@ func parseScanID(answer markerAnswer) (string, string) {
 
 // FinishRun sends the closing marker after Run: end for a run that listed
 // everything, interrupted for one that stopped early. Only a run whose begin
-// marker was accepted is closed. A refused end fails the run; a refused
-// interrupted marker is only logged, since the run fails anyway.
+// marker was accepted is closed. Like a failed begin, a failed end or
+// interrupted marker is only logged with --debug.
 func (c *Collector) FinishRun() {
 	if !c.markersActive {
 		return
@@ -213,13 +213,9 @@ func (c *Collector) FinishRun() {
 		markerType = "interrupted"
 	}
 	answer := c.sendMarker(c.newMarker(markerType))
-	switch {
-	case answer.succeeded(), answer.unsupported():
+	if answer.succeeded() {
 		c.debugf("Thunderstorm answered the collection %s marker with HTTP %d", markerType, answer.status)
-	case markerType == "end":
-		atomic.AddInt64(&c.Stats.MarkerErrors, 1)
-		c.logger.Printf("Could not send the collection end marker to Thunderstorm: %s", answer)
-	default:
-		c.logger.Printf("Could not send the collection %s marker to Thunderstorm: %s", markerType, answer)
+		return
 	}
+	c.debugf("Could not send the collection %s marker to Thunderstorm: %s; ignoring it", markerType, answer)
 }

@@ -221,9 +221,6 @@ func printStatistics(logger *log.Logger, s *Statistics, dryRun bool) {
 	logger.Printf("Selected: %d", s.Selected)
 	logger.Printf("%s: %d files, %d content bytes read from the source", sentLabel, s.Uploaded, s.ContentBytes)
 	logger.Printf("Errors: %d file, %d upload, %d root; unreadable directories: %d", s.FileErrors, s.UploadErrors, s.RootErrors, s.WalkErrors)
-	if s.MarkerErrors > 0 {
-		logger.Printf("Collection markers not accepted by Thunderstorm: %d", s.MarkerErrors)
-	}
 	if s.ConnectionErrors > 0 || s.NotSent > 0 || s.Interrupted > 0 {
 		logger.Printf("Incomplete: connection lost %d, interrupted %d, selected files not sent %d", s.ConnectionErrors, s.Interrupted, s.NotSent)
 	}
