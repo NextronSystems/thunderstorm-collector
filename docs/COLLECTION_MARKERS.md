@@ -1,6 +1,6 @@
 # Collection Markers: What the Collectors Send
 
-Last reviewed: **6 November 2026**, against the collectors on `master`.
+Last reviewed: **16 November 2026**, against the collectors on `master`.
 
 This document is for developers of the Thunderstorm service. It describes what
 the collectors in this repository send to `POST /api/collection`, how they react
@@ -215,21 +215,27 @@ when they upload synchronously (`--upload-synchronous`).
 | Answer | begin | end | interrupted |
 |---|---|---|---|
 | 2xx | The run starts, with the ID if it is usable | Success | Not checked |
-| 404 or 501 | Markers are unsupported. The run continues and uploads carry no `scan_id`. | Treated as success | Not checked |
-| Any other status (400, 401, 403, 500, 503 ...), a redirect, a timeout, a connection or TLS error, or an incomplete reply | Retried once after 2 seconds. If that fails too, a script collector stops **before the first upload** and exits with code 2. The Go and SFTP collectors upload every file without `scan_id`, send no `end`, and exit with code 1. | The collector exits with code 1. Uploads are not repeated. | Not checked |
+| 404 or 501 | Markers are unsupported. The run continues and uploads carry no `scan_id`. | Ignored | Ignored |
+| Any other status (400, 401, 403, 500, 503 ...) or a redirect | Retried once after 2 seconds. If that fails too, the run continues and uploads carry no `scan_id`. | Ignored | Ignored |
+| No HTTP answer: a timeout, a connection or TLS error, or an incomplete reply | Retried once after 2 seconds. If that fails too, a script collector stops **before the first upload** and exits with code 2. The Go and SFTP collectors upload every file without `scan_id`. | Ignored | Ignored |
 | Attempts | 2 | 1 | 1 |
+
+Marker answers never change a collector's exit code, and the collectors do not
+log them: a run against THOR 10 looks the same as a run before markers existed.
+The debug option of each collector (`--debug`, PowerShell `-Debugging`) shows
+every marker answer.
 
 No collector follows redirects. After a 404 or 501 on begin, PowerShell, Go and
 SFTP send no further markers in that run; the other script collectors still
-send `end` and accept the same 404 or 501 again. Go and SFTP send `end` or
-`interrupted` only after a 2xx answer to begin. An `interrupted` run always
-exits with code 1.
+send `end`. Go and SFTP send `end` or `interrupted` only after a 2xx answer to
+begin. An `interrupted` run always exits with code 1, because the collection is
+incomplete, not because of the marker.
 
-For the script collectors, the begin marker is also the connectivity check. A
-server that answers begin with anything other than 2xx, 404 or 501 stops every
-script collector before its first upload. The Go and SFTP collectors check
-`/api/status` first and keep uploading after a failed begin, but the samples
-of that run carry no ID.
+For the script collectors, the begin marker is also the connectivity check:
+only a begin that gets no HTTP answer at all stops them. The Go and SFTP
+collectors check `/api/status` first, so they keep uploading in that case too.
+In every case where begin fails, the samples of that run carry no ID, and
+nobody is told unless the collector runs with its debug option.
 
 ## When Markers Are Sent
 
@@ -281,10 +287,9 @@ breaks collections that work against THOR 10 today.
 
 1. Keep `POST /api/collection` at least as available as `/api/checkAsync`. Do
    not answer begin with 503 because the sample queue is full, and keep proxies
-   from answering it with 401 or 403. Either stops the script collectors before
-   they upload anything, and makes the Go and SFTP collectors upload the run
-   without an ID and exit with code 1. Apply back-pressure to uploads, not to
-   markers.
+   from answering it with 401 or 403. Either makes every collector upload the
+   run without an ID, and the collectors report this only in debug output.
+   Apply back-pressure to uploads, not to markers.
 2. To switch markers off, answer 404 or 501, never 400 or 403.
 3. Answer within a few seconds; the clients give up after about 10.
 4. Do not redirect `/api/collection`.
@@ -293,8 +298,7 @@ breaks collections that work against THOR 10 today.
    `.` and `:`, such as a UUID, is safe in URLs, file names and every collector.
 6. Accept the documented fields without answering 400 when an optional one is
    missing (`hostname`, `scan_id`, `stats`), and ignore unknown fields. A 400 on
-   begin aborts a script collector's run; on end it turns a completed
-   collection into exit code 1.
+   begin silently drops the run's ID; on end, the run stays open on the server.
 7. Accept `end` and `interrupted` with a `scan_id` the server does not know, for
    example after a restart, and record them. The stub server does the same.
 8. Accept uploads with an unknown, closed or missing `scan_id`.
@@ -330,7 +334,8 @@ The collectors leave these to the server:
   server.
 - The per-language robustness tests (`scripts/tests/test_*_robustness.py`) use
   local fake servers for 404 and 501, failed and malformed begin answers, failed
-  end markers and interruption by signals. The
+  end markers and interruption by signals, and check that marker answers stay
+  out of the log and the exit code unless the debug option is set. The
   [testing overview](COLLECTOR_TESTING_OVERVIEW.md) explains how to run them.
 - `go/markers_test.go` and `sftp/markers_test.go` cover the same answers for
   the Go and SFTP collectors. The Go 1.9.7 runtime check for the NetScaler
@@ -354,9 +359,12 @@ first specification in the stub repository,
 Its wire format still applies, but the collectors have changed since then in
 ways that matter to a server:
 
-- A failed begin, other than 404 or 501, now stops a script collector's run,
-  and a failed end makes the exit code 1. The first specification said that a
-  marker failure never aborts a collection.
+- For a while, a failed begin, other than 404 or 501, stopped a script
+  collector's run, and a failed end made the exit code 1. Since November 2026
+  the collectors follow the first specification again: a marker answer never
+  aborts a collection or changes its exit code, and only the debug option
+  shows it. A begin that gets no HTTP answer at all still stops the script
+  collectors, as their connectivity check.
 - `interrupted` was added as a third type. The first specification listed an
   `abort` type as a future idea.
 - `hostname`, `stats.scan_errors` and `stats.in_flight` were added.
