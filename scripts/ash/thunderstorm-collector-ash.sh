@@ -1601,8 +1601,7 @@ EOF
         if [ "${_begin_ok:-0}" -eq 1 ]; then
             # Best effort: the server was just found unreachable.
             _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_elapsed}}"
-            collection_marker "$_base_url" "interrupted" "$_SCAN_ID" "$_stats" >/dev/null ||
-                log_msg warn "Interrupted collection marker could not be sent"
+            collection_marker "$_base_url" "interrupted" "$_SCAN_ID" "$_stats" >/dev/null || true
         fi
         return 1
     fi
