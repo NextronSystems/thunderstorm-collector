@@ -212,7 +212,13 @@ class PowerShellRobustness(ScanRootAssertions):
                     marker = json.loads(data.decode("utf-8"))
                     test.markers.append(marker)
                     status = test.begin_status if marker["type"] == "begin" else test.end_status
-                    body = json.dumps(test.marker_body).encode("utf-8")
+                    if status is None:
+                        # Close without an HTTP answer: a transport failure for the client.
+                        self.close_connection = True
+                        return
+                    body = test.marker_body
+                    if not isinstance(body, bytes):
+                        body = json.dumps(body).encode("utf-8")
                     partial = test.partial_marker
                 else:
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
@@ -266,8 +272,8 @@ class PowerShellRobustness(ScanRootAssertions):
         index = 0
         while index < len(extra):
             option = extra[index]
-            if option == "--dry-run":
-                flags.append("DryRun")
+            if option in ("--dry-run", "--debug"):
+                flags.append("DryRun" if option == "--dry-run" else "Debugging")
                 index += 1
             elif option in ("--tls", "--insecure"):
                 flags.append("UseSSL" if option == "--tls" else "Insecure")
@@ -296,6 +302,17 @@ class PowerShellRobustness(ScanRootAssertions):
     def upload_attempts(self):
         return [path for path in self.paths if path.startswith("/api/check")]
 
+    def assert_no_marker_output(self):
+        # THOR 10 and current THOR 11 answer 404. Marker problems must not look like a
+        # problem with the collection, so they only show with -Debugging.
+        pattern = r"(?i)marker|scan_id|/api/collection|collection (begin|end|interrupted)"
+        self.assertIsNone(re.search(pattern, self.output), self.output)
+
+    def require_markers(self):
+        # The Batch suite inherits this class, and the Batch profile sends no markers.
+        if not self.markers:
+            self.skipTest("this collector sends no collection markers")
+
     def test_server_that_stays_away_stops_the_collection(self):
         # Every remaining file used to run through its full retry budget, hours to days
         # for a large tree once the service was gone.
@@ -303,12 +320,14 @@ class PowerShellRobustness(ScanRootAssertions):
             self.file("sample{}.bin".format(index))
         self.drop_uploads = 100
         self.status_codes = [503] * 100
+        self.end_status = 500  # the interrupted marker fails too, silently
         self.assertEqual(self.run_collector("--server-wait", "3"), 1, self.output)
         self.assertEqual(len(self.upload_attempts()), 3, self.paths)
         self.assertGreaterEqual(self.status_checks, 1)
         self.assertIn("did not accept 3 files in a row", self.output)
         self.assertIn("stopping the collection", self.output)
         self.assertNotIn("end", [marker["type"] for marker in self.markers])
+        self.assert_no_marker_output()
 
     def test_server_that_comes_back_resumes_the_collection(self):
         for index in range(5):
@@ -482,27 +501,81 @@ class PowerShellRobustness(ScanRootAssertions):
             os.chmod(blocked, 0o600)
             os.chmod(directory, 0o700)
 
-    def test_failed_end_marker_is_failure(self):
+    def test_failed_end_marker_is_ignored(self):
+        # An end marker that gets an HTTP error or no answer never changes the exit status.
         self.file()
+        for status in (500, None):
+            with self.subTest(status=status):
+                self.end_status = status
+                self.uploads[:] = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertEqual(len(self.uploads), 1, self.output)
+                self.assert_no_marker_output()
+        self.require_markers()
+        self.markers[:] = []
         self.end_status = 500
-        self.assertEqual(self.run_collector(), 1, self.output)
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assertIn("[DEBUG] Collection end marker failed (HTTP 500); ignored.", self.output)
+
+    def test_begin_marker_http_error_is_ignored(self):
+        # Any HTTP answer, after the one retry, lets the run continue without scan_id.
+        self.file()
+        for status in (500, 403, 302):
+            with self.subTest(status=status):
+                self.begin_status = status
+                self.paths = []
+                self.uploads[:] = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertEqual(len(self.uploads), 1, self.output)
+                self.assertTrue(all("scan_id=" not in path for path in self.upload_attempts()), self.paths)
+                self.assert_no_marker_output()
+        self.require_markers()
+        self.markers[:] = []
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "begin", "end"])
+        self.assertIn("[DEBUG] Retrying the begin marker in 2 seconds.", self.output)
+        self.assertIn("[DEBUG] Collection begin marker failed (HTTP 302); ignored.", self.output)
+
+    def test_oversized_begin_answer_is_ignored(self):
+        self.file()
+        self.marker_body = {"scan_id": "x" * 1048577}
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual(len(self.uploads), 1, self.output)
+        self.assertTrue(all("scan_id=" not in path for path in self.upload_attempts()), self.paths)
+        self.assert_no_marker_output()
 
     def test_optional_marker_error_body_id_is_ignored(self):
+        # THOR 10 and current THOR 11 answer 404: no marker is sent after it, and no word
+        # about it without -Debugging.
         self.file()
-        self.begin_status = self.end_status = 404
-        self.assertEqual(self.run_collector(), 0, self.output)
-        self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+        for status in (404, 501):
+            with self.subTest(status=status):
+                self.begin_status = self.end_status = status
+                self.markers[:] = []
+                self.paths = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin"])
+                self.assertEqual(len(self.upload_attempts()), 1, self.paths)
+                self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+                self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] Collection markers unsupported (HTTP 501); continuing without them.", self.output)
 
     def test_non_object_marker_json_does_not_crash(self):
         self.file()
         for body in [[], [{"scan_id": "wrong-array-id"}],
                      [[{"scan_id": "wrong-nested-id"}]],
-                     {"metadata": {"scan_id": "wrong-nested-id"}}, "string", 123, None]:
+                     {"metadata": {"scan_id": "wrong-nested-id"}}, "string", 123, None,
+                     b'{"scan_id": "not JSON']:
             with self.subTest(body=body):
                 self.marker_body = body
                 self.paths = []
                 self.assertEqual(self.run_collector(), 0, self.output)
                 self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+                self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] No usable scan_id in collection response; uploading without one.", self.output)
 
     def test_non_string_scan_id_is_not_used(self):
         self.file()
@@ -512,6 +585,7 @@ class PowerShellRobustness(ScanRootAssertions):
                 self.paths = []
                 self.assertEqual(self.run_collector(), 0, self.output)
                 self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+                self.assert_no_marker_output()
 
     def test_incomplete_2xx_upload_is_failure(self):
         self.file()
@@ -526,10 +600,19 @@ class PowerShellRobustness(ScanRootAssertions):
         self.assertIn("Submitted: 0", self.output)
 
     def test_incomplete_begin_is_fatal(self):
+        # The begin marker is the first contact with Thunderstorm: without an HTTP answer
+        # (here a truncated one, or the connection closed without one) to both attempts,
+        # the run stops before any upload instead of trying every file.
         self.file()
-        self.partial_marker = True
-        self.assertEqual(self.run_collector(), 2, self.output)
-        self.assertEqual(self.uploads, [])
+        for truncated in (True, False):
+            with self.subTest(truncated=truncated):
+                self.partial_marker = truncated
+                self.begin_status = 200 if truncated else None
+                self.markers[:] = []
+                self.assertEqual(self.run_collector(), 2, self.output)
+                self.assertEqual(self.uploads, [])
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "begin"])
+                self.assertIn("[ERROR] Cannot begin collection.", self.output)
 
     def test_503_retry_budget_and_recovery(self):
         self.file()
@@ -588,6 +671,7 @@ class PowerShellRobustness(ScanRootAssertions):
     def test_unreachable_service_is_fatal(self):
         self.file()
         self.assertEqual(self.run_collector("--port", "1"), 2, self.output)
+        self.assertIn("[ERROR] Cannot begin collection.", self.output)
 
     def test_redirect_is_failure_and_not_followed(self):
         self.file()

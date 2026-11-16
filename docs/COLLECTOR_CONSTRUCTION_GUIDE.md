@@ -277,14 +277,20 @@ instead of silently changing the ID. The shell profiles reject duplicate IDs,
 control characters, IDs over 256 bytes, and JSON deeper than 32 levels.
 Bound parsing work separately from response storage. The shell profiles do not
 parse marker JSON larger than 64 KiB, even though transport permits up to 1 MiB;
-they warn and continue without an ID. Large valid strings can consume substantial
+they continue without an ID and say so only in debug output. Large valid strings can consume substantial
 CPU in older awk implementations. Test the parser-size boundary, not only the
 HTTP response-size limit.
 
 HTTP 404/501 means markers are unsupported: continue uploads without inventing a
-scan ID, even if that error body contains a plausible `scan_id` field. Other begin transport/HTTP failures must not silently look successful.
-The replacement marker profiles try begin twice with a two-second pause, then
-fail before uploading. Document any intentionally different policy.
+scan ID, even if that error body contains a plausible `scan_id` field. THOR 10
+and the current THOR 11 versions answer 404, so this is the normal case, not a
+problem to report. Any other HTTP answer to begin is not a scan ID either: the
+existing profiles try begin twice with a two-second pause, then continue
+without an ID. None of these answers is a warning or changes the exit status;
+show them only in debug output, so that operators do not suspect a failed
+collection. A begin that gets no HTTP answer at all (connection, TLS or timeout
+failure) may serve as the profile's connectivity check and stop the run before
+uploading, as the script profiles do. Document any intentionally different policy.
 
 When begin returns a valid scan ID, URL-encode it as the optional `scan_id` query
 parameter on subsequent uploads. Preserve it in end/interrupted JSON:
@@ -307,9 +313,9 @@ failures separately from per-file failures. Optional `elapsed_seconds` and
 Different profiles enumerate filtered candidates differently, so do not invent
 a universal equation between these counters.
 
-End may summarize a partial run. An end request failing unexpectedly makes the
-overall result nonzero even if uploads succeeded. Tell the operator to inspect
-the service before repeating the scan. On graceful interruption use type
+End may summarize a partial run. A failed end or interrupted request does not
+change the overall result: the uploads decide it. Show the failure only in debug
+output. On graceful interruption use type
 `interrupted`, optionally `reason`, rather than claiming normal completion.
 Signals/host shutdown can prevent this best-effort notification; no marker is
 guaranteed after SIGKILL, power loss or blocked filesystem I/O.
@@ -471,9 +477,9 @@ shared production service. Repeat target-dependent tests on the actual runtime.
 | 503 then success; permanent 503 | Correct attempt count/backoff, recovery or bounded failure; include malformed/huge Retry-After |
 | 3xx, 4xx/5xx, misleading header text | Not counted as success; no unintended redirect or status-header confusion |
 | Truncated Content-Length/chunked 2xx, incomplete trailers, oversized response | Nonzero failure even with 2xx headers; response storage remains bounded, including errors |
-| Marker 404/501 and other begin failures | Optional endpoint degrades as declared; real handshake failures do not masquerade as success |
+| Marker 404/501 and other HTTP answers to begin | Uploads continue without a scan ID; no warning and no exit-status change without debug; a begin without any HTTP answer follows the profile's declared connectivity rule |
 | Marker JSON with null/number/single-element array/nested lookalike text | No fake scan ID propagated; valid escaped strings are preserved and safely encoded |
-| End 500 after accepted uploads | Nonzero result; accepted uploads remain visible and are not silently retransmitted |
+| End 500 after accepted uploads | Exit status unchanged and nothing logged without debug; accepted uploads are not retransmitted |
 | Untrusted CA, unrelated CA, correct CA, wrong hostname | Verified failures stay failures; correct CA+hostname succeeds; insecure tested separately if supported |
 | Tool config enabling insecure TLS or redirects | Defaults remain enforced; no upload to an unapproved redirect target |
 | Graceful interruption | Nonzero status, no false normal completion; best-effort marker only if implemented |

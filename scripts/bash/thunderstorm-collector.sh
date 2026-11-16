@@ -192,7 +192,8 @@ send_interrupted_marker() {
         [ "$USE_SSL" -eq 1 ] && _scheme="https"
         local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
         _base="${_base%/}"
-        collection_marker "$_base" "interrupted" "${SCAN_ID:-}" "$_stats" >/dev/null 2>&1
+        log_msg debug "Sending interrupted collection marker"
+        collection_marker "$_base" "interrupted" "${SCAN_ID:-}" "$_stats" >/dev/null
     fi
 }
 
@@ -200,7 +201,7 @@ on_signal() {
     # Prevent recursive signal handling
     trap '' INT TERM
     INTERRUPTED=1
-    log_msg warn "Received signal, sending interrupted marker and exiting..."
+    log_msg warn "Received signal, exiting..."
     send_interrupted_marker
     cleanup_tmp_files
     # Exit 1 for partial failure (interrupted collection)
@@ -754,10 +755,18 @@ json_escape() {
     printf '%s' "$s"
 }
 
+# marker_debug -- marker problems are shown only with --debug: THOR 10 and the
+# current THOR 11 answer 404, which is no reason to doubt the collection. The
+# lines go to stderr because collection_marker's stdout carries the scan_id.
+marker_debug() {
+    log_msg debug "$@" >&2
+}
+
 # collection_marker -- POST a begin/end marker to /api/collection
 # Args: $1=base_url  $2=type(begin|end)  $3=scan_id(optional)  $4=stats_json(optional)
 # Outputs: scan_id extracted from response on stdout (empty if unsupported or failed)
-# Returns: 0 on success, non-zero on failure
+# Returns: 0 after any complete HTTP answer, whatever its status; non-zero only
+#          when no attempt got one (connection, DNS, TLS, timeout, truncated reply)
 collection_marker() {
     local base_url="$1"
     local marker_type="$2"
@@ -788,7 +797,8 @@ collection_marker() {
     local _marker_attempts=1
     [ "$marker_type" = "begin" ] && _marker_attempts=2
 
-    local _http_code _marker_transport
+    local _http_code _marker_transport _resp_bytes _header_bytes
+    local _answered=0
     local _attempt=0
     while [ "$_attempt" -lt "$_marker_attempts" ]; do
         _attempt=$((_attempt + 1))
@@ -813,44 +823,52 @@ collection_marker() {
                 "$marker_url" 2>"$header_file"
             _marker_rc=$?
         fi
-        response_is_bounded "$resp_file" "$header_file" || return 97
-        # Validate the HTTP status code even when wget exits non-zero on 4xx/5xx.
-        # 404/501 means the server doesn't implement marker endpoint; continue without scan_id.
+        # An answer above the 1 MiB response limit is never parsed, but the server
+        # did answer: continue without scan_id.
+        _resp_bytes="$(wc -c < "$resp_file")" || return 97
+        _header_bytes="$(wc -c < "$header_file")" || return 97
+        if [ "$_resp_bytes" -gt 1048576 ] || [ "$_header_bytes" -gt 1048576 ]; then
+            marker_debug "Collection marker '$marker_type' answer exceeds the 1 MiB limit; ignoring it"
+            return 0
+        fi
         _http_code="$(grep -oE '^[[:space:]]*HTTP/[0-9.]+[[:space:]]+[0-9]+' "$header_file" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
-        if [ -n "$_http_code" ]; then
+        # Only a complete HTTP answer counts: curl -sS (without -f) exits 0 after
+        # one, wget exits 8 after an HTTP error answer. Any other exit status is a
+        # connection, TLS, timeout or truncated-reply failure, even after 2xx headers.
+        if [ -z "$_http_code" ] || { [ "$_marker_rc" -ne 0 ] &&
+            { [ "$_marker_transport" != wget ] || [ "$_marker_rc" -ne 8 ]; }; }; then
+            marker_debug "Collection marker '$marker_type' got no complete HTTP answer (${_marker_transport:-no tool} exit $_marker_rc)"
+            _marker_rc=1
+        else
             case "$_http_code" in
                 2[0-9][0-9])
-                    # Keep a transport failure even if 2xx headers were received.
+                    _marker_rc=0
+                    break
                     ;;
                 404|501)
-                    log_msg warn "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
-                    # Wget uses 8 for complete HTTP error responses.
-                    if [ "$_marker_rc" -eq 0 ] ||
-                        { [ "$_marker_transport" = wget ] && [ "$_marker_rc" -eq 8 ]; }; then
-                        return 0
-                    fi
-                    ;;
-                *)
-                    log_msg warn "Collection marker '$marker_type' received HTTP $_http_code"
-                    _marker_rc=1
+                    # The server doesn't implement the marker endpoint; continue without scan_id.
+                    marker_debug "Collection marker '$marker_type' not supported (HTTP $_http_code) — server does not implement /api/collection"
+                    return 0
                     ;;
             esac
-        else
+            marker_debug "Collection marker '$marker_type' received HTTP $_http_code"
+            _answered=1
             _marker_rc=1
         fi
-        if [ "$_marker_rc" -eq 0 ]; then
-            break
-        fi
         if [ "$_attempt" -lt "$_marker_attempts" ]; then
-            log_msg warn "Begin marker failed (attempt $_attempt/$_marker_attempts), retrying in 2s..."
+            marker_debug "Begin marker failed (attempt $_attempt/$_marker_attempts), retrying in 2s..."
             sleep 2
         fi
     done
 
-    [ "$_marker_rc" -eq 0 ] || return "$_marker_rc"
+    # Any other HTTP answer is ignored; only a server that never answered fails.
+    if [ "$_marker_rc" -ne 0 ]; then
+        [ "$_answered" -eq 1 ] && return 0
+        return "$_marker_rc"
+    fi
 
     scan_id_out="$(read_scan_id "$resp_file")" || {
-        log_msg warn "Ignoring invalid or oversized collection marker JSON or scan_id"
+        marker_debug "Ignoring invalid or oversized collection marker JSON or scan_id"
         scan_id_out=""
     }
 
@@ -1154,7 +1172,8 @@ main() {
         collection_marker "$base_url" "begin" "" "" > "$_begin_resp_file"
         _begin_rc=$?
         SCAN_ID="$(cat "$_begin_resp_file" 2>/dev/null)"
-        # If the begin marker failed after retry, the server is unreachable — fatal error
+        # No HTTP answer to either begin attempt: the server is unreachable — fatal error.
+        # Any HTTP answer, even an error status, lets the run continue without scan_id.
         if [ "$_begin_rc" -ne 0 ]; then
             log_msg error "Cannot connect to Thunderstorm server at ${base_url} (begin marker failed after retry)"
             exit 2
@@ -1341,10 +1360,9 @@ main() {
     # Send collection end marker with run statistics
     if [ "$DRY_RUN" -eq 0 ]; then
         local stats_json="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${elapsed}}"
-        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null || {
-            log_msg warn "Collection end marker failed; uploads may still have succeeded"
-            return 1
-        }
+        # A failed end marker never changes the exit status.
+        collection_marker "$base_url" "end" "$SCAN_ID" "$stats_json" >/dev/null ||
+            log_msg debug "Collection end marker failed; uploads may still have succeeded"
     fi
 
     if [ "$FILES_FAILED" -gt 0 ] || [ "$SCAN_ERRORS" -gt 0 ]; then

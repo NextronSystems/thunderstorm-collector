@@ -142,8 +142,9 @@ on_signal() {
     # Close file descriptors that may be open from the main loop
     exec 3<&- 4<&-
     PROGRESS_ACTIVE=0
-    log_msg warn "Signal received - sending interrupted collection marker"
+    log_msg warn "Signal received - exiting"
     if [ "$DRY_RUN" -eq 0 ] && [ -n "$WORK_DIR" ] && [ "${_begin_ok:-0}" -eq 1 ]; then
+        log_msg debug "Sending interrupted collection marker"
         _sig_elapsed=0
         if [ "$START_TS" -gt 0 ] 2>/dev/null; then
             _sig_elapsed=$(( $(date +%s 2>/dev/null || echo "$START_TS") - START_TS ))
@@ -823,10 +824,12 @@ json_escape() {
     printf '%s' "$_je_result"
 }
 
-# collection_marker -- POST a begin/end marker to /api/collection
-# Args: $1=base_url  $2=type(begin|end)  $3=scan_id(optional)  $4=stats_json(optional)
-# Returns: scan_id from response (empty if unsupported/failed)
-# Exit status: 0 = success, 1 = connection/request failure
+# collection_marker -- POST a begin/end/interrupted marker to /api/collection
+# Args: $1=base_url  $2=type(begin|end|interrupted)  $3=scan_id(optional)  $4=stats_json(optional)
+# Returns: scan_id from a 2xx response (empty if absent or unusable)
+# Exit status: 0 = 2xx, 404/501 (unsupported) or not sent with nc; 2 = other HTTP
+# status; 1 = no complete HTTP answer (connection, TLS, timeout, incomplete reply).
+# Markers are optional, so every outcome is logged at debug level only.
 collection_marker() {
     _cm_base_url="$1"
     _cm_type="$2"
@@ -834,7 +837,7 @@ collection_marker() {
     _cm_stats="${4:-}"
     _cm_url="${_cm_base_url%/}/api/collection"
     if [ "$UPLOAD_TOOL" = nc ]; then
-        log_msg warn "Skipping collection marker '$_cm_type': curl or GNU wget is required for /api/collection"
+        log_msg debug "Skipping collection marker '$_cm_type': curl or GNU wget is required for /api/collection"
         return 0
     fi
     _cm_resp="$WORK_DIR/marker.response"
@@ -851,7 +854,6 @@ collection_marker() {
     [ -n "$_cm_stats"   ] && _cm_body="${_cm_body},${_cm_stats}"
     _cm_body="${_cm_body}}"
 
-    _cm_ok=0
     : > "$_cm_resp" || return 1
     : > "$_cm_hdr" || return 1
     if [ "$UPLOAD_TOOL" = curl ]; then
@@ -860,44 +862,51 @@ collection_marker() {
         [ -n "$CA_CERT" ] && set -- "$@" --cacert "$CA_CERT" --capath "$CA_DIR"
         set -- "$@" "$_cm_url"
         _cm_http_code="$(run_http curl --disable --noproxy '*' --globoff "$@" 2>/dev/null)"
-        _cm_curl_rc=$?
-        response_is_bounded "$_cm_resp" "$_cm_hdr" || return 97
-        if [ "$_cm_curl_rc" -eq 0 ]; then
-            case "$_cm_http_code" in
-                2[0-9][0-9]) _cm_ok=1 ;;
-                404|501) log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"; return 0 ;;
-                *) log_msg warn "Collection marker '$_cm_type' got HTTP $_cm_http_code" ;;
-            esac
-        fi
+        _cm_rc=$?
+        # A curl stopped by the response size limit prints no status; the headers have it.
+        [ "$_cm_rc" -eq 0 ] || _cm_http_code="$(http_status "$_cm_hdr")"
     elif [ "$UPLOAD_TOOL" = wget ]; then
         set -- -O "$_cm_resp" -S --tries=1 --max-redirect=0 --header "Content-Type: application/json" --post-data "$_cm_body" --timeout=10
         [ "$INSECURE" -eq 1 ] && set -- "$@" --no-check-certificate
         [ -n "$CA_CERT" ] && set -- "$@" "--ca-certificate=$CA_CERT" "--ca-directory=$CA_DIR"
         set -- "$@" "$_cm_url"
         run_http wget --no-config --no-proxy "$@" 2>"$_cm_hdr"
-        _cm_wget_rc=$?
-        response_is_bounded "$_cm_resp" "$_cm_hdr" || return 97
+        _cm_rc=$?
+        # wget exits 8 for an HTTP error status; the status line, not the code, decides.
         _cm_http_code="$(http_status "$_cm_hdr")"
-        case "$_cm_http_code" in
-            404|501)
-                case "$_cm_wget_rc" in 0|8)
-                    log_msg warn "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"
-                    return 0 ;;
-                esac ;;
-            2[0-9][0-9]) [ "$_cm_wget_rc" -eq 0 ] && _cm_ok=1 ;;
-            *) log_msg warn "Collection marker '$_cm_type' got HTTP ${_cm_http_code:-unknown}" ;;
-        esac
     else
         return 1
     fi
-    [ "$_cm_ok" -eq 1 ] || return 1
+
+    # run_http keeps both files within the size limit; read_scan_id parses at most 64 KiB.
+    case "$_cm_http_code" in
+        2[0-9][0-9])
+            # An incomplete 2xx reply is no answer, unless the size limit cut it off.
+            if [ "$_cm_rc" -ne 0 ] &&
+                [ "$(wc -c < "$_cm_resp" | tr -d ' \t')" -lt 1048576 ]; then
+                log_msg debug "Collection marker '$_cm_type' got an incomplete HTTP $_cm_http_code reply (code $_cm_rc)"
+                return 1
+            fi
+            ;;
+        404|501)
+            log_msg debug "Collection marker '$_cm_type' not supported (HTTP $_cm_http_code)"
+            return 0
+            ;;
+        [1-9][0-9][0-9])
+            log_msg debug "Collection marker '$_cm_type' got HTTP $_cm_http_code"
+            return 2
+            ;;
+        *)
+            log_msg debug "Collection marker '$_cm_type' got no HTTP answer (code $_cm_rc)"
+            return 1
+            ;;
+    esac
 
     _cm_id="$(read_scan_id "$_cm_resp")" || {
-        log_msg warn "Ignoring invalid or oversized collection marker JSON or scan_id"
+        log_msg debug "Ignoring invalid or oversized collection marker JSON or scan_id"
         _cm_id=""
     }
     printf '%s' "$_cm_id"
-    [ "$_cm_ok" -eq 1 ]
 }
 
 submit_file() {
@@ -1192,24 +1201,26 @@ EOF
     _GLOBAL_SCAN_ID=""
 
     # Send collection begin marker; capture scan_id if server returns one
-    # Retry once after 2s on initial connection failure
+    # Retry once after 2s unless the server answered 2xx or 404/501. The begin
+    # marker is the connectivity check: only a server that gave no HTTP answer to
+    # either attempt is fatal; other marker answers never change the exit status.
     if [ "$DRY_RUN" -eq 0 ]; then
         _begin_ok=0
         _scan_id_file="$WORK_DIR/begin.id"
-        if collection_marker "$_base_url" "begin" "" "" > "$_scan_id_file"; then
-            IFS= read -r _SCAN_ID < "$_scan_id_file" || true
-            _begin_ok=1
-        fi
-        if [ "$_begin_ok" -eq 0 ]; then
-            log_msg warn "Begin marker failed; retrying in 2 seconds..."
+        collection_marker "$_base_url" "begin" "" "" > "$_scan_id_file"
+        _begin_rc=$?
+        if [ "$_begin_rc" -ne 0 ]; then
+            log_msg debug "Begin marker failed; retrying in 2 seconds..."
             sleep 2
-            if collection_marker "$_base_url" "begin" "" "" > "$_scan_id_file"; then
-                IFS= read -r _SCAN_ID < "$_scan_id_file" || true
-                _begin_ok=1
-            else
+            _first_begin_rc="$_begin_rc"
+            collection_marker "$_base_url" "begin" "" "" > "$_scan_id_file"
+            _begin_rc=$?
+            if [ "$_begin_rc" -eq 1 ] && [ "$_first_begin_rc" -eq 1 ]; then
                 die "Cannot connect to Thunderstorm server at ${_base_url}/api/collection after retry"
             fi
         fi
+        IFS= read -r _SCAN_ID < "$_scan_id_file" || true
+        _begin_ok=1
         rm -f "$_scan_id_file"
         if [ -n "$_SCAN_ID" ]; then
             log_msg info "Collection scan_id: $_SCAN_ID"
@@ -1221,7 +1232,7 @@ EOF
             esac
             log_msg debug "API endpoint (with scan_id): $_api_endpoint"
         else
-            log_msg warn "Could not obtain scan_id from server; continuing without it"
+            log_msg debug "Could not obtain scan_id from server; continuing without it"
         fi
     fi
 
@@ -1373,13 +1384,11 @@ EOF
 
     log_msg info "Run completed: scanned=$FILES_SCANNED submitted=$FILES_SUBMITTED skipped=$FILES_SKIPPED failed=$FILES_FAILED scan_errors=$SCAN_ERRORS seconds=$_elapsed"
 
-    # Send collection end marker with run statistics
+    # Send collection end marker with run statistics; its outcome never changes
+    # the exit status (failures are logged at debug level).
     if [ "$DRY_RUN" -eq 0 ]; then
         _stats="\"stats\":{\"scanned\":${FILES_SCANNED},\"submitted\":${FILES_SUBMITTED},\"skipped\":${FILES_SKIPPED},\"failed\":${FILES_FAILED},\"scan_errors\":${SCAN_ERRORS},\"elapsed_seconds\":${_elapsed}}"
-        collection_marker "$_base_url" "end" "$_SCAN_ID" "$_stats" >/dev/null || {
-            log_msg warn "Collection end marker failed; uploads may still have succeeded"
-            return 1
-        }
+        collection_marker "$_base_url" "end" "$_SCAN_ID" "$_stats" >/dev/null || true
     fi
 
     # Exit code: 0 = success, 1 = incomplete collection.

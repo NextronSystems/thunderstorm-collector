@@ -67,9 +67,9 @@ output. Keep externally captured logs outside the input directories.
 - Source is percent-encoded in the query string; payload bytes remain unchanged. Multipart filename metadata replaces quotes, backslashes, semicolons and every control character (CR, LF, TAB, ESC, DEL, ...) with underscores; a strict multipart parser rejects control characters in a part header and the file would never be collected.
 - `--ca-cert FILE` is the **only** trust anchor: an empty CA directory is passed to curl (`--capath`) and GNU wget (`--ca-directory`), so system CAs are not trusted in addition. The nc transport has no TLS.
 - Async `/api/checkAsync` submission only; there is no synchronous mode, and `--async` is accepted and ignored so existing command lines keep working. Async success means accepted, not analysis completed. The collector does not poll async results.
-- Optional begin/end/interrupted `/api/collection` markers. HTTP 404/501 is nonfatal and supplies no scan ID. Other begin failures retry once after two seconds, then abort; end failures produce a nonzero exit.
-- Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored with a warning.
-- Marker JSON above 64 KiB is not parsed: uploads continue without a scan ID and a warning is emitted. This bounds parser work on older awk runtimes.
+- Optional begin/end/interrupted `/api/collection` markers. Marker results are logged only with `--debug`. HTTP 404/501 (no marker support) supplies no scan ID. Any other HTTP status on begin is retried once after two seconds; uploads then continue without a scan ID. The begin marker doubles as the connectivity check: only a begin that gets no HTTP answer to either attempt (connection, TLS, timeout or incomplete reply) aborts with exit 2. End and interrupted marker results never change the exit status.
+- Marker IDs must be top-level JSON strings of at most 256 bytes without control characters. Unicode escapes are decoded; nested, duplicate, non-string and malformed IDs are ignored (a debug message with `--debug`).
+- Marker JSON above 64 KiB, including an answer cut off at the 1 MiB response limit, is not parsed: uploads continue without a scan ID (a debug message with `--debug`). This bounds parser work on older awk runtimes.
 - `--retries 1..10` bounds total attempts per file, including HTTP 503. Retry-After integer seconds cap at 120; otherwise backoff starts at two seconds and caps at 60. A lost response can cause duplicates; no deduplication or resume.
 - Dry-run needs no upload tool and never contacts the server. CLI, file and optional syslog logging are supported.
 
@@ -85,8 +85,8 @@ Only the first 4096 bytes of traversal diagnostics are retained and logged per r
 | Exit | Meaning |
 |---|---|
 | 0 | All eligible supported files submitted, or successful dry-run; intentional filter skips allowed |
-| 1 | Partial/incomplete run, interruption, failed file, scan error, or failed end marker |
-| 2 | Invalid configuration, missing dependencies, workspace failure, or failed begin after retry |
+| 1 | Partial/incomplete run, interruption, failed file or scan error |
+| 2 | Invalid configuration, missing dependencies, workspace failure, or no HTTP answer to the begin marker after retry |
 
 An empty existing root can succeed with zero files; missing roots cannot. Netcat has no begin connectivity check, so an unreachable service fails per-file with exit 1 rather than curl/GNU wget's begin-stage exit 2. Logging failures disable file logging with a warning; they do not alone fail uploads.
 
@@ -258,9 +258,9 @@ Repeat positive binary/special-name tests on the actual appliance where curl is 
 
 ### 10. Interruption and Server Failures
 
-Interrupt an isolated fixture run with Ctrl-C, SIGTERM, SIGHUP or SIGQUIT, not a broad system-directory scan. Expected: exit 1 and workspace cleanup. Interrupted markers are best-effort and only available with curl/GNU wget and a supporting service. A client message does not prove receipt.
+Interrupt an isolated fixture run with Ctrl-C, SIGTERM, SIGHUP or SIGQUIT, not a broad system-directory scan. Expected: exit 1 and workspace cleanup. Interrupted markers are best-effort and only available with curl/GNU wget and a supporting service. A client debug message does not prove receipt.
 
-Do not disrupt real THOR to simulate HTTP 500/503 or truncated responses. The regression suite injects those failures locally, checks retry bounds, and rejects incomplete responses despite a 2xx status. A service returning 404/501 for markers can pass uploads; record marker functionality as NOT SUPPORTED.
+Do not disrupt real THOR to simulate HTTP 500/503 or truncated responses. The regression suite injects those failures locally, checks retry bounds, and rejects incomplete responses despite a 2xx status. A service returning 404/501 for markers can pass uploads; `--debug` then shows `not supported (HTTP 404)`. Record marker functionality as NOT SUPPORTED.
 
 ### 11. Acceptance Record and Cleanup
 

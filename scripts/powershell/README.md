@@ -69,17 +69,17 @@ selected roots. The collector does not create its own log file.
 | Age | Default 30 days; last modification time UTC only, >= start minus MaxAge days. Creation time does NOT override an old modification time. MaxAge 0 disables the filter. |
 | Size | MaxSize is MiB, inclusive, 1..200; default 2. No silent clamping. |
 | Upload | Binary-safe multipart file; empty files included. Async `/api/checkAsync` only; does not poll analysis results. |
-| Collection markers | Optional /api/collection. Only 404/501 disable markers; other begin failures are fatal. Failed end markers cause nonzero exit. |
+| Collection markers | Optional /api/collection. 404/501 disable markers. Any other HTTP answer to begin (after the retry) is ignored and uploads go without scan_id; only a begin that gets no HTTP answer to either attempt (no connection, timeout, TLS failure, closed or truncated reply) is fatal, exit 2, because it is the first contact with the service. End and interrupted marker failures never change the exit status. Marker problems are shown only with -Debugging. |
 | Marker IDs | Only top-level JSON object string IDs are used. Arrays, including single-element arrays, nested-only IDs and non-string IDs are ignored. |
-| Legacy JSON | PS2 needs .NET 3.5 System.Web.Extensions for marker parsing; if absent, markers are explicitly disabled, not parsed with regex. Uploads still work. |
+| Legacy JSON | PS2 needs .NET 3.5 System.Web.Extensions for marker parsing; if absent, markers are explicitly disabled (noted with -Debugging), not parsed with regex. Uploads still work. |
 | TLS | OS certificate AND hostname verification by default. TLS 1.2 enabled where the OS/.NET supports it; old systems may not connect to modern servers. Process-wide validation overrides left in the session by other scripts (`ServicePointManager` callback, legacy `CertificatePolicy`) are cleared for the run and restored afterwards. |
 | Custom TLS | CACert (one PEM/DER public root) and Insecure need per-request callbacks, available on .NET 4.5+. Older CLR rejects these options; use OS trust instead. No global trust installation. |
 | Custom CA limits | Platform hostname check retained, chain anchored at the supplied root, validity/server-auth checked; revocation checking is not implemented for this custom-root mode. Intermediate certificates sent by the server are used to build the chain, which must still end at the supplied root. |
 | Retries | Retries 1..10 is TOTAL upload attempts, default 3. HTTP 503 integer Retry-After capped at 120 seconds; no independent second retry budget. |
 | Server loss | After 3 files in a row got no answer other than 503 (busy), sending stops and `/api/status` is polled (2, 4, 8 ... up to 60 seconds apart) for up to ServerWait seconds, default 600, 0..86400. If the service answers, the run continues with the next file; otherwise it stops, sends a best-effort interrupted marker and exits 1. ServerWait 0 stops at once. |
 | Timeouts | Each read or write may stall for at most 30 seconds. An upload attempt may take 30 seconds plus the time to send its body at 64 KiB/s, so a large file over a slow link is not cut off. Markers use 10 seconds; begin retries once after 2 seconds. DNS/OS scheduling can add overhead. |
-| Exit | 0 = transfer/selection run completed, 1 = partial failures/interruption/end failure/service unreachable for ServerWait, 2 = invalid config/no usable roots/fatal begin. Parser/runtime launch errors can use the interpreter's code. |
-| Logging | Console only; no self-generated scan log beside the collector to accidentally upload. Debugging adds marker diagnostics. NoProgress overrides Progress. |
+| Exit | 0 = transfer/selection run completed, 1 = partial failures/interruption/service unreachable for ServerWait, 2 = invalid config/no usable roots/no answer to the begin marker. Marker HTTP answers never set the exit status. Parser/runtime launch errors can use the interpreter's code. |
+| Logging | Console only; no self-generated scan log beside the collector to accidentally upload. Debugging adds marker diagnostics; without it, marker problems (THOR 10 and current THOR 11 answer 404) are not shown. NoProgress overrides Progress. |
 
 Snapshots are read before connecting, under a Windows read lock, then checked for
 size/mtime changes. Memory can be several times the largest selected file. Link and
@@ -166,7 +166,7 @@ Confirm the source string exactly where server output exposes it. Empty finding
 arrays are NOT proof of source metadata or byte integrity. Wait for async completion
 in the service before deciding whether scanning succeeded.
 
-PS2 without a JSON parser may warn that collection markers are disabled; record
+PS2 without a JSON parser disables collection markers; -Debugging shows it. Record
 NOT SUPPORTED rather than declaring the marker test passed.
 
 ## 3. Extension, Age and Size Boundaries
@@ -282,7 +282,7 @@ Remove-Item Env:\POWERSHELL_RUNTIME
 ```
 
 This checks complete/truncated replies, ignored redirects, bounded 503 retries and
-recovery, end-marker failures, bytes, source escaping, filters and missing/locked files.
+recovery, ignored marker failures, bytes, source escaping, filters and missing/locked files.
 Read skips: PS5.1/PS7 runs are not PS2 certification.
 
 For Ctrl+C, use a deliberately larger synthetic test tree against an authorized

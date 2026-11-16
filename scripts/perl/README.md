@@ -58,8 +58,8 @@ output, append `2>&1 | tee /path/outside-input/collector.log` to your command, b
 capture the collector exit code separately: the pipeline may report tee's status.
 The collector does not create a log file itself. Keep captured logs outside the
 input directories and review a dry-run before enabling uploads.
-The debug flag is retained for CLI compatibility; it does not add diagnostics in
-this profile. Errors and the startup scope are always reported.
+`--debug` adds `[DEBUG]` lines on stderr for collection marker answers, which are
+otherwise ignored without output. Errors and the startup scope are always reported.
 
 ## Capability Profile
 
@@ -68,7 +68,7 @@ this profile. Errors and the startup scope are always reported.
 - Default age 30 days; --max-age 0..36500, zero disables filtering; otherwise mtime compared to start minus N times 86400 seconds.
 - Default size 2048 KiB; --max-size-kb 1..204800 includes exact limit. Bounded in-memory snapshot precedes network access; multipart construction needs several times the configured file size in RAM. Replaced/changed/unreadable files fail; newly oversized files are skipped. Not a filesystem-wide atomic snapshot.
 - Async /api/checkAsync only; no synchronous mode, and --async is accepted and ignored so existing command lines keep working. Complete 2xx means accepted, not finished analysis; no polling/resume/deduplication. Lost responses/retries can duplicate uploads.
-- Optional markers: 404/501 nonfatal without scan ID; real JSON parsing rather than regex extraction. Only a top-level JSON string is used as the scan ID; numbers, booleans, arrays and objects are ignored. Begin retries once after two seconds, then exits 2; failed end exits 1. SIGINT/SIGTERM sets an interruption flag; network I/O completes or times out before best-effort interrupted marker and exit 1. No further uploads after interruption is observed.
+- Optional markers: an HTTP answer other than 2xx (404/501 from a server without marker support, any other status) is ignored without output; uploads then carry no scan ID, and marker answers never change the exit status. Real JSON parsing rather than regex extraction. Only a top-level JSON string is used as the scan ID; numbers, booleans, arrays and objects are ignored. Begin retries once after two seconds unless the answer was 404/501. The begin marker is the first request to the server: if neither attempt gets an HTTP answer (connection refused, DNS/TLS failure, timeout, empty or incomplete reply), the collector exits 2 before uploading. A failed end or interrupted marker is ignored. SIGINT/SIGTERM sets an interruption flag; network I/O completes or times out before best-effort interrupted marker and exit 1. No further uploads after interruption is observed.
 - --retries 1..10 counts total attempts; 503 integer Retry-After caps at 120 seconds, exponential delays at 60. No automatic redirects or environment-proxy discovery.
 - Upload timeout 30 seconds and marker timeout 10 are LWP idle-I/O limits, not whole-run deadlines. Response limit 1 MiB; aborted or length-incomplete 2xx responses fail. Chunked HTTP/HTTPS responses must include complete chunks, a terminating zero chunk and complete trailers; socket EOF cannot substitute for those delimiters, including on older LWP/Net::HTTP installations.
 - --ssl verifies hostname and peer explicitly; --ca-cert FILE selects a CA; --insecure is explicit bypass. TLS-only options without --ssl are rejected, never silently converted to plaintext.
@@ -80,8 +80,8 @@ this profile. Errors and the startup scope are always reported.
 | Exit | Meaning |
 |---|---|
 | 0 | All eligible files accepted or successful dry-run; intentional skips allowed |
-| 1 | Failed files, traversal/partial-root errors, interruption or end-marker failure |
-| 2 | Invalid config/dependencies, no valid roots or failed begin |
+| 1 | Failed files, traversal/partial-root errors or interruption |
+| 2 | Invalid config/dependencies, no valid roots or no HTTP answer to the begin marker |
 
 Unreadable directories count as Scan errors; unreadable selected files as Failed. Existing empty roots can succeed; missing roots cannot. A missing interpreter or startup module can fail before the collector's exit-code handling runs. Record the diagnostic and actual nonzero exit status rather than expecting a fixed value such as 255; these startup failures are outside the table above. Legacy Perl/SSL and Windows builds require their own target-system acceptance. Transport limits follow the [LWP documentation](https://metacpan.org/pod/LWP::UserAgent).
 

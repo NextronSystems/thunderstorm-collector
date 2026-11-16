@@ -37,7 +37,7 @@ my $MAX_SIZE_KB = 2048;      # KiB (1024 bytes), 1..204800; 2048 = 2 MiB, exact 
 
 my $RETRIES = 3;             # TOTAL upload attempts including the first, 1..10.
 my $DRY_RUN = 0;             # 1 = preview only; 0 = real uploads (--dry-run / --no-dry-run).
-my $DEBUG = 0;               # Compatibility flag (--debug / --no-debug); no extra logging in this profile.
+my $DEBUG = 0;               # 1 = print ignored collection marker answers as [DEBUG] lines (--debug / --no-debug).
 # Progress is automatic on terminals; --progress / --no-progress overrides it.
 # The console log (stderr) includes roots and limits. Capture it outside the scan
 # roots if a persistent log is needed; this collector does not create a log file.
@@ -134,11 +134,13 @@ if ($help) {
     print "Usage: perl thunderstorm-collector.pl --server HOST --port 8080 --dir PATH\n",
           "Repeat --dir; --max-age 0 disables age filtering; --max-size-kb uses KiB.\n",
           "--source TEXT --ssl [--ca-cert FILE|--insecure] --dry-run --retries 1..10\n",
+          "--debug prints ignored collection marker answers as [DEBUG] lines.\n",
           "Override enabled header flags: --no-tls --verify-tls --no-dry-run --no-debug\n",
           "--async is accepted for compatibility; uploads are always asynchronous.\n";
     exit 0;
 }
 sub config_error { print STDERR "[ERROR] $_[0]\n"; exit 2 }
+sub debug_log { print STDERR '[DEBUG] ', @_, "\n" if $debug }
 config_error('Unknown positional arguments') if @ARGV;
 config_error('Thunderstorm server is not configured. Set THUNDERSTORM_SERVER in USER CONFIGURATION or pass --server HOST.')
     unless defined $server && length $server;
@@ -207,6 +209,7 @@ sub stats {
     return {scanned => $scanned, submitted => $submitted, failed => $failed,
             skipped => $skipped, scan_errors => $scan_errors, elapsed_seconds => time - $start};
 }
+my $OVERSIZED = "Response exceeds the 1 MiB limit\n";
 sub request {
     my ($url, $content_type, $body, $timeout) = @_;
     my $req = HTTP::Request->new(POST => $url);
@@ -219,6 +222,10 @@ sub request {
     $ua->timeout($old_timeout);
     die $error if $error;
     die "No HTTP response\n" unless $resp;
+    # LWP stops reading at max_size and marks the reply; with a real status line,
+    # that is a complete answer from the server whose body is too large.
+    die $OVERSIZED if ($resp->header('Client-Aborted') || '') eq 'max_size' &&
+        ($resp->protocol || '') =~ m{^HTTP/1\.[01]$};
     die "Transport aborted\n" if $resp->header('Client-Aborted') || $resp->header('X-Died') ||
         ($resp->header('Client-Warning') || '') =~ /Internal response/;
     # LWP reads a reply without a valid HTTP status line (an SSH banner, an SMTP
@@ -230,6 +237,9 @@ sub request {
         if defined $length && ($length !~ /^\d+$/ || length($resp->content) != $length);
     return $resp;
 }
+# Markers are optional: an HTTP answer other than 2xx is ignored and only shown with
+# --debug. Returns 0 only when no attempt got an HTTP answer at all; for the begin
+# marker, the first contact with the server, that is fatal.
 sub marker {
     my ($kind) = @_;
     return 1 if $dry;
@@ -237,11 +247,18 @@ sub marker {
                 collector => 'perl/0.3', timestamp => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime)};
     $body->{scan_id} = $scan_id if length $scan_id;
     $body->{stats} = stats() unless $kind eq 'begin';
-    for my $attempt (1 .. ($kind eq 'begin' ? 2 : 1)) {
+    my $attempts = $kind eq 'begin' ? 2 : 1;
+    my $answered = 0;
+    for my $attempt (1 .. $attempts) {
         last if $interrupted && $kind ne 'interrupted';
         my $resp = eval { request("$base/api/collection", 'application/json', $json->encode($body), 10) };
+        if (!$resp && $@ eq $OVERSIZED) {
+            # An answer, but no usable one: like an unusable body, not a lost server.
+            debug_log("Collection $kind: answer exceeds the 1 MiB limit; ignoring it");
+            return 1;
+        }
         if ($resp && ($resp->code == 404 || $resp->code == 501)) {
-            print STDERR "[WARN] Collection markers unsupported (HTTP ", $resp->code, ")\n";
+            debug_log('Collection markers unsupported (HTTP ', $resp->code, ')');
             return 1;
         }
         if ($resp && $resp->is_success) {
@@ -250,13 +267,26 @@ sub marker {
                 $scan_id = $data->{scan_id} if ref($data) eq 'HASH' &&
                     defined $data->{scan_id} && !ref($data->{scan_id}) &&
                     $json->encode($data->{scan_id}) =~ /^"/;
+                debug_log('Collection begin: no usable scan_id in the response') unless length $scan_id;
             }
             return 1;
         }
-        print STDERR "[ERROR] Collection $kind: ", $@ || ($resp ? $resp->status_line : 'no response'), "\n";
-        sleep 2 if $kind eq 'begin' && $attempt == 1 && !$interrupted;
+        # request() dies unless LWP got a real HTTP/1.x answer, so $resp is an answer.
+        $answered = 1 if $resp;
+        my $error = $@ || ($resp ? $resp->status_line : 'no response');
+        $error =~ s/\s+\z//;
+        if ($kind eq 'begin' && $attempt == $attempts && !$answered) {
+            print STDERR "[ERROR] Collection begin: $error\n";
+        } else {
+            debug_log("Collection $kind: $error");
+        }
+        if ($kind eq 'begin' && $attempt == 1 && !$interrupted) {
+            debug_log('Collection begin: retrying in 2 seconds');
+            sleep 2;
+        }
     }
-    return 0;
+    debug_log('Collection begin: continuing without scan_id') if $kind eq 'begin' && $answered;
+    return $answered;
 }
 sub eligible {
     my ($metadata) = @_;
@@ -395,7 +425,7 @@ if ($interrupted) {
     print STDERR "Thunderstorm Collector Run interrupted\n";
     exit 1;
 }
-my $end_ok = marker('end');
+marker('end');
 print STDERR "Thunderstorm Collector Run finished (Checked: $scanned Submitted: $submitted Failed: $failed " .
              "Skipped: $skipped Scan errors: $scan_errors Seconds: " . (time - $start) . ")\n";
-exit(($failed || $scan_errors || $interrupted || !$end_ok) ? 1 : 0);
+exit(($failed || $scan_errors || $interrupted) ? 1 : 0);

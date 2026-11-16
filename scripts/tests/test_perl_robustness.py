@@ -55,6 +55,7 @@ class PerlRobustness(unittest.TestCase):
         self.begin_status = self.end_status = 200
         self.partial = False
         self.partial_marker = False
+        self.partial_end = False
         self.chunked_upload = None
         self.chunked_marker = None
         self.marker_body = {"scan_id": "scan + & /"}
@@ -76,7 +77,7 @@ class PerlRobustness(unittest.TestCase):
                     test.markers.append(marker)
                     status = test.begin_status if marker["type"] == "begin" else test.end_status
                     body = json.dumps(test.marker_body).encode("utf-8")
-                    partial = test.partial_marker
+                    partial = test.partial_marker or (test.partial_end and marker["type"] != "begin")
                     chunked = test.chunked_marker
                     if test.pause_begin and marker["type"] == "begin":
                         test.started.set()
@@ -319,16 +320,95 @@ class PerlRobustness(unittest.TestCase):
             os.chmod(blocked, 0o600)
             os.chmod(directory, 0o700)
 
-    def test_failed_end_marker_is_failure(self):
+    def assert_no_marker_output(self, output=None):
+        # THOR 10 and current THOR 11 answer the marker endpoint with 404; nothing about
+        # markers may reach the normal log levels, so users do not suspect a failed collection.
+        output = self.output if output is None else output
+        self.assertIsNone(re.search(r"(?i)marker|scan_id|/api/collection|\bcollection\b|\[DEBUG\]",
+                                    output), output)
+
+    def test_failed_end_marker_is_silent_and_not_a_failure(self):
         self.file()
         self.end_status = 500
-        self.assertEqual(self.run_collector(), 1, self.output)
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual(len(self.uploads), 1)
+        self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] Collection end: 500 Internal Server Error", self.output)
+
+    def test_end_marker_transport_failure_is_silent_and_not_a_failure(self):
+        self.file()
+        self.partial_end = True
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+        self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] Collection end: Incomplete/invalid response length", self.output)
 
     def test_optional_marker_error_body_id_is_ignored(self):
         self.file()
         self.begin_status = self.end_status = 404
         self.assertEqual(self.run_collector(), 0, self.output)
         self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+
+    def test_unsupported_markers_are_silent_unless_debug(self):
+        for name in ("one.bin", "two.bin"):
+            self.file(name)
+        for status in (404, 501):
+            with self.subTest(status=status):
+                self.begin_status = self.end_status = status
+                self.uploads = []
+                self.markers = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertEqual(len(self.uploads), 2, self.output)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+                self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] Collection markers unsupported (HTTP 501)", self.output)
+
+    def test_http_error_begin_is_ignored_and_uploads_go_out_without_scan_id(self):
+        # Only a begin marker without any HTTP answer stops the run (see the unreachable test).
+        self.file()
+        for status in (500, 403, 302):
+            with self.subTest(status=status):
+                self.begin_status = status
+                self.paths = []
+                self.uploads = []
+                self.markers = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertEqual(self.uploads, [b"\x00\xffTHUNDER\n"])
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "begin", "end"])
+                self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+                self.assertTrue(all("scan_id" not in marker for marker in self.markers))
+                self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        for line in ("[DEBUG] Collection begin: 302 Found", "[DEBUG] Collection begin: retrying in 2 seconds",
+                     "[DEBUG] Collection begin: continuing without scan_id"):
+            self.assertIn(line, self.output)
+
+    def test_oversized_begin_answer_is_ignored(self):
+        # Over LWP's 1 MiB max_size: a complete answer from the server, not a lost one.
+        self.file()
+        self.marker_body = {"scan_id": "x" * (1024 * 1024)}
+        self.assertEqual(self.run_collector(), 0, self.output)
+        self.assertEqual(len(self.uploads), 1)
+        self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+        self.assertEqual([m["type"] for m in self.markers], ["begin", "end"])
+        self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] Collection begin: answer exceeds the 1 MiB limit; ignoring it", self.output)
+
+    def test_unusable_2xx_begin_body_is_silent_unless_debug(self):
+        self.file()
+        for body in (["not", "an", "object"], {"scan_id": 123}, {"other": "value"}):
+            with self.subTest(body=body):
+                self.marker_body = body
+                self.paths = []
+                self.assertEqual(self.run_collector(), 0, self.output)
+                self.assertTrue(all("scan_id=" not in path for path in self.paths if "/api/check" in path))
+                self.assert_no_marker_output()
+        self.assertEqual(self.run_collector("--debug"), 0, self.output)
+        self.assertIn("[DEBUG] Collection begin: no usable scan_id in the response", self.output)
 
     def test_non_object_marker_json_does_not_crash(self):
         self.file()
@@ -477,7 +557,7 @@ class PerlRobustness(unittest.TestCase):
         finally:
             close()
         self.assertEqual(code, 2, self.output)
-        self.assertIn("Collection begin", self.output)
+        self.assertIn("[ERROR] Collection begin: Response is not HTTP/1.x", self.output)
         self.assertFalse(any("/api/checkAsync" in line for line in requests), requests)
 
     def test_incomplete_begin_is_fatal(self):
@@ -549,12 +629,18 @@ class PerlRobustness(unittest.TestCase):
         self.assertEqual(self.paths, [])
 
     def test_unreachable_service_is_fatal(self):
+        # The begin marker is the connectivity check: no HTTP answer on both attempts stops the run.
         self.file()
         self.assertEqual(self.run_collector("--port", "1"), 2, self.output)
+        self.assertEqual(len(re.findall(r"\[ERROR\] Collection begin: ", self.output)), 1, self.output)
+        self.assertNotIn("Thunderstorm Collector Run finished", self.output)
+        self.assertEqual(self.run_collector("--port", "1", "--debug"), 2, self.output)
+        self.assertIn("[DEBUG] Collection begin: retrying in 2 seconds", self.output)
 
     def test_sigterm_sends_interrupted_not_end(self):
         self.file()
         self.pause = True
+        self.end_status = 500  # a failed interrupted marker stays silent
         process = subprocess.Popen(self.command(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             self.assertTrue(self.started.wait(5), "upload did not begin")
@@ -566,6 +652,7 @@ class PerlRobustness(unittest.TestCase):
             timer.cancel()
             self.assertEqual(process.returncode, 1, output)
             self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+            self.assert_no_marker_output(output.decode("utf-8", "replace"))
         finally:
             if process.poll() is None:
                 process.kill()

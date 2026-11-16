@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -63,7 +64,8 @@ class AshRobustnessTests(unittest.TestCase):
                 if self.path.startswith("/api/collection"):
                     marker = json.loads(data)
                     test.markers.append(marker)
-                    status = test.end_status if marker["type"] == "end" else test.marker_status
+                    status = (test.end_status if marker["type"] in ("end", "interrupted")
+                              else test.marker_status)
                     response = (test.marker_response if test.marker_response is not None else
                                 json.dumps({"scan_id": test.scan_id}).encode())
                     partial = test.partial_marker_response
@@ -150,6 +152,13 @@ class AshRobustnessTests(unittest.TestCase):
 
     def assert_payloads(self, expected):
         self.assertCountEqual(expected, [payload for _, payload in self.uploads], self.output)
+
+    def assert_no_marker_output(self, text):
+        # Markers are optional: without --debug only an assigned scan ID may be logged.
+        for line in text.lower().splitlines():
+            if "collection scan_id:" not in line:
+                for word in ("marker", "scan_id", "/api/collection"):
+                    self.assertNotIn(word, line, text)
 
     def assert_debug_transport(self, name):
         (self.samples / "real.txt").write_bytes(b"transport fixture")
@@ -355,7 +364,10 @@ exit 7
                 self.assertEqual(len(uploads), 1)
                 self.assertEqual("scan_id=" in uploads[0], size == 65536)
                 if size > 65536:
-                    self.assertIn("Ignoring invalid or oversized collection marker JSON", self.output)
+                    self.assert_no_marker_output(self.output)
+                    result = self.run_collector("--debug")
+                    self.assertEqual(result.returncode, 0, self.output)
+                    self.assertIn("[debug] Ignoring invalid or oversized collection marker JSON", self.output)
 
     def test_marker_unicode_escapes_are_preserved(self):
         (self.samples / "real.txt").write_bytes(b"readable")
@@ -418,9 +430,17 @@ exit 7
                     if size > 1048576:
                         self.assertIn("submitted=0", self.output)
                     self.assertLess(len(self.output), 20000)
+            # An oversized 2xx marker answer is unusable, not fatal: no scan ID, exit 0.
+            self.upload_response = b'{}'
+            self.requests.clear()
             self.marker_response = b"x" * 1048577
             result = self.run_collector(env=env)
-            self.assertEqual(result.returncode, 2, self.output)
+            self.assertEqual(result.returncode, 0, self.output)
+            uploads = [p for p in self.requests if p.startswith("/api/check")]
+            self.assertEqual(len(uploads), 1, self.requests)
+            self.assertNotIn("scan_id=", uploads[0])
+            self.assert_no_marker_output(self.output)
+            self.assertNotIn("1 MiB", self.output)
             self.marker_response = b'{}'
 
     def test_physical_newline_root_cannot_scan_sibling(self):
@@ -671,17 +691,89 @@ exec "$REAL_FIND" "$@"
         self.marker_status = self.end_status = 404
         result = self.run_collector()
         self.assertEqual(result.returncode, 0, self.output)
-        self.assertIn("not supported (HTTP 404)", self.output)
         self.assertTrue(all("scan_id=" not in path for path in self.requests))
         self.assert_payloads([b"readable"])
 
-    def test_failed_end_marker_is_partial_failure(self):
+    def test_unsupported_markers_are_silent_without_debug(self):
+        # Servers without marker support answer 404: nothing about markers at normal levels.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        self.marker_status = self.end_status = 404
+        log = self.root / "collector.log"
+        result = self.run_collector(log_file=log)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([b"readable"])
+        self.assertEqual([m["type"] for m in self.markers], ["begin", "end"])
+        self.assert_no_marker_output(self.output)
+        self.assert_no_marker_output(log.read_text())
+        result = self.run_collector("--debug", log_file=log)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("[debug] Collection marker 'begin' not supported (HTTP 404)", self.output)
+        self.assertIn("[debug] Collection marker 'end' not supported (HTTP 404)", self.output)
+        self.assertIn("debug Collection marker 'begin' not supported (HTTP 404)", log.read_text())
+
+    def test_marker_http_errors_are_ignored_after_one_retry(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        self.redirect = True
+        cases = [("curl", 500), ("curl", 403), ("curl", 307)]
+        if shutil.which("wget"):
+            cases += [("wget", 500), ("wget", 307)]
+        for transport, status in cases:
+            with self.subTest(transport=transport, status=status):
+                shutil.rmtree(self.root / "tools", ignore_errors=True)
+                env = {"PATH": self.real_tool_path(transport)}
+                self.marker_status = self.end_status = status
+                self.requests.clear()
+                self.markers.clear()
+                self.uploads.clear()
+                result = self.run_collector(env=env)
+                self.assertEqual(result.returncode, 0, self.output)
+                self.assert_payloads([b"readable"])
+                self.assertEqual([m["type"] for m in self.markers], ["begin", "begin", "end"])
+                self.assertFalse(any("scan_id=" in p for p in self.requests), self.requests)
+                self.assertNotIn("/unapproved-sink", self.requests)
+                self.assert_no_marker_output(self.output)
+        result = self.run_collector("--debug", env=env)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("[debug] Collection marker 'begin' got HTTP %d" % status, self.output)
+        self.assertIn("[debug] Begin marker failed; retrying in 2 seconds", self.output)
+
+    def test_unusable_begin_answer_is_not_retried(self):
+        (self.samples / "real.txt").write_bytes(b"readable")
+        self.marker_response = b"<html>not json</html>"
+        result = self.run_collector()
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assert_payloads([b"readable"])
+        self.assertEqual([m["type"] for m in self.markers], ["begin", "end"])
+        self.assert_no_marker_output(self.output)
+
+    def test_unreachable_server_still_fails_before_uploads(self):
+        # The begin marker is the connectivity check: no HTTP answer at all stays fatal.
+        (self.samples / "real.txt").write_bytes(b"readable")
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        closed_port = str(probe.getsockname()[1])
+        probe.close()
+        transports = ["curl"] + (["wget"] if shutil.which("wget") else [])
+        for transport in transports:
+            with self.subTest(transport=transport):
+                shutil.rmtree(self.root / "tools", ignore_errors=True)
+                result = self.run_collector("--port", closed_port,
+                                            env={"PATH": self.real_tool_path(transport)})
+                self.assertEqual(result.returncode, 2, self.output)
+                self.assertIn("Cannot connect to Thunderstorm server", self.output)
+                self.assertEqual(self.requests, [])
+
+    def test_failed_end_marker_keeps_exit_status_and_is_silent(self):
         (self.samples / "real.txt").write_bytes(b"readable")
         self.end_status = 500
         result = self.run_collector()
-        self.assertEqual(result.returncode, 1, self.output)
-        self.assertIn("end marker failed", self.output)
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("Collection scan_id: " + self.scan_id, self.output)
+        self.assert_no_marker_output(self.output)
         self.assert_payloads([b"readable"])
+        result = self.run_collector("--debug")
+        self.assertEqual(result.returncode, 0, self.output)
+        self.assertIn("[debug] Collection marker 'end' got HTTP 500", self.output)
 
     def test_mktemp_failure_cannot_reuse_foreign_pid_directory(self):
         foreign = self.root / "thunderstorm.foreign"
@@ -774,6 +866,7 @@ exec "$REAL_FIND" "$@"
         self.assertEqual(result.returncode, 0, self.output)
         self.assertEqual(self.markers, [])
         self.assert_payloads([b"\x00\xffreadable"])
+        self.assert_no_marker_output(self.output)
 
     def test_nc_rejects_incomplete_or_malformed_responses(self):
         (self.samples / "real.txt").write_bytes(b"readable")
@@ -804,6 +897,8 @@ exec "$REAL_FIND" "$@"
         self.assertEqual(self.requests, [])
 
     def test_sigterm_reports_interruption_and_cleans_workspace(self):
+        # A failed interrupted marker neither changes the exit status nor shows up.
+        self.end_status = 500
         self.interruption_cleans_workspace(signal.SIGTERM)
 
     def test_sighup_and_sigquit_report_interruption_and_clean_workspace(self):
@@ -841,6 +936,8 @@ exec "$REAL_FIND" "$@"
                 process.communicate(timeout=5)
         self.assertEqual(process.returncode, 1, output)
         self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertIn("Signal received", output)
+        self.assert_no_marker_output(output)
         self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
 
 

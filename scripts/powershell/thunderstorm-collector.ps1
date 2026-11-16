@@ -37,7 +37,7 @@ param(
     # Seconds to wait for the service after 3 files in a row could not be delivered,
     # 0..86400; the run polls /api/status meanwhile, then stops (exit 1). 0 = stop at once.
     [int]$ServerWait = 600,
-    [Alias("D")][switch]$Debugging = $false, # Additional marker diagnostics.
+    [Alias("D")][switch]$Debugging = $false, # Marker diagnostics; marker problems are silent without it.
     # Progress is off by default; -Progress enables counts. NoProgress wins.
     [switch]$Progress,
     [switch]$NoProgress
@@ -82,6 +82,7 @@ namespace ThunderstormCollector {
         public string Body = "";
         public string RetryAfter = "";
         public string Error = "";
+        public bool Oversized;
     }
     public static class Transport {
         public static volatile bool Interrupted;
@@ -291,7 +292,7 @@ namespace ThunderstormCollector {
                     int count;
                     while ((count = input.Read(buffer, 0, buffer.Length)) > 0) {
                         body.Write(buffer, 0, count);
-                        if (body.Length > 1048576) throw new IOException("Response exceeds 1 MiB.");
+                        if (body.Length > 1048576) { result.Oversized = true; throw new IOException("Response exceeds 1 MiB."); }
                     }
                     if (response.ContentLength >= 0 && body.Length != response.ContentLength)
                         throw new IOException("Incomplete HTTP response.");
@@ -333,9 +334,12 @@ function Read-ScanId([string]$body) {
             $object = $script:jsonParser.DeserializeObject($body)
             if ($object -is [Collections.IDictionary] -and $object["scan_id"] -is [string]) { return $object["scan_id"] }
         }
-    } catch { Write-Host "[WARN] No usable scan_id in collection response." }
+    } catch { }
     return ""
 }
+# Marker problems only show with -Debugging: THOR 10 and current THOR 11 answer 404, and
+# no marker answer changes the exit status. The exception: the begin marker is the first
+# contact with Thunderstorm, so no HTTP answer to either attempt stops the run (exit 2).
 function Send-Marker([string]$kind) {
     if ($DryRun -or -not $script:markersEnabled) { return $true }
     $fields = '"type":"' + (Escape-Json $kind) + '","source":"' + (Escape-Json $Source) +
@@ -351,23 +355,37 @@ function Send-Marker([string]$kind) {
     $body = [Text.Encoding]::UTF8.GetBytes('{' + $fields + '}')
     $attempts = 1
     if ($kind -eq "begin") { $attempts = 2 }
+    $answered = $false
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         if ($Debugging) { Write-Host "[DEBUG] Marker $kind attempt $attempt" }
         $reply = [ThunderstormCollector.Transport]::Send($baseUrl + "/api/collection", "application/json", $body, 10000)
         if ($Debugging) { Write-Host "[DEBUG] Marker returned HTTP $($reply.Code) $($reply.Error)" }
-        if (-not $reply.Error -and ($reply.Code -eq 404 -or $reply.Code -eq 501)) {
-            Write-Host "[WARN] Collection markers unsupported (HTTP $($reply.Code))."
+        if ($reply.Code -eq 404 -or $reply.Code -eq 501) {
+            if ($Debugging) { Write-Host "[DEBUG] Collection markers unsupported (HTTP $($reply.Code)); continuing without them." }
             $script:markersEnabled = $false
             return $true
         }
-        if (-not $reply.Error -and $reply.Code -ge 200 -and $reply.Code -lt 300) {
+        # A body over the 1 MiB limit is still an answer, only without a usable scan_id.
+        if ($reply.Code -ge 200 -and $reply.Code -lt 300 -and (-not $reply.Error -or $reply.Oversized)) {
             if ($kind -eq "begin") { $script:scanId = Read-ScanId $reply.Body }
+            if ($kind -eq "begin" -and -not $script:scanId -and $Debugging) {
+                Write-Host "[DEBUG] No usable scan_id in collection response; uploading without one."
+            }
             return $true
         }
-        Write-Host "[ERROR] Collection $kind failed: HTTP $($reply.Code) $($reply.Error)"
-        if ($attempt -lt $attempts -and -not [ThunderstormCollector.Transport]::Interrupted) { Start-Sleep -Seconds 2 }
+        # Any other status is an answer too; only a missing or incomplete reply is not.
+        if ($reply.Code -gt 0 -and ($reply.Code -lt 200 -or $reply.Code -ge 300)) { $answered = $true }
+        if ($attempt -lt $attempts -and -not [ThunderstormCollector.Transport]::Interrupted) {
+            if ($Debugging) { Write-Host "[DEBUG] Retrying the $kind marker in 2 seconds." }
+            Start-Sleep -Seconds 2
+        }
     }
-    return $false
+    if ($kind -eq "begin" -and -not $answered) {
+        Write-Host "[ERROR] Collection begin failed: HTTP $($reply.Code) $($reply.Error)"
+        return $false
+    }
+    if ($Debugging) { Write-Host "[DEBUG] Collection $kind marker failed (HTTP $($reply.Code)); ignored." }
+    return $true
 }
 function Is-Excluded([string]$path) {
     return $path -match '(?i)(^|[\\/])(OneDrive([ -][^\\/]*)?|Dropbox|Google Drive|GoogleDrive|iCloud Drive|Nextcloud|Owncloud|Mega|Syncthing)([\\/]|$)'
@@ -528,7 +546,7 @@ try {
             $script:jsonParser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
         } catch {
             $script:markersEnabled = $false
-            Write-Host "[WARN] JSON parser unavailable (.NET 3.5 System.Web.Extensions required on PS2); no collection markers."
+            if ($Debugging) { Write-Host "[DEBUG] JSON parser unavailable (.NET 3.5 System.Web.Extensions required on PS2); no collection markers." }
         }
     }
     $script:undelivered = 0
@@ -543,7 +561,7 @@ try {
     } elseif ($script:serverLost) {
         $exitCode = 1
         [void](Send-Marker "interrupted")
-    } elseif (-not (Send-Marker "end")) { $exitCode = 1 }
+    } else { [void](Send-Marker "end") }
     if ($stats.failed -gt 0 -or $stats.scan_errors -gt 0) { $exitCode = 1 }
 } catch {
     Write-Host "[ERROR] $($_.Exception.Message)"
