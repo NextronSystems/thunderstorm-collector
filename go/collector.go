@@ -132,9 +132,6 @@ type CollectionStatistics struct {
 	// read. They are reported but, like the permission-denied directories of any
 	// full-disk scan, do not change the exit status.
 	walkErrors int64
-	// markerErrors counts collection markers that a server supporting them did
-	// not accept; they fail the run, see markers.go.
-	markerErrors int64
 
 	// Timings (in nanoseconds, converted to seconds/milliseconds for display)
 
@@ -170,12 +167,11 @@ func (s *CollectionStatistics) getSkipCount(reason SkipReason) int64 {
 }
 
 // ErrorCount returns the number of failures that make the run unsuccessful:
-// selected files that could not be read or accepted, scan roots that could not
-// be read, and collection markers that were not accepted. Unreadable
-// directories below a root are only reported, see walkErrors.
+// selected files that could not be read or accepted, and scan roots that could
+// not be read. Unreadable directories below a root are only reported, see
+// walkErrors. Failed collection markers are ignored, see markers.go.
 func (s *CollectionStatistics) ErrorCount() int64 {
-	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors) +
-		atomic.LoadInt64(&s.markerErrors)
+	return atomic.LoadInt64(&s.fileErrors) + atomic.LoadInt64(&s.uploadErrors) + atomic.LoadInt64(&s.rootErrors)
 }
 
 // refuseRedirects makes the HTTP client hand a redirect response back to the

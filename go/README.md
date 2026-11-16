@@ -227,20 +227,20 @@ Redirects (HTTP 3xx) are never followed, for the status check, collection marker
 
 After the status check, the collector sends a `begin` marker to `POST /api/collection`, so that Thunderstorm can group the samples of one run. If the server answers with a scan ID, every upload of the run carries it in the `scan_id` query parameter (for `/api/check` as well as `/api/checkAsync`), and the run closes with an `end` marker that holds the run's counters. SIGINT (Ctrl+C) or SIGTERM then sends an `interrupted` marker instead and ends the collector with status 1; a second signal exits at once. A dry run sends no markers.
 
-Markers never stop a collection:
+Markers never affect a collection, and a server without them is not an error:
 
-- A server without the endpoint answers `404` or `501`. THOR 10 and the current THOR 11 versions do. The collector logs one line, sends no further markers, and the run is the same as without markers.
-- Any other failure of the `begin` marker (another HTTP status, a redirect, a timeout, a connection error) is tried once more after 2 seconds. If it fails again, the files are still uploaded, without a scan ID, and the exit status becomes `1`.
-- A failed `end` marker also makes the exit status `1`. A failed `interrupted` marker is only logged.
+- A server without the endpoint answers `404` or `501`. THOR 10 and the current THOR 11 versions do. The collector sends no further markers, and the run is the same as without markers.
+- Any other failure of the `begin` marker (another HTTP status, a redirect, a timeout, a connection error) is tried once more after 2 seconds. If it fails again, the files are uploaded without a scan ID.
+- A failed `end` or `interrupted` marker is ignored as well.
 
-Each marker request gives up after 10 seconds. The script collectors send the same markers; [Collection markers](../docs/COLLECTION_MARKERS.md) describes the format.
+None of this is logged or changes the exit status. Start the collector with `--debug` to see the answers to the marker requests. Each marker request gives up after 10 seconds. The script collectors send the same markers; [Collection markers](../docs/COLLECTION_MARKERS.md) describes the format.
 
 ### Exit Status
 
 | Status | Meaning |
 | --- | --- |
 | `0` | The run completed and every selected file was read and accepted (or, with `--dry-run`, every selected file could be opened). |
-| `1` | Startup or configuration failed (invalid option, unreachable server), **or** the run completed with errors: a scan root could not be read, a selected file could not be read or was not accepted by Thunderstorm, or a server that supports [collection markers](#collection-markers) did not accept one. The statistics and the log show which. An interrupted run that sent an `interrupted` marker also ends with `1`. |
+| `1` | Startup or configuration failed (invalid option, unreachable server), **or** the run completed with errors: a scan root could not be read, or a selected file could not be read or was not accepted by Thunderstorm. The statistics and the log show which. [Collection markers](#collection-markers) never change the exit status; an interrupted run that sent an `interrupted` marker ends with `1`. |
 
 A missing scan root, an unreadable directory and every failed upload are logged when they happen and summarised in the statistics. A directory below a scan root that cannot be listed (permission denied is routine on a full scan, for example `System Volume Information` on Windows) is reported and counted under "Paths that could not be read during the walk" but does not change the exit status. Files that were skipped on purpose (size, age, type, exclusions, irregular files) are not errors. A file that disappears while the collector walks its directory is not counted either.
 
