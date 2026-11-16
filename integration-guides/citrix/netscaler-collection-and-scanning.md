@@ -169,7 +169,7 @@ scp -O nsadmin@192.0.2.10:/var/nextron-thunderstorm/upload.log "ns01-node0-$(dat
 ssh nsadmin@192.0.2.10 'shell "rm -rf /var/nextron-thunderstorm"'
 ```
 
-This sequence follows the documented command form but has not been tested on an appliance. Check each copied log rather than the SSH exit status.
+This sequence follows the documented command form but has not been tested on an appliance. Check each copied log rather than the SSH exit status. For several appliances or device types, [Running collections from a central orchestrator](../../docs/COLLECTION_ORCHESTRATOR.md) extends this sequence with an inventory, run records and one script for all devices.
 
 #### With cron on the appliance
 

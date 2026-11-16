@@ -268,6 +268,10 @@ using HTTP instead of SSHFS. A collector still consumes source CPU, disk I/O and
 network capacity while enumerating and uploading files; the detection workload
 moves to the server.
 
+To run scheduled collections for many appliances from one Linux machine, without
+leaving anything installed on them between runs, see
+[Running collections from a central orchestrator](COLLECTION_ORCHESTRATOR.md).
+
 ## Offline analysis of exported evidence
 
 Export files, backups or filesystem images and analyze them on a supported
