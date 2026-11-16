@@ -77,6 +77,9 @@ func main() {
 	collector := NewCollector(settings, sftpClient, httpClient, logger, manifest)
 	collector.watchdog = watchdog
 	collector.closeSource = func() { sshClient.Close() }
+	if !settings.DryRun {
+		collector.BeginRun()
+	}
 	// SIGINT or SIGTERM ends the run with its statistics and manifest written; a
 	// second signal exits at once.
 	signals := make(chan os.Signal, 2)
@@ -94,6 +97,7 @@ func main() {
 		logger.Printf("Could not write manifest: %v", err)
 		collector.Stats.FileErrors++
 	}
+	collector.FinishRun()
 	printStatistics(logger, &collector.Stats, settings.DryRun)
 	if config.StatsJSON != "" {
 		data, _ := json.MarshalIndent(&collector.Stats, "", "  ")

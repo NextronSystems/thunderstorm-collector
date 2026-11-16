@@ -168,8 +168,10 @@ type Settings struct {
 	ResponseTimeout time.Duration
 	SFTPTimeout     time.Duration
 	ServerWait      time.Duration
+	Source          string
 	UploadURL       string
 	StatusURL       string
+	CollectionURL   string
 }
 
 var whitespace = regexp.MustCompile(`\s+`)
@@ -253,6 +255,8 @@ func validateConfig(config Config) (Settings, error) {
 	}
 	settings.UploadURL = fmt.Sprintf("%s/api/%s?source=%s", base, endpoint, url.QueryEscape(config.Source))
 	settings.StatusURL = base + "/api/status"
+	settings.CollectionURL = base + "/api/collection"
+	settings.Source = config.Source
 	return settings, nil
 }
 

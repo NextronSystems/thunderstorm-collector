@@ -77,7 +77,8 @@ type Statistics struct {
 // ErrorCount returns the failures that make the run unsuccessful, as in the Go
 // collector: selected files that could not be read or sent, roots that could
 // not be read, a lost connection and an interrupted run. Unreadable
-// directories below a root are only reported.
+// directories below a root are only reported. Failed collection markers are
+// ignored, see markers.go.
 func (s *Statistics) ErrorCount() int64 {
 	return atomic.LoadInt64(&s.FileErrors) + atomic.LoadInt64(&s.UploadErrors) + atomic.LoadInt64(&s.RootErrors) +
 		atomic.LoadInt64(&s.ConnectionErrors) + atomic.LoadInt64(&s.NotSent) + atomic.LoadInt64(&s.Interrupted)
@@ -183,6 +184,13 @@ type Collector struct {
 	// rootAliases maps a root given as a symbolic link to its target, so that
 	// excludes written for the given path still apply below the target.
 	rootAliases []rootAlias
+
+	// Collection markers, see markers.go. scanID and markersActive are set by
+	// BeginRun before Run and only read afterwards.
+	startTime     time.Time
+	markerTimeout time.Duration
+	scanID        string
+	markersActive bool
 }
 
 type rootAlias struct {
@@ -203,6 +211,9 @@ func NewCollector(settings Settings, sftpClient *sftp.Client, httpClient *http.C
 		now:        time.Now,
 		ctx:        ctx,
 		cancel:     cancel,
+
+		startTime:     time.Now(),
+		markerTimeout: markerTimeout,
 	}
 	for _, root := range settings.RootPaths {
 		if path.Clean(root) == "/" {
