@@ -1,29 +1,49 @@
 # Product Integration Guides
 
-These guides cover deployment, networking, and recurring collection on specific products and platforms. Start with the [main README](../README.md) and [platform recommendations](../docs/COLLECTOR_RECOMMENDATIONS.md) to choose a collector and check its prerequisites. Last reviewed: **20 October 2026**.
+Deployment, networking and recurring collection on specific products and
+platforms. To choose a collector and check its prerequisites first, see the
+[main README](../README.md) and the
+[platform recommendations](../docs/COLLECTOR_RECOMMENDATIONS.md).
+Last reviewed: **20 October 2026**.
 
-Choose an approach before setting up a persistent collector. For an ad-hoc
-assessment, **SSHFS** can expose files to THOR on an analysis workstation without
-installing a scanner or collector on the source, provided suitable SSH/SFTP
-access is available. [Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md)
-compares native scans, SSHFS, Thunderstorm collectors and offline evidence
-analysis, including prerequisites and licensing. Where only SSH/SFTP is
-available and files should be collected selectively or repeatedly, the
-prototype [SFTP collector](../sftp/README.md) pulls the selected files from
-another system and sends them to Thunderstorm.
+## Platform Guides
 
-## Platform guides
+| Guide | Approach | Status |
+| --- | --- | --- |
+| [Fortinet FortiGate / FortiOS](fortinet/fortigate-export-thor-lab.md) | Export configurations, logs and diagnostics through the GUI or CLI, then scan them on Linux with THOR Lab | **Not yet tested** on a live appliance |
+| [VMware ESXi 7 without Secure Boot](esxi/esxi7-wo-secure-boot.md) | Persistent Python collector started from cron | **Not yet tested** with the current collector¹ |
+| [IBM AIX on POWER7](aix/aix-power7-sshfs-scanning.md) | THOR on a Linux workstation reads the host over SSHFS; nothing runs on AIX | **Not yet tested** on a live AIX/POWER7 host |
+| [Citrix NetScaler ADC and Gateway](citrix/netscaler-collection-and-scanning.md) | Go or Bash collector on the appliance, the SFTP collector, THOR over SSHFS, or a support archive scanned with THOR Lab | **VM-tested** (FreeBSD); not yet tested on named NetScaler firmware² |
 
-| Platform | Approach | Guide | Evidence |
-| --- | --- | --- | --- |
-| Fortinet FortiGate / FortiOS | Export configurations, logs and diagnostics through the GUI or CLI, then scan on Linux with THOR Lab | [FortiGate export and scan guide](fortinet/fortigate-export-thor-lab.md) | Based on Fortinet and THOR documentation. Live appliance validation is pending. |
-| VMware ESXi 7 without Secure Boot | Persistent Python collector started from cron | [ESXi 7 without Secure Boot](esxi/esxi7-wo-secure-boot.md) | Earlier Python collector revisions ran on ESXi; versions were not recorded, and the current collector still needs validation there. See the [ESXi quick start](../scripts/README.md#vmware-esxi-use-the-python-collector). |
-| IBM AIX on POWER7 | THOR on a Linux analysis workstation reads the host over SSHFS; nothing runs on AIX | [AIX on POWER7 via SSHFS](aix/aix-power7-sshfs-scanning.md) | Prepared from IBM and upstream documentation; not tested against a live AIX/POWER7 host. |
-| Citrix NetScaler ADC and Gateway | Go or Bash collector on the appliance, the SFTP collector, THOR over SSHFS, or a support archive scanned with THOR Lab; paths and configuration from the [assessment profile](../emerging-threats/citrix-netscaler/README.md) | [NetScaler collection and scanning guide](citrix/netscaler-collection-and-scanning.md) | Legacy Go build tested in FreeBSD 8.4 and 14.3 VMs; Bash preset tested with synthetic files; named NetScaler firmware not yet tested. The SSHFS route follows Nextron's published procedure. |
+1. Earlier Python collector revisions ran on ESXi; the versions were not
+   recorded. See the [ESXi quick start](../scripts/README.md#vmware-esxi-use-the-python-collector).
+2. The legacy Go build was tested in FreeBSD 8.4 and 14.3 VMs and the Bash
+   preset with synthetic files. The SSHFS route follows Nextron's published
+   procedure. Paths and configuration come from the
+   [NetScaler assessment profile](../emerging-threats/citrix-netscaler/README.md).
 
-Other products, including appliances that cannot run a collector, are covered by the [collector recommendations](../docs/COLLECTOR_RECOMMENDATIONS.md), which separates candidate combinations from recorded tests.
+The FortiGate guide is based on Fortinet and THOR documentation; the AIX guide
+on IBM and upstream documentation.
 
-## Where documentation lives
+Other products, including appliances that cannot run a collector, are covered
+by the [collector recommendations](../docs/COLLECTOR_RECOMMENDATIONS.md), which
+separate candidate combinations from recorded tests.
+
+## Choose an Approach First
+
+Decide how to scan before setting up a persistent collector:
+
+| Situation | Approach |
+| --- | --- |
+| Ad hoc assessment, SSH/SFTP access available | **SSHFS**: THOR on an analysis workstation reads the files; nothing is installed on the source |
+| Only SSH/SFTP, files collected selectively or repeatedly | The prototype [SFTP collector](../sftp/README.md) pulls selected files and sends them to Thunderstorm |
+| Recurring collection where the source can run a collector | A persistent Thunderstorm collector, as in the platform guides above |
+
+[Choosing a THOR scanning approach](../docs/SCANNING_APPROACHES.md) compares
+native scans, SSHFS, Thunderstorm collectors and offline evidence analysis,
+including prerequisites and licensing.
+
+## Where Documentation Lives
 
 | Location | Content |
 | --- | --- |
@@ -34,7 +54,9 @@ Other products, including appliances that cannot run a collector, are covered by
 
 ## Related Nextron repositories
 
-These repositories already submit files to Thunderstorm from other places, or help test and run it. Check them before building a new integration. Each repository defines its own scope and support; this repository does not test them.
+These repositories already submit files to Thunderstorm from other places, or
+help test and run it. Check them before building a new integration. Each
+defines its own scope and support; this repository does not test them.
 
 | Repository | Use it for |
 | --- | --- |
@@ -54,4 +76,5 @@ Integrations that run THOR itself rather than Thunderstorm:
 | [thor-microsoft-defender-guide](https://github.com/NextronSystems/thor-microsoft-defender-guide) | The THOR integration guide for Microsoft Defender |
 | [veeam-integration](https://github.com/NextronSystems/veeam-integration) | Scanning Veeam Backup & Replication restore points with THOR |
 
-For assessment-specific file paths and collector configurations, use the [Emerging Threats profiles](../emerging-threats/README.md).
+For assessment-specific file paths and collector configurations, use the
+[Emerging Threats profiles](../emerging-threats/README.md).
