@@ -3,6 +3,7 @@
 import email.parser
 import email.policy
 import http.server
+import json
 import pathlib
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import urllib.parse
 
 binary, config = map(lambda x: str(pathlib.Path(x).resolve()), sys.argv[1:])
 requests = []
+markers = []
 mode = "success"
 
 
@@ -23,6 +25,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"{}")
 
     def do_POST(self):
+        if self.path == "/api/collection":
+            # Collection markers: THOR 10 and current THOR 11 answer 404; the
+            # "markers" mode answers like a server that supports them.
+            assert self.headers["Content-Type"] == "application/json", self.headers
+            markers.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            code, body = (200, b'{"scan_id": "run-1"}') if mode == "markers" else (404, b"404 page not found")
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         # Go streams multipart bodies using chunked transfer encoding.
         assert self.headers.get("Transfer-Encoding") == "chunked"
         body = bytearray()
@@ -62,8 +75,10 @@ try:
         dry = subprocess.run(command + ["--dry-run"], capture_output=True, text=True, timeout=15)
         assert dry.returncode == 0 and "Successfully would be sent (dry-run): 1" in dry.stdout, dry.stdout + dry.stderr
         assert not requests, "Dry run sent HTTP requests"
-        for mode, count, successes, errors in [("success", 1, 1, 0), ("recover", 2, 1, 0), ("busy", 4, 0, 1), ("reject", 1, 0, 1)]:
+        assert not markers, "Dry run sent collection markers"
+        for mode, count, successes, errors in [("success", 1, 1, 0), ("recover", 2, 1, 0), ("busy", 4, 0, 1), ("reject", 1, 0, 1), ("markers", 1, 1, 0)]:
             requests.clear()
+            markers.clear()
             run = subprocess.run(command, capture_output=True, text=True, timeout=15)
             # A run in which an upload failed ends with status 1; a run without errors ends with 0.
             assert run.returncode == (1 if errors else 0), (mode, run.returncode, run.stdout + run.stderr)
@@ -73,10 +88,19 @@ try:
             for path, parts in requests:
                 target = urllib.parse.urlsplit(path)
                 assert target.path == "/api/checkAsync"
-                assert urllib.parse.parse_qs(target.query) == {"source": ["netscaler test & source"]}
+                expected_query = {"source": ["netscaler test & source"]}
+                if mode == "markers":
+                    expected_query["scan_id"] = ["run-1"]
+                assert urllib.parse.parse_qs(target.query) == expected_query, target.query
                 assert parts == [("file", str(sample), sample.read_bytes())], parts
             if mode == "busy":
                 assert "canceling it after 3 retries" in run.stdout, run.stdout
+            # A server without the marker endpoint gets one begin marker and
+            # nothing else; one that supports it also gets the end marker.
+            assert [m["type"] for m in markers] == (["begin", "end"] if mode == "markers" else ["begin"]), markers
+            assert all(m["source"] == "netscaler test & source" and m["collector"] == "go" for m in markers), markers
+            if mode == "markers":
+                assert markers[1]["scan_id"] == "run-1" and markers[1]["stats"]["submitted"] == 1, markers
             print("Go 1.9.7 Linux HTTP integration passed:", mode)
 finally:
     server.shutdown()

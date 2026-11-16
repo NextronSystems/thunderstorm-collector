@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -214,12 +215,35 @@ func main() {
 			logger.Print(err)
 			os.Exit(1)
 		}
+		collector.BeginRun()
 	} else {
 		logger.Print("DRY-RUN mode: Files will be collected but not sent to Thunderstorm")
+	}
+	if collector.MarkersActive() {
+		// Tell Thunderstorm that the run ends early. Without markers, SIGINT and
+		// SIGTERM keep their default effect and end the process at once.
+		signals := make(chan os.Signal, 2)
+		signal.Notify(signals, interruptSignals...)
+		go func() {
+			received := <-signals
+			logger.Printf("Received %v; sending the interrupted marker to Thunderstorm (send the signal again to exit at once)", received)
+			sent := make(chan struct{})
+			go func() {
+				collector.InterruptRun()
+				close(sent)
+			}()
+			select {
+			case <-sent:
+				os.Exit(1)
+			case <-signals:
+				os.Exit(130)
+			}
+		}()
 	}
 	collector.StartWorkers()
 	collector.Collect()
 	collector.Stop()
+	collector.EndRun()
 	if errorCount := collector.Statistics.ErrorCount(); errorCount > 0 {
 		logger.Printf("Collection finished with %d error(s), exiting with status 1", errorCount)
 		os.Exit(1)
