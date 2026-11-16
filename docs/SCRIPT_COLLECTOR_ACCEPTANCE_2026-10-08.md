@@ -1,5 +1,8 @@
 # Script Collector Acceptance: 8 October 2026
 
+> [!NOTE]
+> Archive: this report records the 8 October 2026 review of the then-open script collector PRs, all since merged. For current testing, see the [manual acceptance guide](../scripts/MANUAL_TESTING_GUIDE.md) and the [testing overview](COLLECTOR_TESTING_OVERVIEW.md).
+
 ## Decision Summary
 
 The reviewed revisions below passed the available automated checks and the
