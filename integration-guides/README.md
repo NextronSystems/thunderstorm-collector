@@ -29,7 +29,7 @@ Other products, including appliances that cannot run a collector, are covered by
 | --- | --- |
 | `integration-guides/<platform>/` | Running Thunderstorm collection, or an alternative such as SSHFS or exported evidence, on one platform |
 | [`emerging-threats/`](../emerging-threats/README.md) | Time-bound collection profiles for a named assessment, such as the NetScaler profile |
-| [`docs/`](../docs/) | Cross-cutting references: scanning approaches, collector recommendations, construction guide, testing overview, acceptance report |
+| [`docs/`](../docs/) | Cross-cutting references: scanning approaches, collector recommendations, the [collection orchestrator](../docs/COLLECTION_ORCHESTRATOR.md) for scheduled runs on many devices, construction guide, testing overview, acceptance report |
 | [`go/`](../go/README.md), [`scripts/`](../scripts/README.md) and [`sftp/`](../sftp/README.md) | Reference for each collector: options, requirements and compatibility evidence |
 
 ## Related Nextron repositories
