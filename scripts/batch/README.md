@@ -213,9 +213,9 @@ do.
 
 ### Temporary data and logging
 
-- Non-dry runs create a private per-run directory under `TEMP`. It holds copies
-  of the sample payloads and is removed when the run ends normally or with an
-  error. If removal fails, the exit code is **1**.
+- Non-dry runs create an exclusively owned per-run directory under `TEMP`.
+  It holds copies of the sample payloads and is removed when the run ends
+  normally or with an error. If removal fails, the exit code is **1**.
 - `TEMP`, curl and CA paths containing percent signs, quotes, line breaks or
   NUL characters are rejected, to avoid WSH process expansion. Choose a
   trusted, ordinary path.
