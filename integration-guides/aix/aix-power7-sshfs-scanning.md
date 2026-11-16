@@ -1,198 +1,456 @@
 # Scanning AIX on POWER7 with THOR over SSHFS
 
-An AIX system on POWER7 can expose files over SSH/SFTP to THOR running on a
-supported Linux analysis workstation. No THOR binary, Go collector, FUSE driver
-or SSHFS installation is required on AIX. AIX reads its own filesystems and
-serves the file contents; the Linux workstation does not need a JFS/JFS2 driver.
+THOR runs on a Linux analysis workstation and reads an AIX system on POWER7
+over SSHFS (SSH/SFTP). Nothing is installed on AIX: no THOR binary, Go
+collector, FUSE driver or SSHFS. AIX reads its own filesystems and serves the
+file contents, so the workstation needs no JFS/JFS2 driver.
 
-Choose the procedure that fits the incident:
+> [!NOTE]
+> Not yet tested against a live AIX/POWER7 host. This guide is based on IBM
+> and upstream documentation and source inspection.
 
-- [Quick incident-response scan](#1-quick-incident-response-scan-using-a-path-allowlist):
-  start with a small set of relevant directories and the affected application's
-  files, checking only those subtrees before scanning.
-- [Thorough assessment](#2-thorough-assessment-with-mount-inventory-and-exclusions):
-  inventory the source and configure exclusions before assessing larger trees
-  or the entire mounted filesystem.
+## Choose a Route
 
-**SSHFS does not reproduce the AIX mount table on Linux.** Both procedures
-account for this: the quick procedure limits where THOR starts its recursive
-scan; the thorough procedure also identifies paths that must be excluded within
-the larger scope.
+| Route | Use it when | What THOR scans |
+|---|---|---|
+| [1. Quick incident-response scan](#1-quick-incident-response-scan-using-a-path-allowlist) | Incident response; results needed fast | A short path allowlist plus the affected application's files |
+| [2. Thorough assessment](#2-thorough-assessment-with-mount-inventory-and-exclusions) | Wider coverage, uncertain or nested mounts, or a repeatable assessment | Larger trees or all of `/`, after a mount inventory and exclusions |
 
-This guide is based on IBM and upstream documentation and source inspection;
-it has not been tested against a live AIX/POWER7 host during its preparation.
+A successful quick scan can be the first stage of a thorough assessment.
 
-For the alternatives and licensing overview, see
+**SSHFS does not reproduce the AIX mount table on Linux.** The quick route
+therefore limits where THOR starts; the thorough route also excludes paths
+inside the larger scope. [Details](#what-sshfs-preserves-and-what-it-hides).
+
+For alternatives and licensing, see
 [Choosing a THOR scanning approach](../../docs/SCANNING_APPROACHES.md).
+
+## Before You Start
+
+| Requirement | Detail |
+|---|---|
+| Linux workstation | Supported Linux with SSHFS/FUSE and a current full THOR package |
+| License | **Forensic Lab License**: the `--lab` option requires it |
+| AIX account | An authorized account with read access, preferably **root**, that can open an SFTP session. See [source permissions and SFTP access](#arrange-source-permissions-and-sftp-access) |
+| AIX administrator | Checks the `mount` output and watches source load during the scan |
+| Local storage | Keep the THOR package, logs and reports on local storage outside the mount |
+
+Run SSHFS and THOR as the **same local user**. The examples mount the source at
+`/mnt/aix-power7` and use the hostname `aix-power7.example`; replace it.
 
 ## 1. Quick incident-response scan using a path allowlist
 
-Have SSHFS/FUSE, full THOR and a Forensic Lab License ready on Linux. Use an
-authorized AIX account with read access, preferably root. For access problems,
-see [source permissions and SFTP](#arrange-source-permissions-and-sftp-access).
+1. **Choose a small set of paths.** Leave out directories that do not exist.
 
-### Choose a small set of relevant paths
+   | AIX source path | Why include it in a first pass? |
+   |---|---|
+   | `/etc` | Configuration and startup files, including [`/etc/inittab`](https://www.ibm.com/docs/en/aix/7.1.0?topic=files-inittab-file). |
+   | `/tmp` and [`/var/tmp`](https://www.ibm.com/docs/en/aix/7.2.0?topic=tree-var-file-system) | Temporary files, possible dropped payloads and staging scripts. `/usr/tmp` normally aliases `/var/tmp`. |
+   | `/var/spool/cron` | [Cron and at job files](https://www.ibm.com/docs/en/aix/7.1.0?topic=c-cron-daemon), which can contain persistence commands. |
+   | `/usr/bin`, `/usr/sbin`, `/sbin` | System programs and scripts; include them when checking for dropped or modified executables. |
+   | `/usr/lib`, `/usr/local` | System libraries and locally installed software. These add coverage and scan time. |
+   | Web/application directories | Start with `/usr/IBM/HTTPServer` and `/usr/IBM/WebSphere/AppServer/profiles` if installed. Prioritize the affected application. |
 
-| AIX source path | Why include it in a first pass? |
-|---|---|
-| `/etc` | Configuration and startup files, including [`/etc/inittab`](https://www.ibm.com/docs/en/aix/7.1.0?topic=files-inittab-file). |
-| `/tmp` and [`/var/tmp`](https://www.ibm.com/docs/en/aix/7.2.0?topic=tree-var-file-system) | Temporary files, possible dropped payloads and staging scripts. `/usr/tmp` normally aliases `/var/tmp`. |
-| `/var/spool/cron` | [Cron and at job files](https://www.ibm.com/docs/en/aix/7.1.0?topic=c-cron-daemon), which can contain persistence commands. |
-| `/usr/bin`, `/usr/sbin`, `/sbin` | System programs and scripts; include them when checking for dropped or modified executables. |
-| `/usr/lib`, `/usr/local` | System libraries and locally installed software. These add coverage and scan time; omit nonexistent directories. |
-| Web/application directories | Start with `/usr/IBM/HTTPServer` and `/usr/IBM/WebSphere/AppServer/profiles` if installed. See [application locations and additional scan paths](#application-locations-and-additional-scan-paths) for the useful subdirectories and other layouts. Prioritize the affected application. |
+   For IBM HTTP Server, read `/usr/IBM/HTTPServer/conf/httpd.conf` first and
+   include its configured document roots, aliases and script locations.
+   Installation paths can differ; `/srv` is not a universal AIX webroot.
+   WebSphere applications usually also need their profile's `installedApps`
+   tree. More layouts: [application locations and additional scan paths](#application-locations-and-additional-scan-paths).
 
-These ordinary file trees are normally suitable for read-only scanning. The
-shorter path list limits work; it does not imply that other directories are
-dangerous to read. Large trees take longer and generate more source I/O.
+   These ordinary file trees are normally suitable for read-only scanning. The
+   short list limits work; it does not mean other directories are dangerous to
+   read. Large trees take longer and cause more source I/O.
 
-Have the AIX administrator check `mount` output **only for the selected paths
-and mounts beneath them**, confirming ordinary file trees without unexpected
-remote, pseudo or automounted subtrees. Resolve aliases used as scan roots.
-Leave uncertain subtrees out of this pass. No full-host inventory or custom
-exclusion file is needed for the confirmed subtrees.
+2. **Have the AIX administrator check `mount` output for the selected paths
+   only**, and for mounts beneath them. Confirm ordinary file trees without
+   unexpected remote, pseudo or automounted subtrees. Resolve aliases used as
+   scan roots. Leave uncertain subtrees out of this pass.
 
-For IBM HTTP Server, check `/usr/IBM/HTTPServer/conf/httpd.conf` first and include
-its configured document roots, aliases and script locations. Installation paths
-can differ; `/srv` is not a universal AIX webroot. WebSphere applications usually
-need their profile's `installedApps` tree as well as the HTTP server's files.
+   No full-host inventory or custom exclusion file is needed for the confirmed
+   subtrees.
 
-### Mount the source read-only
+3. **Mount the source read-only** on Linux. Use an unused mount directory, or
+   reuse an existing verified mount.
 
-Run on Linux as the same local user for SSHFS and THOR. Replace the hostname
-and use an unused mount directory, or reuse an existing verified mount.
+   ```sh
+   sudo mkdir /mnt/aix-power7 &&
+   sudo chown "$(id -u):$(id -g)" /mnt/aix-power7
+   ```
 
-```sh
-sudo mkdir /mnt/aix-power7 &&
-sudo chown "$(id -u):$(id -g)" /mnt/aix-power7
-```
+   ```sh
+   sshfs -o ro,nodev,nosuid,noexec,reconnect \
+     -o ServerAliveInterval=15,ServerAliveCountMax=3 \
+     root@aix-power7.example:/ /mnt/aix-power7
+   ```
 
-```sh
-sshfs -o ro,nodev,nosuid,noexec,reconnect \
-  -o ServerAliveInterval=15,ServerAliveCountMax=3 \
-  root@aix-power7.example:/ /mnt/aix-power7
-```
+   ```sh
+   findmnt -T /mnt/aix-power7 -o TARGET,FSTYPE,OPTIONS
+   ```
 
-```sh
-findmnt -T /mnt/aix-power7 -o TARGET,FSTYPE,OPTIONS
-```
+   Confirm target `/mnt/aix-power7`, type SSHFS/FUSE and read-only options.
+   Mounting `/` makes the tree available; it does not require scanning all of
+   it.
 
-Confirm target `/mnt/aix-power7`, type SSHFS/FUSE and read-only options. Mounting
-`/` makes the tree available without requiring a scan of the entire tree.
+4. **Scan only the selected directories** from the local THOR package. Before
+   running it:
 
-### Scan only the selected directories
+   - Remove absent or unconfirmed paths.
+   - Add `-p` for each confirmed application directory, for example
+     `-p /mnt/aix-power7/usr/IBM/HTTPServer/htdocs` if that is the active
+     webroot.
+   - Replace the result hostname after `-j` with the actual source identifier.
 
-From the local THOR package, remove absent/unconfirmed paths below and add
-`-p` for each confirmed application directory, for example
-`-p /mnt/aix-power7/usr/IBM/HTTPServer/htdocs` if that is the active webroot. Replace the
-result hostname with the actual source identifier.
+   ```sh
+   mountpoint -q /mnt/aix-power7 &&
+   ./thor-linux-64 --lab \
+     -p /mnt/aix-power7/etc \
+     -p /mnt/aix-power7/tmp \
+     -p /mnt/aix-power7/var/tmp \
+     -p /mnt/aix-power7/var/spool/cron \
+     -p /mnt/aix-power7/usr/bin \
+     -p /mnt/aix-power7/usr/sbin \
+     -p /mnt/aix-power7/sbin \
+     -p /mnt/aix-power7/usr/lib \
+     -p /mnt/aix-power7/usr/local \
+     --virtual-map /mnt/aix-power7:/ \
+     -j aix-power7-example --threads 0
+   ```
 
-```sh
-mountpoint -q /mnt/aix-power7 &&
-./thor-linux-64 --lab \
-  -p /mnt/aix-power7/etc \
-  -p /mnt/aix-power7/tmp \
-  -p /mnt/aix-power7/var/tmp \
-  -p /mnt/aix-power7/var/spool/cron \
-  -p /mnt/aix-power7/usr/bin \
-  -p /mnt/aix-power7/usr/sbin \
-  -p /mnt/aix-power7/sbin \
-  -p /mnt/aix-power7/usr/lib \
-  -p /mnt/aix-power7/usr/local \
-  --virtual-map /mnt/aix-power7:/ \
-  -j aix-power7-example --threads 0
-```
+   - Repeated `-p` arguments restrict the recursive scan to those trees. Use
+     relevant application subdirectories to limit scan time. Leave a scan of
+     the entire mounted `/` to the thorough route.
+   - Keep SSHFS `follow_symlinks` and THOR `--follow-symlinks` disabled, and
+     keep existing exclusions.
+   - Top-level `/proc`, `/dev`, `/aha` and `/wpars` are outside this
+     selection. Nested special mounts still need the check in step 2.
+   - `--threads 0` uses all cores of the **Linux workstation**. If the
+     administrator sees too much source load, reduce to `--threads 2` or
+     `--threads 4`. See [threads and source load](#threads-and-source-load).
 
-Repeated `-p` arguments restrict the recursive scan to those trees. Add reviewed
-application roots as needed; use their relevant subdirectories to limit scan
-time. Reserve scanning the entire mounted `/` for the thorough procedure. Keep
-SSHFS `follow_symlinks` and THOR `--follow-symlinks` disabled, and preserve
-existing exclusions. Top-level `/proc`, `/dev`, `/aha` and `/wpars` are outside
-this selection; nested special mounts still need the focused check above.
+5. **Review and record the results.** Check file counts and read errors. Save
+   the findings with the selected paths, and record the application and
+   storage paths you left out.
 
-**Threads:** `--threads 0` uses all cores on the **Linux analysis workstation**,
-as `--lab` normally does. POWER7 has no one-thread requirement; `--threads 1`
-is an optional load reduction. Have the administrator watch source load and
-reduce to `--threads 2` or `--threads 4` if needed. SSHFS, network latency,
-storage or SSH encryption can limit speedup.
-[THOR thread and lab options](https://thor-manual.nextron-systems.com/en/latest/usage/flags.html)
+6. **Unmount** after THOR exits:
 
-Review file counts and read errors, save the findings with the selected paths,
-and record omitted application/storage paths. After THOR exits, unmount:
+   ```sh
+   fusermount3 -u /mnt/aix-power7
+   ```
 
-```sh
-fusermount3 -u /mnt/aix-power7
-```
-
-This pass omits user homes, logs and application trees unless added.
+This pass omits user homes, logs and application trees unless you added them.
 THOR can flag suspicious configuration content; proving arbitrary changes also
 needs a baseline or manual review. Widen coverage as the incident requires.
 
 ## 2. Thorough assessment with mount inventory and exclusions
 
-Use this procedure to widen coverage, handle uncertain or nested mounts, or
-prepare a repeatable assessment. A successful quick scan can be the first
-stage; it need not wait for all the planning below. Reuse its verified mount
+Use this route to widen coverage, handle uncertain or nested mounts, or prepare
+a repeatable assessment. A quick scan can come first; reuse its verified mount
 if it is still available.
+
+1. **Inventory the AIX source.** Have the AIX administrator run these commands
+   on AIX. They only inspect the system; the bare `mount` command lists mounts
+   without creating one.
+
+   ```sh
+   oslevel -s
+   prtconf
+   lslpp -L openssh.base.server
+   mount
+   lsfs
+   ```
+
+   - Record the exact AIX technology/service level, processor model and
+     OpenSSH fileset.
+   - Take the active mount points, VFS types and options from `mount`. `lsfs`
+     shows the configured filesystems from `/etc/filesystems`; it does not
+     replace the active mount list.
+   - Ask about automount roots and cluster-managed storage that might become
+     visible during the scan.
+
+   Sources: [IBM mount command](https://www.ibm.com/docs/en/aix/7.1.0?topic=m-mount-command) · [IBM lsfs command](https://www.ibm.com/docs/en/aix/7.1.0?topic=l-lsfs-command)
+
+2. **Decide the scope** from the inventory:
+
+   | Source content | Treatment for an initial filesystem assessment |
+   |---|---|
+   | Local JFS/JFS2 files | **Include** relevant readable directories after reviewing nested mounts and application data. |
+   | procfs, normally `/proc` | **Exclude** the actual mount point. AIX `/proc` is a pseudo filesystem exposing live process and thread state, not stored files. |
+   | Device trees, normally `/dev` | **Exclude** from ordinary content scanning, including raw disk and other device paths. |
+   | ahafs, commonly `/aha` | **Exclude** the actual mount point. These are event-monitoring interfaces. AHAFS can be mounted elsewhere. |
+   | NFS and other remote/shared storage | **Exclude** unless intentionally in scope; assess separately with the storage owner. |
+   | `namefs` aliases and workload-partition trees | **Inspect** the backing object and every visible path; an alias can expose ordinary files or a special filesystem. See [workload partitions](#workload-partitions-wpars). |
+   | Automount roots, backups, application database volumes and other large stores | **Review** individually; exclude or schedule separately. |
+
+   - Use the actual mount points from the inventory; default names alone do
+     not cover every host.
+   - Do not copy Linux's exclusion list: `/tmp`, for example, can hold
+     valuable compromise evidence on AIX.
+   - Include relevant configuration, scripts, startup and scheduled-task
+     files, application code, user directories and logs within the agreed
+     scope. To add paths, use [application locations](#common-application-locations)
+     and [more ordinary directories](#more-ordinary-directories-can-be-included).
+
+   An exclusion is a recorded coverage gap, not proof that its contents are
+   harmless.
+
+   Sources: [IBM on procfs](https://www.ibm.com/support/pages/purpose-proc-file-system) · [AHAFS mount locations](https://www.ibm.com/docs/en/aix/7.2.0?topic=ahafs-setting-up-aix-event-infrastructure)
+
+3. **Test SFTP itself, not just an interactive SSH shell.** From the Linux
+   workstation, use the intended account and SSH key or configuration:
+
+   ```sh
+   sftp -v root@aix-power7.example
+   ```
+
+   In the session, list a known ordinary directory such as `/etc`, retrieve a
+   small approved regular file to prove actual reading, then exit.
+
+   - A directory listing does not prove access to every file.
+   - If SFTP is chrooted, its `/` may be the jail's root, not the AIX root.
+   - If root login is not allowed or SFTP fails, see
+     [source permissions and SFTP access](#arrange-source-permissions-and-sftp-access).
+
+4. **Mount the source read-only.** Reuse the verified quick-scan mount if it is
+   still mounted. Otherwise create a new mount directory; the command
+   intentionally fails on an existing one. If `/mnt/aix-power7` exists, choose
+   an unused path and change all paths and exclusions below.
+
+   ```sh
+   sudo mkdir /mnt/aix-power7 &&
+   sudo chown "$(id -u):$(id -g)" /mnt/aix-power7
+   ```
+
+   After confirming the SSH host identity, mount as your regular local user.
+   Use this direct-root command or the
+   [privileged SFTP alternative](#optional-privileged-sftp-through-an-existing-administrative-account),
+   not both on the same directory.
+
+   ```sh
+   sshfs -o ro,nodev,nosuid,noexec,reconnect \
+     -o ServerAliveInterval=15,ServerAliveCountMax=3 \
+     root@aix-power7.example:/ /mnt/aix-power7
+   ```
+
+   Inspect the mount without recursively walking the source:
+
+   ```sh
+   findmnt -T /mnt/aix-power7 -o TARGET,FSTYPE,OPTIONS
+   stat -f -c '%T' /mnt/aix-power7
+   ```
+
+   Expect SSHFS/FUSE (not AIX JFS2), target exactly `/mnt/aix-power7` and
+   read-only options. `allow_other` is not needed, because THOR runs as the
+   same local user.
+
+5. **Configure exclusions** in a dedicated THOR package, so the exclusions stay
+   with this assessment. Add these regular expressions to
+   `config/directory-excludes.cfg`, keeping its existing entries:
+
+   ```text
+   ^/mnt/aix-power7/proc($|/)
+   ^/mnt/aix-power7/dev($|/)
+   ^/mnt/aix-power7/aha($|/)
+   ```
+
+   Add one for every other out-of-scope mount or directory from the inventory,
+   using its local path. For example, if `/home/shared` is an excluded NFS
+   mount:
+
+   ```text
+   ^/mnt/aix-power7/home/shared($|/)
+   ```
+
+   - **Use the local mounted path.** THOR applies directory exclusions to the
+     real workstation path **before** virtual mapping. A rule anchored at
+     `^/proc` does not match `/mnt/aix-power7/proc`, even with
+     `--virtual-map /mnt/aix-power7:/`.
+   - These are THOR scanner expressions; do not use the Go collector's
+     `--exclude` glob syntax.
+   - Review nested mounts inside selected paths such as `/home` or `/var`.
+     Exclude automount roots before traversal can trigger more remote mounts.
+   - Keep SSHFS `follow_symlinks` and THOR `--follow-symlinks` off for the
+     initial assessment: a link can lead into an excluded tree or outside the
+     source view. Add reviewed link targets as explicit paths. Verify the
+     installed versions' link handling before enabling traversal.
+
+   Source: [THOR directory exclusions](https://thor-manual.nextron-systems.com/en/latest/usage/configuration.html#files-and-directories)
+
+6. **Test the exclusions** on harmless test directories with the same THOR
+   release. Put files with a harmless custom detection marker inside and
+   outside the excluded directory. Check the diagnostics for both inclusion
+   and exclusion; a scan without alerts does not prove the exclusions worked.
+   Do not test exclusions by reading live `/proc` entries.
+
+7. **Scan `/etc` first**, after checking its mount inventory. From the
+   dedicated THOR package, replacing the result hostname:
+
+   ```sh
+   mountpoint -q /mnt/aix-power7 &&
+   ./thor-linux-64 --lab \
+     -p /mnt/aix-power7/etc \
+     --virtual-map /mnt/aix-power7:/ \
+     -j aix-power7-example --threads 0
+   ```
+
+   The `mountpoint` check keeps an absent mount from turning into a scan of
+   the empty local directory; also confirm the mount with `findmnt` as in
+   step 4. Review THOR's startup settings, file counts, exclusions and read
+   errors before widening.
+
+8. **Widen the scan** with repeated `-p` arguments, for example:
+
+   ```sh
+   mountpoint -q /mnt/aix-power7 &&
+   ./thor-linux-64 --lab \
+     -p /mnt/aix-power7/etc \
+     -p /mnt/aix-power7/usr \
+     -p /mnt/aix-power7/var \
+     -p /mnt/aix-power7/tmp \
+     -p /mnt/aix-power7/home \
+     -p /mnt/aix-power7/opt \
+     --virtual-map /mnt/aix-power7:/ \
+     -j aix-power7-example --threads 0
+   ```
+
+   - This is an example selection, not a complete AIX assessment profile.
+     Omit paths that do not exist, narrow large trees and add relevant
+     application directories.
+   - The inventory-based exclusions are still needed for nested mounts.
+   - Scan the entire mounted `/` only after the exclusion test succeeded and
+     the whole tree was reviewed.
+   - If the source mount layout changes during the scan, review the scope.
+   - Have the AIX administrator watch source load and pause or narrow the
+     scan if needed. See [threads and source load](#threads-and-source-load).
+
+9. **Unmount** on Linux after THOR exits and releases its files:
+
+   ```sh
+   fusermount3 -u /mnt/aix-power7
+   ```
+
+   Use `fusermount -u` on installations that provide that command instead.
+   Do not force-unmount an active scan.
+
+## Verify
+
+Check that `findmnt` shows an SSHFS/FUSE read-only mount at the intended
+target, and that THOR's startup settings, file counts, exclusions and read
+errors match the scope.
+
+Before expanding a pilot to other hosts, keep these records with the results:
+
+- AIX level, CPU model, OpenSSH fileset, source namespace and the active mount
+  inventory; Linux, SSHFS and THOR versions and signature date.
+- The source account and tested read scope, selected paths, exclusions and
+  evidence that the exclusion test behaved as intended.
+- A successful read of an approved sample from each filesystem in scope, with
+  a source-side hash comparison where practical.
+- Scan settings, source-load observations, exit status, counts, read errors,
+  interrupted portions and any remaining coverage gaps.
+
+A successful mount or a clean scan alone does not prove complete coverage.
+
+## Background
+
+### Why SSHFS for AIX on POWER7
+
+- **Nothing runs on AIX.** THOR runs on the Linux workstation, so the AIX CPU
+  architecture does not need to support the scanner binary. AIX only serves
+  files over SFTP.
+- **POWER7 adds no special requirement.** It does not prevent a root SFTP
+  session, and there is no one-thread requirement.
+- **Licensing:** `--lab` is a filesystem-analysis preset that requires a
+  Forensic Lab License.
+
+The useful result is THOR's analysis of accessible file contents and paths,
+including applicable signatures and supported artifact parsing. This route
+does not provide:
+
+- native AIX process, memory, kernel or configuration-state inspection;
+- recovery of deleted or unallocated data;
+- native THOR support for POWER7.
+
+The source OS and its SFTP server supply the evidence. If tampering at that
+layer is suspected, use independent acquisition.
+
+Sources: [THOR lab options](https://thor-manual.nextron-systems.com/en/latest/usage/flags.html#scan-modes) · [Forensic Lab License](https://thor-manual.nextron-systems.com/en/latest/usage/special-scan-modes.html#forensic-lab-license)
+
+### Threads and source load
+
+`--lab` includes intense scanning and disables resource safeguards.
+`--threads 0` uses all cores of the Linux workstation, as `--lab` normally
+does.
+
+- `--threads 1` is an optional load reduction. If source load is too high,
+  reduce to `--threads 2` or `--threads 4`.
+- A thread count does not cap source CPU, disk I/O or bandwidth. THOR measures
+  resources on Linux, not on the AIX source.
+- SSH encryption and file reads still consume source resources. SSHFS,
+  network latency, storage or SSH encryption can also limit the speedup.
+- Have the AIX administrator observe source load and pause or narrow the scan
+  if needed.
+
+Sources: [THOR thread and lab options](https://thor-manual.nextron-systems.com/en/latest/usage/flags.html)
+
+### Source impact of a read-only mount
+
+No pathname guarantees zero operational impact on every host. Reading ordinary
+files through a read-only mount does not execute them or write their contents.
+It does consume source I/O, SSH CPU and network capacity, and it can update
+AIX access times. SSH activity can create source logs.
+
+The mount's `nodev`, `nosuid` and `noexec` settings control local use of
+mounted entries. They do not stop reads of remote `/dev` or `/proc`.
+
+**A read-only SSHFS mount is neither a snapshot nor a forensic write blocker.**
 
 ### Application locations and additional scan paths
 
-Use this reference to expand the quick scan without starting with the whole
-filesystem. These are documented defaults or installation layouts to check,
-not a promise that every AIX host contains them. Substitute the actual product
-and profile paths, then add each selected directory with `-p` using its local
-`/mnt/aix-power7` prefix.
+Use these references to widen a scan without starting with the whole
+filesystem. They are documented defaults or layouts to check, not a promise
+that every AIX host has them. Substitute the actual product and profile paths,
+then add each directory with `-p` and the `/mnt/aix-power7` prefix.
 
 #### Common application locations
 
 | Software or layout | Where to look on AIX | Useful scan targets |
 |---|---|---|
-| IBM HTTP Server | `/usr/IBM/HTTPServer` is the documented AIX installation default. | `conf`, `htdocs`, and `cgi-bin` if present; also every configured document root, script alias and upload directory outside that installation. |
-| Traditional WebSphere Application Server | `/usr/IBM/WebSphere/AppServer`; default profiles are under `profiles/<profile>`. | Within each relevant profile: `installedApps`, `config`, `temp` and `wstemp`. Deployed web application code, including JSP files, can be beneath `installedApps/<cell>/<application>.ear/`. |
-| Apache HTTP Server built with the upstream AIX layout | `/opt/httpd` and `/var/httpd`, with configuration under `/etc/httpd` or `/var/httpd/etc`. | Read the configuration to identify document roots, script aliases and application content. This layout is build-dependent, not a default for every Apache package. |
-| AIX Toolbox software | `/opt/freeware`. | Installed programs, libraries and configuration; include application content elsewhere when configured. |
-| Other vendor or locally installed applications | `/opt` and `/usr/local` are useful starting points. Product-specific or administrator-chosen locations may be elsewhere. | The affected product's code, scripts, configuration, upload and working directories. Select large database or backup stores separately. |
+| IBM HTTP Server | `/usr/IBM/HTTPServer` (documented AIX default) | `conf`, `htdocs`, and `cgi-bin` if present; every configured document root, script alias and upload directory outside the installation |
+| Traditional WebSphere Application Server | `/usr/IBM/WebSphere/AppServer`; default profiles under `profiles/<profile>` | In each relevant profile: `installedApps`, `config`, `temp` and `wstemp`. Deployed code, including JSP files, can be beneath `installedApps/<cell>/<application>.ear/` |
+| Apache HTTP Server built with the upstream AIX layout | `/opt/httpd` and `/var/httpd`; configuration under `/etc/httpd` or `/var/httpd/etc` | Document roots, script aliases and application content from the configuration. The layout is build-dependent, not a default for every Apache package |
+| AIX Toolbox software | `/opt/freeware` | Installed programs, libraries and configuration; application content elsewhere when configured |
+| Other vendor or locally installed applications | Start with `/opt` and `/usr/local`; product-specific or administrator-chosen locations may be elsewhere | The affected product's code, scripts, configuration, upload and working directories. Select large database or backup stores separately |
 
-IBM documents the [AIX product and profile defaults](https://www.ibm.com/docs/en/was-nd/9.0.5?topic=systems-websphere-application-server-default-directories)
-and [HTTP server configuration location](https://www.ibm.com/docs/en/ibm-http-server/8.5.5?topic=server-configuring-http);
-its [AIX HTTP Server notes](https://www.ibm.com/docs/en/aix/7.1.0?topic=notes-aix-710-expansion-pack-release)
-also identify the `htdocs` and `cgi-bin` content directories.
-Its [deployment description](https://www.ibm.com/support/pages/node/1081077)
-explains `installedApps`, `config` and `wstemp`; its
-[temporary-directory reference](https://www.ibm.com/support/pages/things-know-deleting-temporary-cache-and-log-files-websphere-application-server)
-identifies compiled JSP files under the profile's `temp` tree. Non-root
-installations can be under the installing user's home, and profiles or
-application repositories can be relocated.
+Non-root installations can be under the installing user's home, and profiles
+or application repositories can be relocated.
 
-For example, a profile named `AppSrv01` in the default installation has a useful
-scan root at `/mnt/aix-power7/usr/IBM/WebSphere/AppServer/profiles/AppSrv01/installedApps`.
-Add its sibling `config`, `temp` and `wstemp` directories as separate paths.
-Scanning only the HTTP server's `htdocs` can miss application code served by
-WebSphere behind that server.
+Example: for a profile named `AppSrv01` in the default installation, scan
+`/mnt/aix-power7/usr/IBM/WebSphere/AppServer/profiles/AppSrv01/installedApps`
+and add its sibling `config`, `temp` and `wstemp` directories as separate
+paths. Scanning only the HTTP server's `htdocs` can miss application code that
+WebSphere serves behind it.
 
-Other layout references: [Apache's AIX layout](https://cwiki.apache.org/confluence/spaces/HTTPD/pages/115522217/AIXPlatform),
-[AIX Toolbox paths](https://www.ibm.com/support/pages/aix-toolbox-open-source-software-get-started),
-and [IBM's AIX directory structure](https://www.ibm.com/docs/en/ssw_aix_72/devicemanagement/filesys_struct.html).
+IBM documents the `htdocs` and `cgi-bin` content directories, `installedApps`,
+`config` and `wstemp`, and compiled JSP files under the profile's `temp` tree.
+
+Sources: [IBM AIX product and profile defaults](https://www.ibm.com/docs/en/was-nd/9.0.5?topic=systems-websphere-application-server-default-directories) · [IBM HTTP server configuration location](https://www.ibm.com/docs/en/ibm-http-server/8.5.5?topic=server-configuring-http) · [IBM AIX HTTP Server notes](https://www.ibm.com/docs/en/aix/7.1.0?topic=notes-aix-710-expansion-pack-release) · [IBM deployment description](https://www.ibm.com/support/pages/node/1081077) · [IBM temporary-directory reference](https://www.ibm.com/support/pages/things-know-deleting-temporary-cache-and-log-files-websphere-application-server) · [Apache's AIX layout](https://cwiki.apache.org/confluence/spaces/HTTPD/pages/115522217/AIXPlatform) · [AIX Toolbox paths](https://www.ibm.com/support/pages/aix-toolbox-open-source-software-get-started) · [IBM AIX directory structure](https://www.ibm.com/docs/en/ssw_aix_72/devicemanagement/filesys_struct.html)
 
 #### More ordinary directories can be included
 
 | Additional scope | What it adds and what to check |
 |---|---|
-| `/usr/bin`, `/usr/sbin`, `/sbin`, `/usr/lib` | System executable, script and library contents. These are included in the expanded quick example. On standard AIX layouts, `/bin` and `/lib` alias `/usr/bin` and `/usr/lib`; use the real paths instead of scanning aliases again. |
+| `/usr/bin`, `/usr/sbin`, `/sbin`, `/usr/lib` | System executables, scripts and libraries (in the quick-route example). On standard layouts, `/bin` and `/lib` alias `/usr/bin` and `/usr/lib`; scan the real paths, not the aliases again. |
 | `/usr/local`, `/opt/freeware` | Local software and open-source packages. Include the entire tree if its size is acceptable, or select the relevant product. |
-| `/usr/IBM`, `/opt/IBM`, or the whole `/opt` | Broader vendor software coverage, including products outside the examples above. These are valid scan candidates when present and in scope; narrow them for speed if they contain large installations or data stores. |
+| `/usr/IBM`, `/opt/IBM`, or the whole `/opt` | Broader vendor software, including products not listed above. Valid candidates when present and in scope; narrow them for speed if they hold large installations or data stores. |
 | Selected user and service-account homes | Shell startup files, SSH configuration, scripts and user-installed applications. Use each account's configured home; do not assume root's home is `/root`. `/home` can be NFS-backed or automounted. |
-| Selected application logs and regular files under `/var/adm` or `/var/log`, where present | Investigation evidence beyond executable content. Prefer relevant log directories or files; `/var/adm` also contains special entries such as the cron FIFO, and logs can be large. |
+| Selected application logs and regular files under `/var/adm` or `/var/log`, where present | Evidence beyond executable content. Prefer relevant log directories or files: `/var/adm` also contains special entries such as the cron FIFO, and logs can be large. |
 
-There is no pathname that guarantees zero operational impact on every host.
-Reading ordinary files through a read-only mount does not execute those files
-or write their contents. It does consume source I/O, SSH CPU and network
-capacity, and can update access times. `/usr` and `/opt` are not inherently
-unsafe scan roots: include them when their contents, nested mounts and scan
-volume are acceptable. The focused mount check applies to each added subtree;
-the explicit exclusions remain relevant to pseudo filesystems, devices and
-out-of-scope storage. See IBM's [directory structure](https://www.ibm.com/docs/en/ssw_aix_72/devicemanagement/filesys_struct.html)
-and [cron file locations](https://www.ibm.com/docs/en/aix/7.1.0?topic=c-cron-daemon).
+`/usr` and `/opt` are not inherently unsafe scan roots. Include them when their
+contents, nested mounts and scan volume are acceptable. The focused mount check
+applies to each added subtree. The explicit exclusions still cover pseudo
+filesystems, devices and out-of-scope storage.
+
+Sources: [IBM AIX directory structure](https://www.ibm.com/docs/en/ssw_aix_72/devicemanagement/filesys_struct.html) · [IBM cron file locations](https://www.ibm.com/docs/en/aix/7.1.0?topic=c-cron-daemon)
 
 ### What SSHFS preserves and what it hides
 
@@ -206,141 +464,101 @@ SSHFS exposes a directory tree through SFTP. On Linux, it is normally one
 | `/aha` | ahafs, if mounted there | `/mnt/aix-power7/aha` within the same mount |
 | `/home/shared` | NFS, if mounted there | `/mnt/aix-power7/home/shared` within the same mount |
 
-The Linux FUSE implementation reports its own filesystem type. Libfuse ignores
-the `st_dev` value supplied through its high-level attribute API, and OpenSSH's
-SFTP `statvfs` extension does not transmit a filesystem-type name or the remote
-mount table. These interfaces explain why a local type check cannot recover the
-distinction between AIX JFS2, procfs and NFS in this tree.
-Sources: [Linux FUSE implementation](https://github.com/torvalds/linux/blob/master/fs/fuse/inode.c),
-[libfuse attributes](https://libfuse.github.io/doxygen/structfuse__operations.html),
-[OpenSSH SFTP extensions](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL).
+A local check cannot recover the difference between AIX JFS2, procfs and NFS:
 
-Consequently, a local `find -xdev` is not a reliable way to avoid crossing AIX
-mount boundaries inside one SSHFS mount. Likewise, allowing THOR to scan the
-SSHFS mount does not give it the source's mount classifications. A particular
-THOR release may also have path-based defaults, but those need verification
-against the mounted path. This guide uses explicit scope and exclusions instead
-of assuming how undocumented scanner internals behave.
+- The Linux FUSE implementation reports its own filesystem type.
+- libfuse ignores the `st_dev` value supplied through its high-level attribute
+  API.
+- OpenSSH's SFTP `statvfs` extension sends neither a filesystem-type name nor
+  the remote mount table.
 
-File type and filesystem type are different: SFTP can report whether an entry
-is a directory, regular file or device without identifying the filesystem that
-contains it. Treating only regular files as eligible does not establish that
-they are ordinary disk-backed evidence; pseudo filesystems expose kernel data
-through file interfaces.
+As a result:
 
-### Inventory the AIX source
+- A local `find -xdev` does not reliably stop at AIX mount boundaries inside
+  one SSHFS mount.
+- THOR scanning the SSHFS mount does not get the source's mount
+  classifications. A THOR release may have path-based defaults, but those need
+  verification against the mounted path. This guide uses explicit scope and
+  exclusions instead of relying on undocumented scanner internals.
+- File type is not filesystem type. SFTP can report whether an entry is a
+  directory, regular file or device, but not which filesystem contains it.
+  Pseudo filesystems expose kernel data through file interfaces, so treating
+  only regular files as eligible does not make them ordinary disk-backed
+  evidence.
 
-Have the AIX administrator record the following on the source. These commands
-inspect the system; the bare `mount` command lists mounts without creating one.
+Sources: [Linux FUSE implementation](https://github.com/torvalds/linux/blob/master/fs/fuse/inode.c) · [libfuse attributes](https://libfuse.github.io/doxygen/structfuse__operations.html) · [OpenSSH SFTP extensions](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL)
 
-```sh
-oslevel -s
-prtconf
-lslpp -L openssh.base.server
-mount
-lsfs
-```
+### Workload partitions (WPARs)
 
-Record the exact AIX technology/service level, processor model and OpenSSH
-fileset. Use the `mount` output for the active mount points, VFS types and
-options. `lsfs` describes configured filesystems from `/etc/filesystems`; it is
-not a substitute for the active mount list. Ask the administrator about
-automount roots and cluster-managed storage that might become visible during
-the scan. See IBM's [mount command](https://www.ibm.com/docs/en/aix/7.1.0?topic=m-mount-command)
-and [lsfs command](https://www.ibm.com/docs/en/aix/7.1.0?topic=l-lsfs-command).
-
-Build the scan scope from that inventory:
-
-| Source content | Treatment for an initial filesystem assessment |
-|---|---|
-| Local JFS/JFS2 files | Include relevant readable directories after reviewing nested mounts and application data. |
-| procfs, normally `/proc` | Exclude the actual mount point. It exposes live process/thread state through kernel interfaces. |
-| Device trees, normally `/dev` | Exclude from ordinary content scanning, including raw disk and other device paths. |
-| ahafs, commonly `/aha` | Exclude the actual mount point. These are event-monitoring interfaces. |
-| NFS and other remote/shared storage | Exclude unless intentionally in scope; assess separately with the storage owner. |
-| `namefs` aliases and workload-partition trees | Inspect the backing object and every visible path; an alias can expose ordinary files or a special filesystem. |
-| Automount roots, backups, application database volumes and other large stores | Review individually and exclude or schedule separately as appropriate. |
-
-AIX does have `/proc`: IBM describes it as a pseudo filesystem exposing active
-process and thread state, not stored files. AHAFS can be mounted somewhere other
-than `/aha`. Excluding these default names alone therefore does not cover every
-host. Sources: [IBM on procfs](https://www.ibm.com/support/pages/purpose-proc-file-system)
-and [AHAFS mount locations](https://www.ibm.com/docs/en/aix/7.2.0?topic=ahafs-setting-up-aix-event-infrastructure).
-
-If the host uses AIX workload partitions (WPARs), record whether the SSH session
+If the host uses AIX workload partitions, record whether the SSH session
 reaches the global environment or one partition. IBM documents shared `/usr`,
 `/opt` and `/proc` trees using `namefs`, with partition trees normally under
-`/wpars` in the global environment. Inspect the backing paths rather than
-blanket-excluding all `namefs` mounts. Exclude out-of-scope partition trees; for
-included partitions, also exclude their visible aliases of `/proc`, device
-trees and other special mounts. A top-level `/proc` exclusion does not cover
-`/wpars/part1/proc`. [IBM WPAR filesystems](https://www.ibm.com/docs/en/aix/7.1?topic=wpars-file-systems-system)
+`/wpars` in the global environment.
 
-Do not copy Linux's exclusion list mechanically. For example, `/tmp` can contain
-valuable compromise evidence on AIX and should not be excluded merely because
-it holds temporary files. Include relevant configuration, scripts, startup and
-scheduled-task files, application code, user directories and logs within the
-agreed scope. An exclusion is a recorded coverage gap, not proof that its
-contents are harmless.
+- Inspect the backing paths instead of excluding all `namefs` mounts.
+- Exclude out-of-scope partition trees.
+- For included partitions, also exclude their visible aliases of `/proc`,
+  device trees and other special mounts. A top-level `/proc` exclusion does
+  not cover `/wpars/part1/proc`.
+
+Source: [IBM WPAR filesystems](https://www.ibm.com/docs/en/aix/7.1?topic=wpars-file-systems-system)
 
 ### Arrange source permissions and SFTP access
 
 #### Root access is possible when the SSH policy allows it
 
-Mounting `root@host:/` is possible if that AIX host permits the chosen root
+Mounting `root@host:/` works if the AIX host permits the chosen root
 authentication method and allows an SFTP session. The source's SSH settings,
-account restrictions, keys, `Match` rules and possible chroot determine access.
-POWER7 itself does not prevent it. IBM documents that its OpenSSH 7.1 and later
-defaults permit non-interactive root authentication such as public keys while
-restricting root password login. Check the installed configuration rather than
-assuming that default. [IBM root login notes](https://www.ibm.com/support/pages/node/705937)
+account restrictions, keys, `Match` rules and any chroot decide this; POWER7
+does not prevent it.
+
+IBM documents that its OpenSSH 7.1 and later defaults permit non-interactive
+root authentication, such as public keys, while restricting root password
+login. Check the installed configuration instead of assuming that default.
 
 There are two separate identities:
 
 - The **local Linux user** owns the SSHFS mount and runs THOR.
-- The **remote AIX account** determines which source files SFTP can read.
+- The **remote AIX account** decides which source files SFTP can read.
 
-Local `sudo` does not turn a remote non-root SFTP session into root. Conversely,
-a regular local Linux user can use an authorized remote root SSH key. Mounting
-the directory `/` as a non-root account may work but exposes only what that
-account can enumerate and read. See [SSHFS access semantics](https://github.com/libfuse/sshfs/blob/master/sshfs.rst).
+Local `sudo` does not turn a remote non-root SFTP session into root. A regular
+local Linux user can use an authorized remote root SSH key. Mounting `/` as a
+non-root account may work, but exposes only what that account can list and
+read.
 
-Do not enable root password login merely to use this procedure. Use an approved
-access method. If direct root login is prohibited, options include an account
-with sufficient read access, administrator-exported evidence, or a narrowly
-configured privileged SFTP service.
+> [!WARNING]
+> Do not enable root password login just to use this procedure. Use an
+> approved access method. If direct root login is prohibited, use an account
+> with enough read access, evidence exported by the administrator, or a
+> narrowly configured privileged SFTP service (below).
 
-#### Test SFTP separately from an interactive SSH shell
+Sources: [IBM root login notes](https://www.ibm.com/support/pages/node/705937) · [SSHFS access semantics](https://github.com/libfuse/sshfs/blob/master/sshfs.rst)
 
-From the Linux workstation, use the intended account and SSH key/configuration:
-
-```sh
-sftp -v root@aix-power7.example
-```
-
-Within SFTP, list a known ordinary directory such as `/etc` and retrieve a small
-approved regular file to verify actual reading. Exit the session afterwards.
-A successful directory listing does not establish access to every file. If
-SFTP is chrooted, its `/` may be the jail's root rather than the AIX system root.
+#### SFTP server configuration
 
 IBM's AIX OpenSSH configuration commonly uses
 `Subsystem sftp /usr/sbin/sftp-server`; `internal-sftp` is another supported
-configuration. Unlike the NetScaler procedure, an AIX host does not inherently
-need a switch to `internal-sftp`. IBM documents a specific external-server
-failure involving permissions on `sshd_config`; have the administrator diagnose
-such failures against the installed version before changing configuration.
-[IBM AIX SFTP troubleshooting](https://www.ibm.com/support/pages/ibm-aix-regular-users-can-ssh-aix-sftp-fails)
+configuration. Unlike the NetScaler procedure, AIX does not inherently need a
+switch to `internal-sftp`.
+
+IBM documents a specific external-server failure involving permissions on
+`sshd_config`. Have the administrator diagnose such failures against the
+installed version before changing the configuration.
+
+Source: [IBM AIX SFTP troubleshooting](https://www.ibm.com/support/pages/ibm-aix-regular-users-can-ssh-aix-sftp-fails)
 
 #### Optional privileged SFTP through an existing administrative account
 
-Where the administrator has explicitly configured non-interactive `sudo` for
-the exact read-only SFTP server command, SSHFS can launch that command remotely.
-Verify the executable location and support for `sftp-server -R` on the installed
-AIX OpenSSH build first. `internal-sftp` is an sshd subsystem, not an executable
-to pass to `sudo`.
+Use this only where the administrator has explicitly configured
+non-interactive `sudo` for the exact read-only SFTP server command. SSHFS then
+starts that command remotely.
 
-After preparing the empty local mount point in the next section, an alternative
-to the direct-root mount is:
+First verify the executable location and that the installed AIX OpenSSH build
+supports `sftp-server -R`. `internal-sftp` is an sshd subsystem, not an
+executable to pass to `sudo`.
+
+After preparing the empty local mount point (thorough route, step 4), mount
+with this command instead of the direct-root one:
 
 ```sh
 sshfs -o ro,nodev,nosuid,noexec,reconnect \
@@ -348,191 +566,36 @@ sshfs -o ro,nodev,nosuid,noexec,reconnect \
   scanadmin@aix-power7.example:/ /mnt/aix-power7
 ```
 
-This requires a permitted remote command session with no interactive password
-or TTY requirement. Shell startup output on stdout can corrupt the SFTP stream.
-Use the exact administrative command that was validated, without granting
-general passwordless sudo. The server's `-R` option denies write operations;
-the client mount's `ro` option alone does not restrict what the SSH credential
-could do through another session. See [SSHFS remote server selection](https://github.com/libfuse/sshfs/blob/master/sshfs.rst)
-and [OpenSSH read-only SFTP mode](https://man.openbsd.org/sftp-server).
+- The account needs a permitted remote command session with no interactive
+  password or TTY requirement.
+- Shell startup output on stdout can corrupt the SFTP stream.
+- Use the exact validated command; do not grant general passwordless sudo.
+- The server's `-R` option denies write operations. The client's `ro` option
+  alone does not restrict what the SSH credential could do in another session.
 
-### Prepare the Linux workstation and mount
-
-Use a supported Linux workstation with SSHFS/FUSE, a current full THOR package
-and a Forensic Lab License. Keep the THOR package, logs and reports on local
-storage outside the mount. This procedure uses a dedicated THOR package so its
-exclusions can be kept with the assessment.
-
-Reuse the verified quick-scan mount if it is still mounted. Otherwise, use a
-new mount directory. If `/mnt/aix-power7` already exists, stop and choose
-an unused path, updating all paths and exclusion expressions below accordingly.
-The following commands intentionally do not reuse an existing directory:
-
-```sh
-sudo mkdir /mnt/aix-power7 &&
-sudo chown "$(id -u):$(id -g)" /mnt/aix-power7
-```
-
-After confirming the intended SSH host identity and SFTP access, run the mount
-as your regular local user. Use either this direct-root variant or the approved
-privileged-server variant above, not both on the same directory.
-
-```sh
-sshfs -o ro,nodev,nosuid,noexec,reconnect \
-  -o ServerAliveInterval=15,ServerAliveCountMax=3 \
-  root@aix-power7.example:/ /mnt/aix-power7
-```
-
-Inspect the local mount without recursively walking the source:
-
-```sh
-findmnt -T /mnt/aix-power7 -o TARGET,FSTYPE,OPTIONS
-stat -f -c '%T' /mnt/aix-power7
-```
-
-Expect the mount table to identify SSHFS/FUSE, not AIX JFS2. Confirm that the
-target is exactly `/mnt/aix-power7` and that it is read-only. Run THOR as the
-same local user; the example does not need `allow_other`.
-
-The mount's `nodev`, `nosuid` and `noexec` settings control local use of mounted
-entries. They do not exclude remote `/dev` or `/proc` from reads. Reading source
-files can still update AIX access times, and SSH activity can create source
-logs. A read-only SSHFS mount is neither a snapshot nor a forensic write blocker.
-
-### Configure exclusions using the local mounted paths
-
-In the dedicated THOR package, add the following expressions to
-`config/directory-excludes.cfg`, preserving its existing entries:
-
-```text
-^/mnt/aix-power7/proc($|/)
-^/mnt/aix-power7/dev($|/)
-^/mnt/aix-power7/aha($|/)
-```
-
-These are regular expressions. Add exclusions for every other out-of-scope
-mount or directory from the AIX inventory, using its actual local path. For
-example, if `/home/shared` is an excluded NFS mount, add:
-
-```text
-^/mnt/aix-power7/home/shared($|/)
-```
-
-THOR applies directory exclusions to the **real workstation path before virtual
-mapping**. A rule anchored at `^/proc` does not cover
-`/mnt/aix-power7/proc`, even with `--virtual-map /mnt/aix-power7:/`.
-These are THOR scanner configuration expressions; do not substitute the Go
-collector's `--exclude` glob syntax. [THOR directory exclusions](https://thor-manual.nextron-systems.com/en/latest/usage/configuration.html#files-and-directories)
-
-Review nested mounts even inside selected paths such as `/home` or `/var`.
-Exclude automount roots before traversal can trigger additional remote mounts.
-Changes to the source mount layout during a scan require a scope review.
-
-Avoid enabling SSHFS `follow_symlinks` or THOR `--follow-symlinks` for the initial
-assessment. A link can introduce another path to an excluded tree or resolve
-outside the intended source view. Verify the installed versions' link handling
-before enabling traversal; add reviewed target directories explicitly instead.
-
-### Run a staged THOR file scan
-
-First verify exclusions on harmless test directories with the same THOR release.
-Use files with a harmless custom detection marker inside and outside the
-excluded directory, and inspect diagnostics to establish both inclusion and
-exclusion. A scan with no alerts is not sufficient evidence that exclusions
-worked. Do not test exclusion behavior by reading live `/proc` entries.
-
-Start with `/etc` after checking its mount inventory. From the dedicated THOR
-package on Linux:
-
-```sh
-mountpoint -q /mnt/aix-power7 &&
-./thor-linux-64 --lab \
-  -p /mnt/aix-power7/etc \
-  --virtual-map /mnt/aix-power7:/ \
-  -j aix-power7-example --threads 0
-```
-
-Replace the result hostname with the actual source identifier. The mount check
-prevents an absent mount from turning into an empty local-directory scan; also
-verify its identity using `findmnt` as above. Review THOR's startup settings,
-file counts, exclusions and read errors before widening the assessment.
-
-After that check, add reviewed paths using repeated `-p` arguments, for example:
-
-```sh
-mountpoint -q /mnt/aix-power7 &&
-./thor-linux-64 --lab \
-  -p /mnt/aix-power7/etc \
-  -p /mnt/aix-power7/usr \
-  -p /mnt/aix-power7/var \
-  -p /mnt/aix-power7/tmp \
-  -p /mnt/aix-power7/home \
-  -p /mnt/aix-power7/opt \
-  --virtual-map /mnt/aix-power7:/ \
-  -j aix-power7-example --threads 0
-```
-
-This is an example selection, not a complete AIX assessment profile. Omit paths
-that do not exist, narrow large trees and add relevant application directories.
-Inventory-approved exclusions remain necessary for nested mounts. A scan of
-the entire mounted `/` should only follow successful exclusion validation and
-review of the whole tree.
-
-`--lab` is a filesystem-analysis preset requiring a Lab License. It includes
-intense scanning and disables resource safeguards. The examples use all local
-cores; see the quick procedure's thread guidance for tuning concurrency.
-Setting a thread count does not cap source CPU, disk I/O or bandwidth. THOR
-resource measurements run on Linux, not on the AIX source. Have the AIX
-administrator observe source load and pause or narrow the scan if needed. Source SSH
-encryption and file reads still consume resources.
-See [THOR lab options](https://thor-manual.nextron-systems.com/en/latest/usage/flags.html#scan-modes)
-and [lab licensing](https://thor-manual.nextron-systems.com/en/latest/usage/special-scan-modes.html#forensic-lab-license).
+Sources: [SSHFS remote server selection](https://github.com/libfuse/sshfs/blob/master/sshfs.rst) · [OpenSSH read-only SFTP mode](https://man.openbsd.org/sftp-server)
 
 ### Limits that can reduce coverage or stop a scan
 
 | Limitation | Consequence and response |
 |---|---|
-| Old SSH algorithms or authentication methods | A modern client may fail negotiation. Diagnose with verbose SSH/SFTP output; prefer an AIX OpenSSH update. If a legacy exception is necessary, scope it to the individual host and keep host-key verification. See [OpenSSH legacy guidance](https://www.openssh.org/legacy.html). |
-| NFS access through AIX | Root on AIX can be mapped to an anonymous identity by the NFS server. A root SSH session does not bypass those export permissions. See [IBM NFS root authentication](https://www.ibm.com/support/pages/aix-nfs-authentication-root-user). |
-| AIX Encrypted File System | Successful SSH public-key login does not necessarily load the EFS keys needed to decrypt files. Validate actual reads in the SFTP session; file mode bits or root login alone are insufficient evidence of coverage. See [IBM EFS and SSH authentication](https://www.ibm.com/support/pages/aix-incorporating-efs-ssh-public-key-authentication). |
+| Old SSH algorithms or authentication methods | A modern client may fail negotiation. Diagnose with verbose SSH/SFTP output; prefer an AIX OpenSSH update. Scope any legacy exception to the one host and keep host-key verification. See [OpenSSH legacy guidance](https://www.openssh.org/legacy.html). |
+| NFS access through AIX | The NFS server can map AIX root to an anonymous identity; a root SSH session does not bypass export permissions. See [IBM NFS root authentication](https://www.ibm.com/support/pages/aix-nfs-authentication-root-user). |
+| AIX Encrypted File System | SSH public-key login does not necessarily load the EFS keys needed to decrypt files. Validate actual reads over SFTP; mode bits or root login do not prove coverage. See [IBM EFS and SSH authentication](https://www.ibm.com/support/pages/aix-incorporating-efs-ssh-public-key-authentication). |
 | Restricted namespace or unavailable storage | A chroot, workload-partition view or unmounted filesystem can omit evidence. Record the source namespace and excluded/unavailable volumes. |
-| Large databases, backups, sparse files and active application files | Transfers can be expensive or inconsistent. Select relevant file evidence and arrange separate acquisition for data requiring a stable view. File-size limits are not a substitute for path exclusions. |
-| Broken connections or stale remote storage | Reads may fail or wait. SSH keepalives and reconnect help transport recovery but do not guarantee a deadline for a blocked source filesystem operation. Review and repeat incomplete portions. |
-| Changes during enumeration or reading | SSHFS caching and a live source do not provide a point-in-time image. Use an appropriate snapshot/export workflow when consistency is required. |
+| Large databases, backups, sparse files and active application files | Transfers can be expensive or inconsistent. Select relevant files; acquire data that needs a stable view separately. File-size limits do not replace path exclusions. |
+| Broken connections or stale remote storage | Reads may fail or wait. Keepalives and `reconnect` help the transport recover but set no deadline for a blocked source filesystem operation. Review and repeat incomplete portions. |
+| Changes during enumeration or reading | SSHFS caching and a live source give no point-in-time image. Use a snapshot or export workflow when consistency is required. |
 
-SSHFS also does not preserve all forensic metadata. In SSHFS 3.7.3's SFTP v3
-attribute conversion, `ctime` is populated from `mtime` and the link count is
-set to one. Do not interpret the mounted `ctime` as native AIX inode-change time
-or use the mounted view as an authoritative record of hard links. Capture
-required AIX metadata separately; do not assume native ACLs or extended
-attributes have been preserved. [SSHFS 3.7.3 attribute conversion](https://github.com/libfuse/sshfs/blob/sshfs-3.7.3/sshfs.c)
+#### Metadata
 
-The useful result is THOR analysis of accessible file contents and paths,
-including applicable signatures and supported artifact parsing. This procedure
-does not provide native AIX process, memory, kernel or configuration-state
-inspection, recover deleted/unallocated data, or establish native THOR support
-for POWER7. The source OS and SFTP server also supply the evidence; suspected
-tampering at that layer calls for independent acquisition.
+SSHFS does not preserve all forensic metadata. In SSHFS 3.7.3's SFTP v3
+attribute conversion, `ctime` is filled from `mtime` and the link count is set
+to one.
 
-### Validate and close the assessment
+- Do not read the mounted `ctime` as the native AIX inode-change time.
+- Do not use the mounted view as an authoritative record of hard links.
+- Do not assume native ACLs or extended attributes are preserved.
+- Capture required AIX metadata separately.
 
-Before expanding a pilot to other hosts, retain:
-
-- AIX level, CPU model, OpenSSH fileset, source namespace and the active mount
-  inventory; Linux, SSHFS and THOR versions and signature date.
-- The source account and tested read scope, selected paths, exclusions and
-  evidence that the exclusion fixture behaved as intended.
-- A successful read of an approved sample from each filesystem included in
-  scope, with a source-side hash comparison where practical.
-- Scan settings, source-load observations, exit status, counts, read errors,
-  interrupted portions and any remaining coverage gaps.
-
-After THOR exits and releases its files, unmount on Linux:
-
-```sh
-fusermount3 -u /mnt/aix-power7
-```
-
-Use `fusermount -u` on installations that provide that command instead. Do not
-force-unmount an active scan. Keep results and the source inventory together;
-a successful mount or a clean scan alone does not establish complete coverage.
+Source: [SSHFS 3.7.3 attribute conversion](https://github.com/libfuse/sshfs/blob/sshfs-3.7.3/sshfs.c)
