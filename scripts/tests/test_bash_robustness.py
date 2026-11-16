@@ -40,6 +40,7 @@ class BashRobustnessTests(unittest.TestCase):
         self.upload_statuses = []
         self.marker_status = 200
         self.begin_statuses = []
+        self.begin_delay = 0
         self.end_status = 200
         self.retry_after = "0"
         self.diagnostic_header = False
@@ -64,6 +65,8 @@ class BashRobustnessTests(unittest.TestCase):
                     status = test.end_status if marker["type"] == "end" else test.marker_status
                     if marker["type"] == "begin" and test.begin_statuses:
                         status = test.begin_statuses.pop(0)
+                    if marker["type"] == "begin" and test.begin_delay:
+                        time.sleep(test.begin_delay)
                 else:
                     response = test.upload_response
                     status = test.upload_statuses.pop(0) if test.upload_statuses else 200
@@ -755,9 +758,13 @@ exec "$CURL_REAL" "$@"
         (Path(path) / "curl").symlink_to(shutil.which("curl"))
         command = [BASH, str(COLLECTOR), "--server", "127.0.0.1", "--port", str(self.server.server_port),
                    "--no-progress", "--no-log-file", "--dir", str(self.samples)]
-        for debug in ([], ["--debug"]):
-            with self.subTest(debug=bool(debug)):
+        # "walk": the signal arrives while find runs. "begin": it arrives while the begin
+        # marker waits for its answer, so the trap runs inside collection_marker, whose
+        # stdout the caller redirects into the begin response file.
+        for moment, debug in [(m, d) for m in ("walk", "begin") for d in ([], ["--debug"])]:
+            with self.subTest(moment=moment, debug=bool(debug)):
                 self.markers.clear()
+                self.begin_delay = 1.5 if moment == "begin" else 0
                 process = subprocess.Popen(command + debug, cwd=self.root, stdout=subprocess.PIPE,
                                            stderr=subprocess.STDOUT, text=True,
                                            env={**os.environ, "TMPDIR": str(self.root), "PATH": path,

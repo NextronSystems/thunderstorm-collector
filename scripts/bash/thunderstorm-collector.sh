@@ -192,7 +192,9 @@ send_interrupted_marker() {
         [ "$USE_SSL" -eq 1 ] && _scheme="https"
         local _base="${_scheme}://${THUNDERSTORM_SERVER}:${THUNDERSTORM_PORT}"
         _base="${_base%/}"
-        log_msg debug "Sending interrupted collection marker"
+        # stderr: a signal during the begin marker runs this trap while the caller
+        # still redirects stdout into the begin response file.
+        marker_debug "Sending interrupted collection marker"
         collection_marker "$_base" "interrupted" "${SCAN_ID:-}" "$_stats" >/dev/null
     fi
 }
