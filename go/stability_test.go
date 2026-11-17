@@ -442,3 +442,34 @@ func TestWaitOptionsAreLimitedToOneDay(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadThroughProxyThatNeverAnswersConnectIsBounded(t *testing.T) {
+	saved := connectTimeout
+	connectTimeout = 200 * time.Millisecond
+	defer func() { connectTimeout = saved }()
+	// The proxy accepts the connection and reads the CONNECT request, but never
+	// answers it.
+	proxy, stop := silentServer(t, true)
+	defer stop()
+	name, stat := newTestFile(t, "sample")
+	defer os.Remove(name)
+	var output bytes.Buffer
+	c := NewCollector(CollectorConfig{Server: "https://thunderstorm.invalid:8443", Threads: 1, ResponseTimeout: 200 * time.Millisecond, ServerWait: time.Hour}, log.New(&output, "", 0))
+	transport := buildHttpTransport(Config{Threads: 1, Proxy: proxy})
+	defer transport.CloseIdleConnections()
+	c.client = &http.Client{Transport: transport, CheckRedirect: refuseRedirects}
+	c.retrySleep = func(time.Duration) {}
+	info := infoWithPath{FileInfo: stat, path: name}
+
+	finishesWithin(t, 20*time.Second, "the upload", func() {
+		for c.uploadToThunderstorm(&info) {
+		}
+	})
+
+	if got := atomic.LoadInt64(&c.Statistics.uploadErrors); got != 1 {
+		t.Fatalf("expected one upload error, got %d; log:\n%s", got, output.String())
+	}
+	if !strings.Contains(output.String(), "no connection to Thunderstorm") {
+		t.Errorf("log does not name the missing connection:\n%s", output.String())
+	}
+}
