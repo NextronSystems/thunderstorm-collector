@@ -79,6 +79,7 @@ Command-line options override them.
 | `--ssl` | off | Use HTTPS |
 | `--ca-cert FILE` | system trust | Use HTTPS and trust only this CA bundle |
 | `--retries N` | 3 | Upload attempts per file, 1 to 10 |
+| `--server-wait SEC` | 600 | Wait for a lost server to come back; `0` stops at once |
 | `--debug` | off | Explain each decision, including marker problems |
 | `--log-file PATH` | `./thunderstorm.log` | Log file; `--no-log-file` disables it |
 | `--syslog` | off | Also log to syslog |
@@ -91,7 +92,7 @@ Command-line options override them.
 | Code | Meaning |
 |---|---|
 | `0` | Completed without detected errors; an empty readable directory is valid |
-| `1` | Partial failure, incomplete scan, missing root or interrupted run |
+| `1` | Partial failure, incomplete scan, missing root, interrupted run, or server lost for longer than `SERVER_WAIT` |
 | `2` | Invalid configuration, missing upload tool, unusable workspace, or no HTTP answer to the begin marker |
 
 The summary line reports `scanned`, `submitted`, `skipped`, `failed` and
@@ -114,10 +115,14 @@ counts directories that could not be fully read.
   Cloud names match directories only, so a file called `OneDrive-Setup.exe` is
   still collected.
 - **Network mounts:** detected from `/proc/mounts` on Linux only. On macOS and
-  other Unix systems, name local directories explicitly.
+  other Unix systems, name local directories explicitly. Mount points are
+  compared with the roots as text and never accessed, so a hung network mount
+  outside the roots does not stall the run. The exclusions are built before the
+  begin marker is sent.
 - **Own files:** the collector's log file and its private temporary workspace
-  are never uploaded; the workspace is removed on exit. Keep other captured
-  logs outside the collected directories.
+  are never uploaded; the workspace is removed on every exit the shell handles,
+  including after a signal. Keep other captured logs outside the collected
+  directories.
 
 ### Uploads and retries
 
@@ -131,6 +136,14 @@ counts directories that could not be fully read.
 - HTTP 503 has a separate budget of five answers. A `Retry-After` value in
   seconds is honored, capped at 120 seconds. A missing value or an HTTP date
   waits two seconds.
+- **Server loss:** when three files in a row get no HTTP answer (refused,
+  timeout, reset) or use up their 503 budget, the collector takes no new file
+  and polls `/api/status` after 2, 4, 8 … seconds (at most 60 apart) for up to
+  `SERVER_WAIT` seconds (default 600, `--server-wait`). A 2xx answer resumes
+  with the next file; files that already failed stay failed. When the time runs
+  out, it logs `Server unreachable for Ns, stopping`, sends an "interrupted"
+  marker and exits 1; files not attempted are not counted. Any other HTTP
+  answer, such as 500, resets the count. A dry run never waits.
 - A failed file does not stop the run. It makes the exit code nonzero.
 - Quotes, semicolons, backslashes and control characters in the uploaded file
   name become underscores. The file contents are unchanged.
@@ -138,8 +151,11 @@ counts directories that could not be fully read.
 ### TLS
 
 - Certificate verification is on by default.
-- `--ca-cert FILE` makes that bundle the **only** trusted CA; system CAs are not
+- `--ca-cert FILE` (or `CA_CERT` in the header) turns on HTTPS, even with
+  `USE_SSL=0`, and makes that bundle the **only** trusted CA; system CAs are not
   added.
+- `--no-ssl` together with a CA certificate is a configuration error (exit 2),
+  so samples never go out over plain HTTP while a CA is configured.
 - `--insecure` turns verification off. Use it for testing only, not to work
   around a certificate error.
 
@@ -166,8 +182,11 @@ upload tool. In the summary, `submitted` means "would submit".
 - Logging to `./thunderstorm.log` is on by default. If both `--log-file` and
   `--no-log-file` are given, the last one wins.
 - `--syslog`, `--debug` and progress output are optional.
-- On SIGINT or SIGTERM, the collector tries to send an "interrupted" marker and
-  exits with 1.
+- On SIGINT, SIGTERM, SIGHUP or SIGQUIT, the collector tries to send an
+  "interrupted" marker and exits with 1.
+- If the console goes away (a dropped SSH session without a terminal, or a pipe
+  reader such as `tee` that ends), the run continues: console output stops,
+  file and syslog logging go on.
 
 ### Timeouts and limits
 
@@ -175,7 +194,7 @@ upload tool. In the summary, `submitted` means "would submit".
 |---|---|
 | curl | 10 s to connect, 300 s per upload |
 | GNU wget | 10 s to connect, 300 s read timeout (not a total deadline), one attempt per call |
-| Marker requests | 10 s each; begin is tried twice |
+| Marker requests, `/api/status` probes | 10 s each; begin is tried twice |
 | Server answer | 1 MiB; a larger upload answer fails, a larger marker answer is ignored |
 | Transport output file | 2 MiB, including headers and diagnostics |
 | Logged error body | 4 KiB |
