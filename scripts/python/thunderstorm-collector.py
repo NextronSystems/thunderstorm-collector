@@ -524,6 +524,9 @@ class Collector(object):
             for root in roots:
                 self.walk(root)
         except ServerUnreachable:
+            # A signal now must not send a second interrupted marker.
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             self.marker("interrupted")  # best effort; the server has not answered for a while
             log("Thunderstorm Collector Run stopped, server unreachable (Checked: {} Submitted: {} "
                 "Failed: {} Skipped: {} Scan errors: {} Seconds: {})".format(

@@ -586,6 +586,21 @@ class PythonRobustness(unittest.TestCase):
         self.assertIn("Would submit: 5", self.output)
         self.assertEqual(self.markers, [])
 
+    def test_busy_server_counts_as_lost_but_http_errors_do_not(self):
+        # 503 until the retries are used up looks like a lost server; any other answer,
+        # 500 included, shows the server is up, so every file is tried and the run ends.
+        for status, code, polls, last in ((503, 1, 0, "interrupted"), (500, 1, 0, "end")):
+            del self.markers[:]
+            del self.status_polls[:]
+            del self.paths[:]
+            self.outage_files(5)
+            self.upload_statuses = [status] * 5
+            self.assertEqual(self.run_collector("--server-wait", "0"), code, self.output)
+            self.assertEqual(len(self.status_polls), polls, self.output)
+            self.assertEqual([marker["type"] for marker in self.markers], ["begin", last], status)
+            uploads = sum("/api/check" in path for path in self.paths)
+            self.assertEqual(uploads, 3 if status == 503 else 5, (status, self.output))
+
     def test_sigterm_while_waiting_for_a_lost_server_sends_interrupted(self):
         self.outage_files(5)
         self.outage_after = 0

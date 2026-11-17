@@ -104,7 +104,8 @@ Unreadable directories count as `Scan errors`, unreadable files as `Failed`.
   cloud-sync folders and Linux network or special mounts. Best effort only.
 - **Mounts are skipped by path:** excluded trees and the network or special
   mounts in `/proc/mounts` are skipped before any stat, so an unresponsive hard
-  NFS mount cannot block the run. Other filesystem types (such as `ceph` or
+  NFS mount below a scan root cannot block the walk; a scan root that is itself
+  on such a mount still can. Other filesystem types (such as `ceph` or
   `glusterfs`), and every mount on systems without `/proc/mounts`, are walked
   like local directories.
 - `/proc/mounts` is read as bytes, so non-ASCII mount paths also work under the
