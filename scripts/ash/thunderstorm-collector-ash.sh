@@ -150,6 +150,17 @@ cleanup_tmp_files() {
 }
 
 INTERRUPTED=0
+_SLEEP_PID=""
+
+# pause SECONDS -- sleep that a trapped signal can cut short. dash and BusyBox ash
+# run a trap only after the foreground child exits, so a plain sleep would hold
+# off a SIGTERM sent to the collector alone until the sleep ends (up to 120 s).
+pause() {
+    sleep "$1" &
+    _SLEEP_PID=$!
+    wait "$_SLEEP_PID"
+    _SLEEP_PID=""
+}
 
 on_exit() {
     cleanup_tmp_files
@@ -158,6 +169,7 @@ on_exit() {
 on_signal() {
     trap '' INT TERM HUP QUIT
     INTERRUPTED=1
+    [ -n "$_SLEEP_PID" ] && kill "$_SLEEP_PID" 2>/dev/null
     # Close file descriptors that may be open from the main loop
     exec 3<&- 4<&-
     PROGRESS_ACTIVE=0
@@ -1018,9 +1030,9 @@ submit_file() {
             # Use Retry-After from 503 if available, otherwise exponential backoff
             if [ "$_sf_rc" -eq 103 ] && [ -n "$RETRY_AFTER" ]; then
                 log_msg info "Server requested Retry-After: ${RETRY_AFTER}s"
-                sleep "$RETRY_AFTER"
+                pause "$RETRY_AFTER"
             else
-                sleep "$_sf_wait"
+                pause "$_sf_wait"
                 _sf_wait=$((_sf_wait * 2))
                 [ "$_sf_wait" -gt 60 ] && _sf_wait=60
             fi
@@ -1088,7 +1100,7 @@ wait_for_server() {
     while [ "$_wfs_waited" -lt "$SERVER_WAIT" ]; do
         _wfs_sleep=$((SERVER_WAIT - _wfs_waited))
         [ "$_wfs_sleep" -gt "$_wfs_delay" ] && _wfs_sleep="$_wfs_delay"
-        sleep "$_wfs_sleep"
+        pause "$_wfs_sleep"
         _wfs_slept=$((_wfs_slept + _wfs_sleep))
         _wfs_waited="$_wfs_slept"
         # Prefer the wall clock: each poll can take up to its own timeout. The

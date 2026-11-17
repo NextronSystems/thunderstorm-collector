@@ -1101,6 +1101,41 @@ exec "$REAL_FIND" "$@"
         self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
         self.assertIn("Run stopped:", log.read_text())
 
+    def test_sigterm_during_the_server_wait_ends_the_run_at_once(self):
+        # dash and BusyBox ash run a trap only after the foreground child exits: a SIGTERM
+        # sent to the collector alone (kill PID, timeout, a supervisor) waited for the
+        # current poll delay, which grows to 60 s.
+        self.upload_files(4)
+        self.upload_statuses = [None] * 20
+        self.status_statuses = [None] * 20
+        command = SHELL + [str(self.configured_collector(SERVER_WAIT="300")), "--server",
+                           "127.0.0.1", "--port", str(self.server.server_port), "--dir",
+                           str(self.samples), "--no-progress", "--max-age", "365",
+                           "--retries", "1", "--no-log-file"]
+        process = subprocess.Popen(command, cwd=self.root,
+                                   env={**os.environ, "TMPDIR": str(self.root)},
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            deadline = time.time() + 30
+            # After the second poll (2 s + 4 s) the collector sleeps 8 s before the next one.
+            while self.status_polls < 2 and time.time() < deadline and process.poll() is None:
+                time.sleep(0.05)
+            self.assertEqual(self.status_polls, 2, "the collector did not reach its second poll")
+            time.sleep(0.3)
+            sent = time.time()
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=15)
+            waited = time.time() - sent
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertLess(waited, 4, output)
+        self.assertIn("Signal received", output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+
     def test_server_recovery_resumes_with_the_next_file(self):
         # A 503 budget used up counts like a missing answer; failed files stay failed.
         self.upload_files(6)
@@ -1133,6 +1168,23 @@ exec "$REAL_FIND" "$@"
         self.assertIn("failed=4", self.output)
         self.assertEqual(self.status_polls, 0)
         self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
+
+    def test_an_answer_between_lost_files_resets_the_count(self):
+        # Two files without an answer, then one the server answered: the count starts over,
+        # so the next two lost files do not add up to three.
+        for answered in (200, 500):
+            with self.subTest(answered=answered):
+                for sample in self.samples.iterdir():
+                    sample.unlink()
+                self.upload_files(5)
+                self.status_polls = 0
+                self.markers.clear()
+                self.upload_statuses = [None, None, answered, None, None]
+                result = self.run_collector("--server-wait", "0")
+                self.assertEqual(result.returncode, 1, self.output)
+                self.assertEqual(self.status_polls, 0, self.output)
+                self.assertNotIn("Server unreachable", self.output)
+                self.assertEqual([marker["type"] for marker in self.markers], ["begin", "end"])
 
     @unittest.skipUnless(shutil.which("nc") and shutil.which("timeout"), "nc and timeout required")
     def test_nc_transport_waits_for_a_lost_server(self):

@@ -142,9 +142,10 @@ is a scan error; such files are never uploaded or split into other paths.
   the run.
 - **Lost server:** after 3 files in a row got no HTTP status (or only 503),
   uploads pause and `/api/status` is polled after 2, 4, 8 … s (at most 60 s
-  apart) for up to `--server-wait` seconds (`SERVER_WAIT`, default 600). A 2xx
-  answer resumes with the next file; failed files stay failed. Any other HTTP
-  status, including 4xx and 500, means the server is up. When the time runs
+  apart) for up to `--server-wait` seconds (`SERVER_WAIT`, default 600). Only a
+  2xx poll answer resumes the run, with the next file; failed files stay failed.
+  An upload answered with any other HTTP status, including 4xx and 500, shows
+  the server is up and does not count toward the 3. When the time runs
   out, the collector logs `Server unreachable for Ns, stopping`, sends an
   "interrupted" marker and exits 1; remaining files are not attempted or
   counted. A dry run never waits.
