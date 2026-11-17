@@ -141,7 +141,7 @@ counts directories that could not be fully read.
   and polls `/api/status` after 2, 4, 8 … seconds (at most 60 apart) for up to
   `SERVER_WAIT` seconds (default 600, `--server-wait`). A 2xx answer resumes
   with the next file; files that already failed stay failed. When the time runs
-  out, it logs `Server unreachable for N s, stopping`, sends an "interrupted"
+  out, it logs `Server unreachable for Ns, stopping`, sends an "interrupted"
   marker and exits 1; files not attempted are not counted. Any other HTTP
   answer, such as 500, resets the count. A dry run never waits.
 - A failed file does not stop the run. It makes the exit code nonzero.

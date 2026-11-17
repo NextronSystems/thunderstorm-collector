@@ -185,6 +185,17 @@ cleanup_tmp_files() {
 }
 
 INTERRUPTED=0
+SLEEP_PID=""
+
+# pause SECONDS -- a sleep that a trapped signal can cut short. Bash runs a trap
+# only after the foreground child exits, so a plain sleep would hold off a SIGTERM
+# sent to the collector alone until the sleep ends (up to 120 s).
+pause() {
+    sleep "$1" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID"
+    SLEEP_PID=""
+}
 
 # A console write failed: the terminal, SSH session or pipe reader is gone. Stop
 # console output and keep collecting; the log file and syslog still record the run.
@@ -223,6 +234,7 @@ on_signal() {
     # Prevent recursive signal handling
     trap '' INT TERM HUP QUIT
     INTERRUPTED=1
+    [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
     log_msg warn "Received signal, exiting..."
     send_interrupted_marker
     cleanup_tmp_files
@@ -678,7 +690,7 @@ upload_with_curl() {
         if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
             [ "$retry_after" -gt 120 ] && retry_after=120
             log_msg warn "Server returned 503, waiting ${retry_after}s (Retry-After)"
-            sleep "$retry_after"
+            pause "$retry_after"
         fi
         return 93
     fi
@@ -769,7 +781,7 @@ upload_with_wget() {
         if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
             [ "$retry_after" -gt 120 ] && retry_after=120
             log_msg warn "Server returned 503, waiting ${retry_after}s (Retry-After)"
-            sleep "$retry_after"
+            pause "$retry_after"
         fi
         return 93
     fi
@@ -986,7 +998,7 @@ submit_file() {
 
         log_msg warn "Upload failed for '$filepath' (attempt ${try}/${RETRIES}, code ${rc})"
         if [ "$try" -lt "$RETRIES" ]; then
-            sleep "$wait"
+            pause "$wait"
             wait=$((wait * 2))
             # Cap backoff at 60 seconds
             [ "$wait" -gt 60 ] && wait=60
@@ -1042,7 +1054,7 @@ wait_for_server() {
     log_msg warn "No server response for $OUTAGE_FILES files in a row; pausing uploads and polling ${base_url}/api/status for up to ${SERVER_WAIT}s"
     while [ "$OUTAGE_WAITED" -lt "$SERVER_WAIT" ]; do
         [ "$delay" -le $((SERVER_WAIT - OUTAGE_WAITED)) ] || delay=$((SERVER_WAIT - OUTAGE_WAITED))
-        sleep "$delay"
+        pause "$delay"
         slept=$((slept + delay))
         server_is_up "$base_url"
         up=$?

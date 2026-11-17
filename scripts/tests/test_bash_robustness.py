@@ -1122,6 +1122,40 @@ exit "${CURL_EXIT:-18}"
                 self.assertEqual((stats["scanned"], stats["submitted"], stats["failed"]), (4, 1, 3))
                 self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
 
+    def test_sigterm_during_the_server_wait_ends_the_run_at_once(self):
+        # Bash runs a trap only after the foreground child exits: a SIGTERM sent to the
+        # collector alone (kill PID, timeout, a supervisor) waited for the current poll
+        # delay, which grows to 60 s.
+        self.six_files()
+        self.upload_statuses = [None] * 6
+        self.status_plan = [None] * 10
+        command = [BASH, str(COLLECTOR), "--server", "127.0.0.1", "--port",
+                   str(self.server.server_port), "--no-progress", "--max-age", "0",
+                   "--retries", "1", "--no-log-file", "--dir", str(self.samples),
+                   "--server-wait", "300"]
+        process = subprocess.Popen(command, cwd=self.root,
+                                   env={**os.environ, "TMPDIR": str(self.root)},
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            deadline = time.time() + 30
+            # After the second poll (2 s + 4 s) the collector sleeps 8 s before the next one.
+            while len(self.status_requests) < 2 and time.time() < deadline and process.poll() is None:
+                time.sleep(0.05)
+            self.assertEqual(len(self.status_requests), 2, "the collector did not reach its second poll")
+            time.sleep(0.3)
+            sent = time.time()
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=15)
+            waited = time.time() - sent
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertLess(waited, 4, output)
+        self.assertEqual([marker["type"] for marker in self.markers], ["begin", "interrupted"])
+        self.assertEqual(list(self.root.glob("thunderstorm.*")), [])
+
     def test_server_recovery_resumes_with_the_next_file(self):
         self.six_files()
         transports = [("curl", {})]
