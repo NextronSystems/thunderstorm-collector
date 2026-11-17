@@ -73,7 +73,7 @@ A dry run sends no request at all, markers included.
 | [Python 3](../scripts/python/README.md) | Yes | `python3/0.2` | The only collector that sends `stats.in_flight`. |
 | [Python 2](../scripts/python/README.md) | Yes | `python2/0.2` | Same marker code as Python 3. |
 | [Perl](../scripts/perl/README.md) | Yes | `perl/0.3` | |
-| [PowerShell 3+](../scripts/powershell/README.md) | Yes | `powershell3/0.3` | Also sends `interrupted` when it gives up on an unreachable server. |
+| [PowerShell 3+](../scripts/powershell/README.md) | Yes | `powershell3/0.3` | |
 | [PowerShell 2](../scripts/powershell/README.md) | Yes, if a JSON parser is available | `powershell2/0.3` | Needs .NET 3.5 `System.Web.Extensions`; without it, no markers. |
 | [Windows Batch](../scripts/batch/README.md) | **No** | | Removed by design in March 2026. |
 | [Go collector](../go/README.md) | Yes | `go` | Also adds `scan_id` to `/api/check` in synchronous mode. A failed begin does not stop the run. |
@@ -294,9 +294,10 @@ POST /api/checkAsync?source=web-01&scan_id=6f1c2a9e-3b7d-4e55-9a0c-1d2e3f405162
 
 Details for `interrupted`:
 
-- ash also sends it on SIGHUP and SIGQUIT.
-- PowerShell and SFTP also send it when they stop because the server did not
-  answer for `ServerWait` or `--server-wait` seconds (**600** by default).
+- ash and Bash also send it on SIGHUP and SIGQUIT.
+- Every collector that sends markers also sends it when it stops because the
+  server did not answer for `SERVER_WAIT`, `ServerWait` or `--server-wait`
+  seconds (**600** by default).
 - SFTP also sends it when its SSH connection to the source was lost.
 - Bash can send it during the begin request, so it may arrive without
   `scan_id`.

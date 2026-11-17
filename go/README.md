@@ -105,6 +105,8 @@ Built-in defaults; the packaged `config.yml` changes some.
 | `-r`, `--threads N` | 1 | Upload workers; `0` all cores, `-2` all but two; minimum 1 |
 | `--uploads-per-minute N` | 0 (no limit) | Rate-limit uploads |
 | `--upload-synchronous` | off | Wait for scan results (slower) |
+| `--response-timeout SEC` | 120 (1800 with `--upload-synchronous`) | Wait for the answer after a request was sent, 0 to 86400; `0` selects the default |
+| `--server-wait SEC` | 600 | Wait for an unreachable server to come back, 0 to 86400; `0` stops at once |
 | `-o`, `--source NAME` | hostname | Source name in Thunderstorm |
 | `--http-proxy URL` | `HTTP_PROXY`/`HTTPS_PROXY` | Proxy |
 | `--dry-run` | off | Select files without contacting the server |
@@ -138,7 +140,7 @@ The `config.yml` filters still apply; preview with `--dry-run --debug` first.
 | Status | Meaning |
 | --- | --- |
 | `0` | Every selected file was read and accepted (dry run: could be opened) |
-| `1` | Startup or configuration failed (invalid option, unreachable server); a scan root could not be read; a selected file could not be read or was not accepted; or the run was interrupted and sent an `interrupted` marker |
+| `1` | Startup or configuration failed (invalid option, unreachable server); a scan root could not be read; a selected file could not be read or was not accepted; Thunderstorm stayed unreachable for `--server-wait` seconds; or the run was interrupted and sent an `interrupted` marker |
 | `130` | A second SIGINT/SIGTERM arrived while the `interrupted` marker was being sent |
 
 [Collection markers](#collection-markers) never change the exit status. The log and statistics show each error.
@@ -157,6 +159,7 @@ Not errors: a directory below a root that cannot be listed (such as `System Volu
    - With neither configured, every file passes.
 
 - **Size:** in MiB (1024 × 1024 bytes); a file of exactly the limit is included.
+- **Re-check at upload:** when opened, the file must still be a regular file within `--max-filesize` and, on Unix-like systems, the same file the walk saw. It is opened without following a symlink and without blocking on a FIFO or device that replaced it. Exactly the size seen then is sent; a file that shrinks while being read is an error, one that disappeared before reading is not counted.
 - **Age:** a file passes if **any** timestamp the platform provides is newer than the cutoff: modification and metadata-change time on many Unix targets, plus birth time on supported BSD/macOS targets; modification and creation time on Windows. The script collectors use modification time only.
 
 ### Filesystem types
@@ -174,6 +177,8 @@ Unless `--all-filesystems` is set, pseudo and network filesystems are not walked
 - **Retries:** transport errors and HTTP 503 share **three retries** after the first attempt.
 - **Transport errors:** wait 4, 8 and 16 seconds.
 - **HTTP 503:** wait for an integer `Retry-After`, capped at **120 seconds**; **30 seconds** if missing or invalid.
+- **Timeouts:** connecting gives up after **30 seconds**, the TLS handshake after **10 seconds**. An upload fails when Thunderstorm accepts no data for **2 minutes**, so a slow but progressing upload is not cut off. The answer must arrive within `--response-timeout` (**120 seconds**, or **1800** with `--upload-synchronous`); a missing answer counts as a transport error and is retried. A `/api/status` check gives up after **30 seconds**, or sooner if `--response-timeout` is shorter. Response bodies over **16 MiB** are rejected.
+- **Server gone:** after **3 files in a row** could not be delivered (transport errors, or HTTP 503 after its retries), the collector stops sending and polls `/api/status` with growing delays (2, 4, 8 … up to 60 seconds) for up to `--server-wait` seconds (**600**). If Thunderstorm answers, collection continues with the next file; files that already failed stay errors. If the time runs out, the walk stops, queued files count as "Not sent", the collector sends an `interrupted` marker instead of `end`, and the run exits with **1**. `--server-wait 0` stops at once.
 - **Other HTTP errors** and unreadable response bodies are logged and counted, without a retry.
 - **Duplicates:** a lost response can cause a second submission.
 - **Redirects** (3xx) are never followed, for the status check, markers or uploads; a replayed upload would have no body. A redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy.
@@ -252,6 +257,8 @@ Transfer volume depends on file selection; see [recurring collection](../docs/SC
 | `magic header too long` | The limit is **1024 bytes** |
 | `Could not open CA file` | Check the `--ca` path and permissions |
 | `Could not add CA ... to certificate pool` | The file is not valid PEM |
+| `no answer from Thunderstorm within ...` | The server or a gateway accepted the connection but did not answer within `--response-timeout`. Check the server's load and logs; raise the value only if Thunderstorm is known to answer slowly |
+| `Thunderstorm did not accept 3 files in a row` / `Thunderstorm unreachable for ..., stopping the collection` | The server went away during the run; see `--server-wait` under [error handling](#error-handling-and-retry-logic) |
 
 ## Platform Notes
 
