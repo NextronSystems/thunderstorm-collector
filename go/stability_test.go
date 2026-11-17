@@ -473,3 +473,47 @@ func TestUploadThroughProxyThatNeverAnswersConnectIsBounded(t *testing.T) {
 		t.Errorf("log does not name the missing connection:\n%s", output.String())
 	}
 }
+
+func TestGivingUpOnAConnectionClosesTheProxySocket(t *testing.T) {
+	// Go 1.10 reads the proxy's answer to CONNECT without a deadline, so the
+	// socket stayed open after the request gave up; current Go closes it only
+	// after a minute.
+	saved := connectTimeout
+	connectTimeout = 200 * time.Millisecond
+	defer func() { connectTimeout = saved }()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	closedByClient := make(chan struct{}, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Read the CONNECT request, never answer, and report when the client
+		// closes the socket.
+		io.Copy(ioutil.Discard, conn)
+		closedByClient <- struct{}{}
+	}()
+	c := NewCollector(CollectorConfig{Server: "https://thunderstorm.invalid:8443", Threads: 1}, log.New(ioutil.Discard, "", 0))
+	transport := buildHttpTransport(Config{Threads: 1, Proxy: "http://" + listener.Addr().String()})
+	defer transport.CloseIdleConnections()
+	c.client = &http.Client{Transport: transport, CheckRedirect: refuseRedirects}
+
+	var sendErr error
+	finishesWithin(t, 10*time.Second, "the request", func() {
+		_, _, sendErr = c.send("GET", c.Server+"/api/status", "", nil, time.Hour)
+	})
+	if sendErr == nil || !strings.Contains(sendErr.Error(), "no connection to Thunderstorm") {
+		t.Fatalf("expected the connection timeout, got %v", sendErr)
+	}
+
+	select {
+	case <-closedByClient:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the socket to the proxy is still open after the request gave up")
+	}
+}
