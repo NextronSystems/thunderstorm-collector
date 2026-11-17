@@ -167,7 +167,7 @@ Usage: thunderstorm-collector [OPTION]...
       --http-proxy string            Proxy that should be used for the connection to Thunderstorm.
                                      If left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables.
       --insecure                     Don't verify the Thunderstorm certificate if HTTPS is used.
-  -l, --logfile string               Write the log to this file as well as to the console.
+  -l, --logfile string               Append the log to this file as well as writing it to the console.
       --magic strings                Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.
                                      Specify multiple wanted Magic Headers by using this flag multiple times.
                                      Example: --magic 4d5a --magic cffa
@@ -178,8 +178,8 @@ Usage: thunderstorm-collector [OPTION]...
   -p, --path strings                 Root paths from where files should be collected.
                                      Specify multiple root paths by using this flag multiple times. (default [/])
       --port int                     Port on the Thunderstorm Server to which files should be uploaded. (default 8080)
-      --response-timeout int         Seconds to wait for Thunderstorm's answer once a request has been sent. Zero selects the default: 120 seconds, or 1800 seconds with --upload-synchronous, where Thunderstorm scans the file before it answers.
-      --server-wait int              Seconds to wait for Thunderstorm to come back after 3 files in a row could not be delivered. Meanwhile the collector polls /api/status; when the time runs out it stops and exits with status 1. Zero stops at once. (default 600)
+      --response-timeout int         Seconds to wait for Thunderstorm's answer once a request has been sent, 0 to 86400. Zero selects the default: 120 seconds, or 1800 seconds with --upload-synchronous, where Thunderstorm scans the file before it answers.
+      --server-wait int              Seconds to wait for Thunderstorm to come back after 3 files in a row could not be delivered, 0 to 86400. Meanwhile the collector polls /api/status; when the time runs out it stops and exits with status 1. Zero stops at once. (default 600)
   -o, --source string                Name for this device in the Thunderstorm log messages. (default "HOSTNAME")
       --ssl                          If true, connect to the Thunderstorm Server using HTTPS instead of HTTP.
   -t, --template string              Process default scan parameters from this YAML file. (default "config.yml")

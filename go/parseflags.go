@@ -4,12 +4,44 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 
 	flag "github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
 
 var tagsForFullName = []string{"flag", "yaml"}
+
+// wholeValueList is a repeatable string option that takes every occurrence as
+// one value. pflag's string slice splits a value at commas, which breaks a path
+// or glob that contains one (C:\Users\Smith, John or **/{a,b}/**). As with a
+// string slice, the first occurrence replaces the default list.
+type wholeValueList struct {
+	values  *[]string
+	changed bool
+}
+
+func (l *wholeValueList) String() string {
+	if len(*l.values) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(*l.values, ",") + "]"
+}
+
+func (l *wholeValueList) Set(value string) error {
+	if !l.changed {
+		*l.values = []string{value}
+		l.changed = true
+	} else {
+		*l.values = append(*l.values, value)
+	}
+	return nil
+}
+
+// Type is the name shown in the help, the same as for a string slice.
+func (l *wholeValueList) Type() string {
+	return "strings"
+}
 
 func CreateFlagset(config interface{}) *flag.FlagSet {
 	reflectConfig := reflect.ValueOf(config)
@@ -40,6 +72,15 @@ func CreateFlagset(config interface{}) *flag.FlagSet {
 		if name != "" {
 			description := structField.Tag.Get("description")
 			shorthand, hasShorthand := structField.Tag.Lookup("shorthand")
+
+			if _, isWhole := structField.Tag.Lookup("whole"); isWhole {
+				list, isStringList := reflectConfig.Field(i).Addr().Interface().(*[]string)
+				if !isStringList {
+					panic("The whole tag needs a string list")
+				}
+				flags.VarP(&wholeValueList{values: list}, name, structField.Tag.Get("shorthand"), description)
+				continue
+			}
 
 			fieldType := structField.Type
 			var nameSuffix string

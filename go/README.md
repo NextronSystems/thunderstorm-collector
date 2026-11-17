@@ -50,7 +50,7 @@ Settings come from YAML; command-line values override them.
 - **Startup log:** shows the loaded file's absolute path (or that built-in defaults apply), then roots, limits, filters, upload mode and destination, also with `--dry-run` and in `--logfile`. Check it when running from cron or a service.
 - **Keys:** the long option names, such as `path`, `max-filesize`, `thunderstorm-server`. `--help` and `--template` are command-line only.
 - **Server:** add `thunderstorm-server: HOST` to the existing `config.yml`; from that directory, no flags are needed.
-- **Roots:** the first `--path` replaces the configured roots; repeat it to add more.
+- **Roots:** the first `--path` replaces the configured roots; repeat it to add more. A root that is a symbolic link, such as `/tmp` on macOS, is resolved and its target walked; links below a root are not followed.
 
 A preview-first `my-config.yml`:
 
@@ -101,7 +101,7 @@ Built-in defaults; the packaged `config.yml` changes some.
 | `-p`, `--path DIR` | `/` or `C:\` | Root to collect; repeatable |
 | `-m`, `--max-filesize MIB` | 100 (**64** in `config.yml`) | Largest file, inclusive |
 | `-a`, `--max-age AGE` | none | Skip older files; suffix `s`, `m`, `h` or `d` (default days) |
-| `--exclude GLOB` | none | Skip paths; `?`, `*` and `**`; repeatable |
+| `--exclude GLOB` | none | Skip paths; `?`, `*` and `**`; repeatable. On Windows, write `\` or `/` |
 | `-r`, `--threads N` | 1 | Upload workers; `0` all cores, `-2` all but two; minimum 1 |
 | `--uploads-per-minute N` | 0 (no limit) | Rate-limit uploads |
 | `--upload-synchronous` | off | Wait for scan results (slower) |
@@ -111,10 +111,12 @@ Built-in defaults; the packaged `config.yml` changes some.
 | `--http-proxy URL` | `HTTP_PROXY`/`HTTPS_PROXY` | Proxy |
 | `--dry-run` | off | Select files without contacting the server |
 | `--debug` | off | Show every file decision and marker answer |
-| `-l`, `--logfile FILE` | none | Also write the log to this file |
+| `-l`, `--logfile FILE` | none | Also append the log to this file |
 | `-t`, `--template FILE` | `config.yml` | Configuration file |
 
 `-e`/`--extension`, `--magic` and `--all-filesystems`: see [filtering](#file-filtering-logic) and [filesystem types](#filesystem-types).
+
+`--path`, `--exclude` and `--ca` take each value whole, commas included. `-e` and `--magic` also accept a comma-separated list.
 
 ### Examples
 
@@ -151,10 +153,10 @@ Not errors: a directory below a root that cannot be listed (such as `System Volu
 
 ### File filtering logic
 
-1. **Metadata, before queuing:** size, age and file type. Excluded files are never opened.
-2. **Content, after opening:**
+1. **Metadata, before queuing:** size, age and file type. With extensions but no magic headers configured, the extension is checked here too. Excluded files are never opened.
+2. **Content:**
    - A matching extension selects the file. Case is ignored: `.exe` also selects `RUN.EXE`.
-   - Otherwise, a matching magic header selects it.
+   - Otherwise the file is opened, and a matching magic header selects it.
    - If either list is configured and nothing matches, the file is skipped.
    - With neither configured, every file passes.
 
@@ -174,12 +176,13 @@ Unless `--all-filesystems` is set, pseudo and network filesystems are not walked
 
 ### Error handling and retry logic
 
-- **Retries:** transport errors and HTTP 503 share **three retries** after the first attempt.
-- **Transport errors:** wait 4, 8 and 16 seconds.
+- **Retries:** transport errors, HTTP 502/504 and HTTP 503 share **three retries** after the first attempt.
+- **Transport errors and HTTP 502 or 504** (a gateway that cannot reach Thunderstorm): wait 4, 8 and 16 seconds.
 - **HTTP 503:** wait for an integer `Retry-After`, capped at **120 seconds**; **30 seconds** if missing or invalid.
 - **Timeouts:** connecting gives up after **30 seconds**, the TLS handshake after **10 seconds**. An upload fails when Thunderstorm accepts no data for **2 minutes**, so a slow but progressing upload is not cut off. The answer must arrive within `--response-timeout` (**120 seconds**, or **1800** with `--upload-synchronous`); a missing answer counts as a transport error and is retried. A `/api/status` check gives up after **30 seconds**, or sooner if `--response-timeout` is shorter. Response bodies over **16 MiB** are rejected.
-- **Server gone:** after **3 files in a row** could not be delivered (transport errors, or HTTP 503 after its retries), the collector stops sending and polls `/api/status` with growing delays (2, 4, 8 … up to 60 seconds) for up to `--server-wait` seconds (**600**). If Thunderstorm answers, collection continues with the next file; files that already failed stay errors. If the time runs out, the walk stops, queued files count as "Not sent", the collector sends an `interrupted` marker instead of `end`, and the run exits with **1**. `--server-wait 0` stops at once.
+- **Server gone:** after **3 files in a row** could not be delivered (transport errors, HTTP 502/504 or HTTP 503, after the retries), the collector stops sending and polls `/api/status` with growing delays (2, 4, 8 … up to 60 seconds) for up to `--server-wait` seconds (**600**). If Thunderstorm answers, collection continues with the next file; files that already failed stay errors. If the time runs out, the walk stops, queued files count as "Not sent", the collector sends an `interrupted` marker instead of `end`, and the run exits with **1**. `--server-wait 0` stops at once.
 - **Other HTTP errors** and unreadable response bodies are logged and counted, without a retry.
+- **Open files:** a file is open only while it is checked and sent, never while the collector waits for a retry, the rate limit or the server.
 - **Duplicates:** a lost response can cause a second submission.
 - **Redirects** (3xx) are never followed, for the status check, markers or uploads; a replayed upload would have no body. A redirect is logged with its target and counted as an upload error. Check `--ssl`, `--port` and any gateway or proxy.
 - **File names** are sent quoted, with `\` and `"` backslash-escaped and control characters (except TAB) and DEL percent-encoded, such as `%0D`. A hostile name cannot add MIME headers, alter the content or make the server reject the upload, whichever Go version built the binary.
@@ -198,7 +201,7 @@ Marker problems are not logged and never change the exit status; `--debug` shows
 
 ### Collection statistics
 
-Each run ends with statistics: files discovered, exclusions by reason, uploads, errors and time per phase. With `--debug`, every file to be sent (marked DRY-RUN in a dry run) and every skipped file with its reason is listed too.
+Each run ends with statistics: files discovered, exclusions by reason, uploads, errors and time per phase. During the run, a progress line with the counters so far is logged every **5 minutes**. With `--debug`, every file to be sent (marked DRY-RUN in a dry run) and every skipped file with its reason is listed too.
 
 <details>
 <summary>Example statistics</summary>
@@ -254,6 +257,9 @@ Transfer volume depends on file selection; see [recurring collection](../docs/SC
 | `Unexpected argument(s)` | A value without its option, such as `-s HOST /data`. Give every root its own `-p`; the collector will not guess and walk the whole filesystem |
 | `max-filesize: must be > 0` | Use at least 1 MiB |
 | `max-age: invalid suffix` | Use `s`, `m`, `h` or `d`, for example `--max-age 10h` |
+| `max-age: must not be negative` / `is too large` | Use a positive age; leave `max-age` empty for no cutoff |
+| `thunderstorm-server: ... is not a host name or IP address` / `must not include a port` | Give the host only; set the port with `--port` and HTTPS with `--ssl` |
+| `Nothing to do: no Thunderstorm server is configured` | Started without options and without a `config.yml` that names a server; the run exits with status 1 |
 | `magic header too long` | The limit is **1024 bytes** |
 | `Could not open CA file` | Check the `--ca` path and permissions |
 | `Could not add CA ... to certificate pool` | The file is not valid PEM |
