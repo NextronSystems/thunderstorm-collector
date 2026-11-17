@@ -21,6 +21,7 @@ names) · [script chooser](../README.md#choosing-a-collector) ·
 |---|---|
 | Runtime | POSIX `sh`, such as BusyBox ash or dash |
 | System tools | `find`, `awk`, `sed`, `grep`, `tr`, `wc`, `od`, `cat`, `date`, `head`, `tail`, `rm`, `mktemp`, `dirname`, `basename`, `uname` |
+| Utility features | `od -v -An -tx1` and `head -c BYTES`; a startup self-test exits 2 before any request if they are missing (BusyBox `od` built without `CONFIG_DESKTOP` lacks `-A`/`-t`) |
 | Temporary storage | Writable `TMPDIR` (default `/tmp`) |
 | Optional | `stat` (else files are read in full to measure size); `hostname`, `id`, `logger` |
 
@@ -66,6 +67,8 @@ Options override the `USER CONFIGURATION` block at the top of the script.
   replaces the list, further ones add to it.
 - `--no-ssl`, `--verify-tls`, `--no-dry-run` and `--no-debug` reverse header
   settings.
+- **CA certificate:** `--ca-cert` or `CA_CERT` turns on HTTPS. Combined with
+  `--no-ssl`, in either order, it exits 2 before any request.
 
 ## Common Options
 
@@ -81,8 +84,9 @@ Options override the `USER CONFIGURATION` block at the top of the script.
 | `--source NAME` | hostname | Source name in Thunderstorm |
 | `--dry-run` | off | List files, send nothing |
 | `--ssl` | off | Use HTTPS |
-| `--ca-cert FILE` | system trust | With `--ssl`, trust only this CA |
+| `--ca-cert FILE` | system trust | Use HTTPS and trust only this CA |
 | `--retries N` | 3 | Attempts per file, 1 to 10 |
+| `--server-wait SEC` | 600 | Wait for a lost server, 0 to 86400; `0` stops at once |
 | `--debug` | off | Extra diagnostics, including markers |
 | `--log-file PATH` | `./thunderstorm.log` | `--no-log-file` disables it |
 
@@ -93,12 +97,13 @@ Options override the `USER CONFIGURATION` block at the top of the script.
 | Code | Meaning |
 |---|---|
 | `0` | No errors detected (an empty directory is fine) |
-| `1` | Failed file, scan error, missing root or interruption |
-| `2` | Invalid configuration, missing tool, unusable workspace, or no HTTP answer to the begin marker |
+| `1` | Failed file, scan error, missing root, interruption, or server unreachable for the whole server wait |
+| `2` | Invalid configuration, missing tool or utility feature, unusable workspace, or no HTTP answer to the begin marker |
 
 The summary counts `failed` files (unreadable or not uploaded) and
 `scan_errors` (missing roots, traversal errors, rejected paths). With `nc`
-(no begin marker), an unreachable server gives exit **1**.
+(no begin marker), an unreachable server fails three files, then waits up to
+`--server-wait` seconds and exits **1**.
 
 ## Behavior Details
 
@@ -111,6 +116,11 @@ The summary counts `failed` files (unreadable or not uploaded) and
 - **Excluded:** `/proc`, `/sys`, `/dev`, `/run`, `/snap`, `/.snapshots`,
   cloud-sync directories (not file names), and network or special mounts
   (Linux `/proc/mounts` only). Best effort, not a security boundary.
+- **Mounts are compared as text:** `/proc/mounts` is read once before the
+  begin marker, and mount points are never accessed, so a stale NFS, CIFS or
+  sshfs mount outside the roots cannot hang the run. Inside a root, `find` may
+  still block on a stale mount before pruning it, and a root on such a mount
+  is still walked.
 - **Missing roots** are scan errors, shipped ones too.
 - **Own files:** the log and the private workspace are never uploaded; the
   workspace is removed on exit. Keep other logs outside the roots.
@@ -130,20 +140,33 @@ is a scan error; such files are never uploaded or split into other paths.
 - `--retries` includes HTTP 503 answers. Waits start at 2 s, doubling to 60 s;
   `Retry-After` seconds are honored up to 120 s. A failed file does not stop
   the run.
+- **Lost server:** after 3 files in a row got no HTTP status (or only 503),
+  uploads pause and `/api/status` is polled after 2, 4, 8 … s (at most 60 s
+  apart) for up to `--server-wait` seconds (`SERVER_WAIT`, default 600). Only a
+  2xx poll answer resumes the run, with the next file; failed files stay failed.
+  An upload answered with any other HTTP status, including 4xx and 500, shows
+  the server is up and does not count toward the 3. When the time runs
+  out, the collector logs `Server unreachable for Ns, stopping`, sends an
+  "interrupted" marker and exits 1; remaining files are not attempted or
+  counted. A dry run never waits.
 - Quotes, semicolons, backslashes and control characters in the uploaded file
   name become underscores; contents are unchanged.
 
 ### Netcat transport
 
-Needs `nc -w SECONDS HOST PORT` and `timeout SECONDS COMMAND`. Traffic is
+Needs `nc -w SECONDS HOST PORT` and `timeout SECONDS COMMAND`. BusyBox
+`timeout` before 1.30 only accepts `-t SECONDS`: the collector tests
+`timeout 5 sh -c :` first and, if that fails, warns and does not use nc (exit 2
+without another transport). Traffic is
 unencrypted, so use an isolated network. The answer needs one
 `Content-Length`, no `Transfer-Encoding` and the full body; chunked,
 close-delimited or incomplete answers fail.
 
 ### TLS
 
-Verification is on by default. `--ca-cert` makes that bundle the **only**
-trusted CA. `-k`, `--insecure` disables verification: testing only.
+Verification is on by default. `--ca-cert` turns on HTTPS and makes that
+bundle the **only** trusted CA; with `--no-ssl` it is a configuration error
+(exit 2). `-k`, `--insecure` disables verification: testing only.
 
 ### Collection markers
 
@@ -163,6 +186,9 @@ then means "would submit".
 ### Logging
 
 - An unwritable log file turns file logging off with a warning.
+- If the console goes away (an SSH session without a terminal, or a `| tee`
+  ended with Ctrl-C), console output stops; the run continues with file and
+  syslog logging, markers and cleanup.
 - SIGINT, SIGTERM, SIGHUP or SIGQUIT: best-effort "interrupted" marker,
   workspace removed, exit 1.
 
@@ -174,6 +200,7 @@ then means "would submit".
 | GNU wget | 10 s connect, 60 s idle read (no total deadline) |
 | `nc` | 60 s |
 | Markers | 10 s per request |
+| `/api/status` polls | 10 s per request (15 s with `nc`) |
 | Server answer | 1 MiB (2 MiB output file) |
 | Logged excerpts | 4 KiB per error body and per root's traversal errors |
 | Marker JSON | 64 KiB; scan ID: top-level string, ≤ 256 bytes |

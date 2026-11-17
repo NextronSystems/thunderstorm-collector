@@ -154,6 +154,50 @@ jobs:
             python:3.4.10-stretch@sha256:7a7e47efdfd6503afcf56a57f981bcc23d54211ad3b3c21cbe4bd597873fa6e1 \
             python -B /work/scripts/tests/test_python_robustness.py
 
+  busybox:
+    name: ash collector with BusyBox utilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install BusyBox
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y busybox
+
+      - name: Ash robustness regressions (BusyBox ash, BusyBox-first PATH)
+        if: hashFiles('scripts/tests/test_ash_robustness.py') != ''
+        env:
+          COLLECTOR_SH: /bin/busybox ash
+        run: |
+          bbdir="$RUNNER_TEMP/busybox-bin"
+          mkdir -p "$bbdir"
+          /bin/busybox --install -s "$bbdir"
+          # BusyBox wget is never an upload transport, and BusyBox has no curl: the
+          # transport tests take curl and GNU wget from the system. Every utility the
+          # collector runs must resolve to BusyBox, or the job tests GNU tools again.
+          rm -f "$bbdir/wget"
+          export PATH="$bbdir:$PATH"
+          { /bin/busybox 2>&1 || true; } | sed -n 1p
+          for tool in sh find awk sed grep tr wc od cat date head tail rm mktemp \
+                      dirname basename uname sleep; do
+            found=$(command -v "$tool") || found=missing
+            if [ "$found" != "$bbdir/$tool" ]; then
+              echo "BusyBox does not provide required $tool ($found)" >&2
+              exit 1
+            fi
+          done
+          for tool in stat hostname id timeout nc; do
+            echo "optional $tool: $(command -v "$tool" || echo none)"
+          done
+          python -B scripts/tests/test_ash_robustness.py
+
   windows:
     name: Windows script collectors
     runs-on: windows-latest

@@ -71,7 +71,7 @@ collect --dir "$ROOT/input" --server 127.0.0.1 --port 1 --dry-run
 collect --dir "$ROOT/input" --server 127.0.0.1 --port 1
 ```
 
-Dry-run: exit 0, eight would-submit messages, **no requests**. Unreachable: no uploads, visible error, exit 2 with curl/GNU wget or exit 1 with netcat. No indefinite hang. Server-side absence of requests is stronger evidence than a client summary alone.
+Dry-run: exit 0, eight would-submit messages, **no requests**. Unreachable: no uploads, visible error, exit 2 with curl/GNU wget or exit 1 with netcat. With netcat, three files fail before the collector polls `/api/status` for the server wait (default 600 s); add `--server-wait 0` to end this case at once. No indefinite hang. Server-side absence of requests is stronger evidence than a client summary alone.
 
 ### 5. Missing and Unreadable Paths
 
@@ -168,5 +168,9 @@ THUNDERSTORM_TEST_COLLECTORS=ash THUNDERSTORM_TEST_REQUIRE_MATCH=1 \
   scripts/tests/run_e2e_compliance.sh ../thunderstorm-stub-server/thunderstorm-stub-server
 ```
 
-CI runs under dash and BusyBox ash; validate the actual appliance shell,
-utilities and selected transport separately. Run permission cases as non-root.
+CI runs the suite under dash, under BusyBox ash with Ubuntu utilities, and
+under BusyBox ash with a BusyBox-first `PATH` (`busybox --install -s DIR`), in
+which every utility the collector uses is a BusyBox applet; curl and GNU wget
+still come from Ubuntu there. BusyBox features are compile-time options, so
+validate the actual appliance shell, utilities and selected transport separately.
+Run permission cases as non-root.
