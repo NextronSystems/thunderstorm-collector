@@ -105,8 +105,8 @@ Built-in defaults; the packaged `config.yml` changes some.
 | `-r`, `--threads N` | 1 | Upload workers; `0` all cores, `-2` all but two; minimum 1 |
 | `--uploads-per-minute N` | 0 (no limit) | Rate-limit uploads |
 | `--upload-synchronous` | off | Wait for scan results (slower) |
-| `--response-timeout SEC` | 120 (1800 with `--upload-synchronous`) | Wait for the answer after a request was sent; `0` selects the default |
-| `--server-wait SEC` | 600 | Wait for an unreachable server to come back; `0` stops at once |
+| `--response-timeout SEC` | 120 (1800 with `--upload-synchronous`) | Wait for the answer after a request was sent, 0 to 86400; `0` selects the default |
+| `--server-wait SEC` | 600 | Wait for an unreachable server to come back, 0 to 86400; `0` stops at once |
 | `-o`, `--source NAME` | hostname | Source name in Thunderstorm |
 | `--http-proxy URL` | `HTTP_PROXY`/`HTTPS_PROXY` | Proxy |
 | `--dry-run` | off | Select files without contacting the server |
@@ -177,7 +177,7 @@ Unless `--all-filesystems` is set, pseudo and network filesystems are not walked
 - **Retries:** transport errors and HTTP 503 share **three retries** after the first attempt.
 - **Transport errors:** wait 4, 8 and 16 seconds.
 - **HTTP 503:** wait for an integer `Retry-After`, capped at **120 seconds**; **30 seconds** if missing or invalid.
-- **Timeouts:** connecting gives up after **30 seconds**, the TLS handshake after **10 seconds**. An upload fails when Thunderstorm accepts no data for **2 minutes**, so a slow but progressing upload is not cut off. The answer must arrive within `--response-timeout` (**120 seconds**, or **1800** with `--upload-synchronous`); a missing answer counts as a transport error and is retried. Response bodies over **16 MiB** are rejected.
+- **Timeouts:** connecting gives up after **30 seconds**, the TLS handshake after **10 seconds**. An upload fails when Thunderstorm accepts no data for **2 minutes**, so a slow but progressing upload is not cut off. The answer must arrive within `--response-timeout` (**120 seconds**, or **1800** with `--upload-synchronous`); a missing answer counts as a transport error and is retried. A `/api/status` check gives up after **30 seconds**, or sooner if `--response-timeout` is shorter. Response bodies over **16 MiB** are rejected.
 - **Server gone:** after **3 files in a row** could not be delivered (transport errors, or HTTP 503 after its retries), the collector stops sending and polls `/api/status` with growing delays (2, 4, 8 … up to 60 seconds) for up to `--server-wait` seconds (**600**). If Thunderstorm answers, collection continues with the next file; files that already failed stay errors. If the time runs out, the walk stops, queued files count as "Not sent", the collector sends an `interrupted` marker instead of `end`, and the run exits with **1**. `--server-wait 0` stops at once.
 - **Other HTTP errors** and unreadable response bodies are logged and counted, without a retry.
 - **Duplicates:** a lost response can cause a second submission.

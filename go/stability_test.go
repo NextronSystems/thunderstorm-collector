@@ -81,6 +81,23 @@ func TestStatusCheckDoesNotWaitForeverForAnAnswer(t *testing.T) {
 	}
 }
 
+func TestStatusCheckIsBoundedBelowALongResponseTimeout(t *testing.T) {
+	// With --upload-synchronous the response timeout is 30 minutes; a status check
+	// during the server wait must not take that long.
+	defer func(previous time.Duration) { statusCheckTimeout = previous }(statusCheckTimeout)
+	statusCheckTimeout = 200 * time.Millisecond
+	server, stop := silentServer(t, true)
+	defer stop()
+	c := NewCollector(CollectorConfig{Server: server, Threads: 1, Sync: true}, log.New(ioutil.Discard, "", 0))
+
+	var err error
+	finishesWithin(t, 10*time.Second, "the status check", func() { err = c.CheckThunderstormUp() })
+
+	if err == nil || !strings.Contains(err.Error(), "no answer from Thunderstorm within 200ms") {
+		t.Fatalf("expected the status check timeout, got %v", err)
+	}
+}
+
 func TestUploadDoesNotWaitForeverForAnAnswer(t *testing.T) {
 	server, stop := silentServer(t, true)
 	defer stop()
@@ -396,5 +413,32 @@ func TestAnsweredUploadResetsTheOutageCount(t *testing.T) {
 
 	if c.collectionStopped() {
 		t.Fatal("files that failed with an answered upload in between must not stop the collection")
+	}
+}
+
+func TestWaitOptionsAreLimitedToOneDay(t *testing.T) {
+	// On 64-bit builds 9999999999 seconds overflowed time.Duration: --server-wait
+	// stopped at once and --response-timeout fell back to the default. (That value
+	// does not fit int on 32-bit builds, so the test uses 1<<30.)
+	for _, option := range []string{"server-wait", "response-timeout"} {
+		for _, seconds := range []int{-1, maxWaitSeconds + 1, 1 << 30} {
+			config := DefaultConfig
+			config.Server = "thunderstorm.example"
+			if option == "server-wait" {
+				config.ServerWait = seconds
+			} else {
+				config.ResponseTimeout = seconds
+			}
+			if _, err := validateConfig(config); err == nil || !strings.Contains(err.Error(), option) {
+				t.Errorf("--%s %d: expected a validation error, got %v", option, seconds, err)
+			}
+		}
+		config := DefaultConfig
+		config.Server = "thunderstorm.example"
+		config.ServerWait = maxWaitSeconds
+		config.ResponseTimeout = maxWaitSeconds
+		if cc, err := validateConfig(config); err != nil || cc.ServerWait != 24*time.Hour || cc.ResponseTimeout != 24*time.Hour {
+			t.Errorf("one day must be accepted, got %v, %v, %v", err, cc.ServerWait, cc.ResponseTimeout)
+		}
 	}
 }

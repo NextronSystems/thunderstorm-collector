@@ -16,7 +16,8 @@ import (
 // The collector sends a begin marker to POST /api/collection before the first
 // upload. If the server answers with a scan ID, every upload of the run carries
 // it as the scan_id query parameter, and the run ends with an end marker, or
-// with an interrupted marker after SIGINT or SIGTERM. The format is the one the
+// with an interrupted marker after SIGINT or SIGTERM or when the collection
+// stopped because Thunderstorm stayed unreachable. The format is the one the
 // script collectors use; docs/COLLECTION_MARKERS.md describes it.
 //
 // Markers never affect a collection. A server that answers begin with 404 or

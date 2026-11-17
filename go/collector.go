@@ -285,7 +285,11 @@ func (c *Collector) StartWorkers() {
 
 func (c *Collector) CheckThunderstormUp() error {
 	c.debugf("Checking whether Thunderstorm at %s answers", c.Server)
-	response, body, err := c.send("GET", fmt.Sprintf("%s/api/status", c.Server), "", nil)
+	timeout := c.ResponseTimeout
+	if timeout > statusCheckTimeout {
+		timeout = statusCheckTimeout
+	}
+	response, body, err := c.send("GET", fmt.Sprintf("%s/api/status", c.Server), "", nil, timeout)
 	if err != nil {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
 			if opError, isOpError := urlError.Err.(*net.OpError); isOpError {
@@ -312,14 +316,20 @@ const (
 	maxResponseBytes = 16 * 1024 * 1024
 )
 
+// statusCheckTimeout bounds a /api/status check, also when --response-timeout
+// is longer: the status page answers at once, and a check during the server
+// wait must not run far past --server-wait (with --upload-synchronous the
+// response timeout is 30 minutes). A variable so tests can shorten it.
+var statusCheckTimeout = 30 * time.Second
+
 // send performs one request to Thunderstorm and returns the response with its
 // body, which has already been read and closed. The wait for the answer is
-// bounded by ResponseTimeout: the timer starts once the request body has been
+// bounded by timeout: the timer starts once the request body has been
 // handed to the connection (at once for a request without a body) and covers
 // the response headers and the body. Writing the body is bounded by the write
 // stall guard of the transport instead, so a large upload over a slow link is
 // not cut off.
-func (c *Collector) send(method string, target string, contentType string, body io.ReadCloser) (*http.Response, []byte, error) {
+func (c *Collector) send(method string, target string, contentType string, body io.ReadCloser, timeout time.Duration) (*http.Response, []byte, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var timedOut int32
@@ -329,7 +339,7 @@ func (c *Collector) send(method string, target string, contentType string, body 
 	startTimer := func() {
 		timerOnce.Do(func() {
 			timerMutex.Lock()
-			timer = time.AfterFunc(c.ResponseTimeout, func() {
+			timer = time.AfterFunc(timeout, func() {
 				atomic.StoreInt32(&timedOut, 1)
 				cancel()
 			})
@@ -345,7 +355,10 @@ func (c *Collector) send(method string, target string, contentType string, body 
 	}()
 	timeoutError := func(err error) error {
 		if atomic.LoadInt32(&timedOut) == 1 {
-			return fmt.Errorf("no answer from Thunderstorm within %v (see --response-timeout): %v", c.ResponseTimeout, err)
+			if timeout != c.ResponseTimeout {
+				return fmt.Errorf("no answer from Thunderstorm within %v: %v", timeout, err)
+			}
+			return fmt.Errorf("no answer from Thunderstorm within %v (see --response-timeout): %v", timeout, err)
 		}
 		return err
 	}
@@ -729,7 +742,7 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 
 	transmitStart := time.Now()
 	contentType, formData, readError := c.getFileContentAsFormData(f, info.path, size)
-	response, responseBody, err := c.send("POST", c.thunderstormUrl(), contentType, formData)
+	response, responseBody, err := c.send("POST", c.thunderstormUrl(), contentType, formData, c.ResponseTimeout)
 	if fileErr := readError.get(); fileErr != nil {
 		// The file changed or could not be read while it was sent; Thunderstorm is
 		// not to blame, so this is neither retried nor counted as an outage.

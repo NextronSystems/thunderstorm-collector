@@ -25,6 +25,9 @@ import (
 
 const maxMagicHeaderLength = 1024 // Maximum magic header length in bytes
 
+// maxWaitSeconds bounds --response-timeout and --server-wait (one day).
+const maxWaitSeconds = 86400
+
 func buildHttpTransport(config Config) *http.Transport {
 	caPool := x509.NewCertPool()
 	for _, ca := range config.CAs {
@@ -195,12 +198,13 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		cc.MinUploadPeriod = time.Minute / time.Duration(config.UploadsPerMinute)
 	}
 
-	if config.ResponseTimeout < 0 {
-		return cc, errors.New("response-timeout: must be >= 0")
+	// The upper bound also keeps the seconds from overflowing time.Duration.
+	if config.ResponseTimeout < 0 || config.ResponseTimeout > maxWaitSeconds {
+		return cc, fmt.Errorf("response-timeout: must be 0 to %d", maxWaitSeconds)
 	}
 	cc.ResponseTimeout = time.Duration(config.ResponseTimeout) * time.Second
-	if config.ServerWait < 0 {
-		return cc, errors.New("server-wait: must be >= 0")
+	if config.ServerWait < 0 || config.ServerWait > maxWaitSeconds {
+		return cc, fmt.Errorf("server-wait: must be 0 to %d", maxWaitSeconds)
 	}
 	cc.ServerWait = time.Duration(config.ServerWait) * time.Second
 
