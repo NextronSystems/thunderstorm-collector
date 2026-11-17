@@ -134,7 +134,8 @@ globally; remove private keys afterwards.
 Interrupt a slow run: exit 1, no normal end marker, best-effort interrupted
 marker if supported. Do not disrupt a shared real service for failure injection.
 The isolated regression suite covers 503 bounds, end HTTP 500, incomplete 2xx,
-malformed marker JSON and SIGTERM on the actual interpreters:
+malformed marker JSON, a lost server (wait, resume, stop) and SIGTERM on the
+actual interpreters:
 
 ```sh
 python3 -B ../tests/test_perl_robustness.py

@@ -79,6 +79,7 @@ Edit defaults in the top `USER CONFIGURATION` block; options override them.
 | `--ca-cert FILE` | system trust | PEM CA file for HTTPS |
 | `-k`, `--insecure` | off | No TLS verification; testing only |
 | `--retries N` | 3 | Attempts per file, 1 to 10 |
+| `--server-wait SEC` | 600 | Wait for a lost server, 0 to 86400; `0` stops at once |
 
 Progress shows on a terminal; `--no-progress` hides it. `--async` is ignored.
 
@@ -87,7 +88,7 @@ Progress shows on a terminal; `--no-progress` hides it. `--async` is ignored.
 | Code | Meaning |
 |---|---|
 | `0` | All selected files accepted, or a successful dry run |
-| `1` | Failed files, scan errors (such as one missing root) or interruption |
+| `1` | Failed files, scan errors (such as one missing root), interruption, or server unreachable for `SERVER_WAIT` |
 | `2` | Invalid configuration, wrong Python version, no usable root, or no HTTP answer to the begin marker |
 
 Unreadable directories count as `Scan errors`, unreadable files as `Failed`.
@@ -98,15 +99,31 @@ Unreadable directories count as `Scan errors`, unreadable files as `Failed`.
 
 - Recursive, regular files only; symlinks and special files are skipped.
 - **Age** uses modification time. **Size** is inclusive; empty files count.
-- **Excluded:** `/proc`, `/dev`, `/sys`, `/run`, `/snap`, `/.snapshots`, `/mnt`,
-  `.dat`, `.npm`, VM files (`.vmdk`, `.vswp`, `.nvram`, `.vmsd`, `.lck`),
+- **Excluded:** `/proc`, `/dev`, `/sys`, `/run`, `/snap`, `/.snapshots`, `/mnt`
+  (WSL drives, mounted shares), `.dat`, `.npm`, VM files (`.vmdk`, `.vswp`, `.nvram`, `.vmsd`, `.lck`),
   cloud-sync folders and Linux network or special mounts. Best effort only.
+- **Mounts are skipped by path:** excluded trees and the network or special
+  mounts in `/proc/mounts` are skipped before any stat, so an unresponsive hard
+  NFS mount below a scan root cannot block the walk; a scan root that is itself
+  on such a mount still can. Other filesystem types (such as `ceph` or
+  `glusterfs`), and every mount on systems without `/proc/mounts`, are walked
+  like local directories.
+- `/proc/mounts` is read as bytes, so non-ASCII mount paths also work under the
+  C/POSIX locale of cron jobs, systemd units and many SSH sessions; a non-ASCII
+  `--source` is then sent as the same UTF-8 text.
 
 ### Uploads
 
 - Each file is read into memory first; a file that changes meanwhile fails.
 - Uploads use `/api/checkAsync`: a 2xx answer means accepted, not analyzed.
 - Retry waits double, up to 60 s. HTTP 503 honors `Retry-After`, up to 120 s.
+- **Lost server:** when 3 files in a row could not be delivered (no attempt got
+  an HTTP answer other than 503), the collector stops sending and checks
+  `/api/status` after 2, 4, 8 … up to 60 s, for at most `SERVER_WAIT` seconds. A
+  2xx answer resumes with the next file; failed files stay failed. When the time
+  runs out, it logs `Thunderstorm unreachable for N seconds`, sends an
+  "interrupted" marker, skips the remaining files and exits 1. A dry run never
+  waits.
 - Quotes, semicolons and control characters in the sent file name become `_`.
 
 ### TLS
