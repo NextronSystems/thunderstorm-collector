@@ -67,7 +67,9 @@ func buildHttpTransport(config Config) *http.Transport {
 			if err != nil {
 				return nil, err
 			}
-			return &stallTimeoutConn{Conn: conn, timeout: writeStallTimeout}, nil
+			wrapped := &stallTimeoutConn{Conn: conn, timeout: writeStallTimeout}
+			trackDial(ctx, wrapped)
+			return wrapped, nil
 		},
 		// Every worker keeps its connection to Thunderstorm, plus one for a marker
 		// sent while the workers run. The per-host limit is the one that counts:
