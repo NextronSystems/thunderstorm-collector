@@ -442,3 +442,78 @@ func TestWaitOptionsAreLimitedToOneDay(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadThroughProxyThatNeverAnswersConnectIsBounded(t *testing.T) {
+	saved := connectTimeout
+	connectTimeout = 200 * time.Millisecond
+	defer func() { connectTimeout = saved }()
+	// The proxy accepts the connection and reads the CONNECT request, but never
+	// answers it.
+	proxy, stop := silentServer(t, true)
+	defer stop()
+	name, stat := newTestFile(t, "sample")
+	defer os.Remove(name)
+	var output bytes.Buffer
+	c := NewCollector(CollectorConfig{Server: "https://thunderstorm.invalid:8443", Threads: 1, ResponseTimeout: 200 * time.Millisecond, ServerWait: time.Hour}, log.New(&output, "", 0))
+	transport := buildHttpTransport(Config{Threads: 1, Proxy: proxy})
+	defer transport.CloseIdleConnections()
+	c.client = &http.Client{Transport: transport, CheckRedirect: refuseRedirects}
+	c.retrySleep = func(time.Duration) {}
+	info := infoWithPath{FileInfo: stat, path: name}
+
+	finishesWithin(t, 20*time.Second, "the upload", func() {
+		for c.uploadToThunderstorm(&info) {
+		}
+	})
+
+	if got := atomic.LoadInt64(&c.Statistics.uploadErrors); got != 1 {
+		t.Fatalf("expected one upload error, got %d; log:\n%s", got, output.String())
+	}
+	if !strings.Contains(output.String(), "no connection to Thunderstorm") {
+		t.Errorf("log does not name the missing connection:\n%s", output.String())
+	}
+}
+
+func TestGivingUpOnAConnectionClosesTheProxySocket(t *testing.T) {
+	// Go 1.10 reads the proxy's answer to CONNECT without a deadline, so the
+	// socket stayed open after the request gave up; current Go closes it only
+	// after a minute.
+	saved := connectTimeout
+	connectTimeout = 200 * time.Millisecond
+	defer func() { connectTimeout = saved }()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	closedByClient := make(chan struct{}, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Read the CONNECT request, never answer, and report when the client
+		// closes the socket.
+		io.Copy(ioutil.Discard, conn)
+		closedByClient <- struct{}{}
+	}()
+	c := NewCollector(CollectorConfig{Server: "https://thunderstorm.invalid:8443", Threads: 1}, log.New(ioutil.Discard, "", 0))
+	transport := buildHttpTransport(Config{Threads: 1, Proxy: "http://" + listener.Addr().String()})
+	defer transport.CloseIdleConnections()
+	c.client = &http.Client{Transport: transport, CheckRedirect: refuseRedirects}
+
+	var sendErr error
+	finishesWithin(t, 10*time.Second, "the request", func() {
+		_, _, sendErr = c.send("GET", c.Server+"/api/status", "", nil, time.Hour)
+	})
+	if sendErr == nil || !strings.Contains(sendErr.Error(), "no connection to Thunderstorm") {
+		t.Fatalf("expected the connection timeout, got %v", sendErr)
+	}
+
+	select {
+	case <-closedByClient:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the socket to the proxy is still open after the request gave up")
+	}
+}

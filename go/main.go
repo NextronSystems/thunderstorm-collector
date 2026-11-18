@@ -64,7 +64,9 @@ func buildHttpTransport(config Config) *http.Transport {
 			if err != nil {
 				return nil, err
 			}
-			return &stallTimeoutConn{Conn: conn, timeout: writeStallTimeout}, nil
+			wrapped := &stallTimeoutConn{Conn: conn, timeout: writeStallTimeout}
+			trackDial(ctx, wrapped)
+			return wrapped, nil
 		},
 		MaxIdleConns:          config.Threads,
 		IdleConnTimeout:       90 * time.Second,

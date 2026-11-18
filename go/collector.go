@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -322,9 +323,58 @@ const (
 // response timeout is 30 minutes). A variable so tests can shorten it.
 var statusCheckTimeout = 30 * time.Second
 
+// connectTimeout bounds the wait for a connection to Thunderstorm: the dial,
+// the CONNECT exchange with a proxy and the TLS handshake. The dial and the
+// handshake have shorter limits of their own; the CONNECT exchange has none,
+// so a proxy that accepts the connection but never answers would otherwise
+// block the worker. A variable so tests can shorten it.
+var connectTimeout = 60 * time.Second
+
+// pendingDials collects the connections dialled for one request, so send() can
+// close them when it stops waiting for a connection. Go 1.10 reads a proxy's
+// answer to CONNECT without a deadline; cancelling the request frees the
+// worker, but the dial would keep its goroutine and socket until the proxy
+// hangs up.
+type pendingDials struct {
+	mutex  sync.Mutex
+	conns  []net.Conn
+	closed bool
+}
+
+type pendingDialsKey struct{}
+
+// trackDial registers conn with the request that ctx belongs to, if any. The
+// dial context carries the request's values in Go 1.10 and in current Go.
+func trackDial(ctx context.Context, conn net.Conn) {
+	if dials, ok := ctx.Value(pendingDialsKey{}).(*pendingDials); ok {
+		dials.add(conn)
+	}
+}
+
+func (d *pendingDials) add(conn net.Conn) {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.closed {
+		// The request has already given up on this connection.
+		conn.Close()
+		return
+	}
+	d.conns = append(d.conns, conn)
+}
+
+func (d *pendingDials) closeAll() {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	d.closed = true
+	for _, conn := range d.conns {
+		conn.Close()
+	}
+	d.conns = nil
+}
+
 // send performs one request to Thunderstorm and returns the response with its
-// body, which has already been read and closed. The wait for the answer is
-// bounded by timeout: the timer starts once the request body has been
+// body, which has already been read and closed. The wait for a connection is
+// bounded by connectTimeout, the wait for the answer by timeout: the timer starts once the request body has been
 // handed to the connection (at once for a request without a body) and covers
 // the response headers and the body. Writing the body is bounded by the write
 // stall guard of the transport instead, so a large upload over a slow link is
@@ -332,7 +382,7 @@ var statusCheckTimeout = 30 * time.Second
 func (c *Collector) send(method string, target string, contentType string, body io.ReadCloser, timeout time.Duration) (*http.Response, []byte, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var timedOut int32
+	var timedOut, connectTimedOut int32
 	var timerOnce sync.Once
 	var timer *time.Timer
 	var timerMutex sync.Mutex
@@ -354,6 +404,9 @@ func (c *Collector) send(method string, target string, contentType string, body 
 		timerMutex.Unlock()
 	}()
 	timeoutError := func(err error) error {
+		if atomic.LoadInt32(&connectTimedOut) == 1 {
+			return fmt.Errorf("no connection to Thunderstorm within %v: %v", connectTimeout, err)
+		}
 		if atomic.LoadInt32(&timedOut) == 1 {
 			if timeout != c.ResponseTimeout {
 				return fmt.Errorf("no answer from Thunderstorm within %v: %v", timeout, err)
@@ -380,7 +433,18 @@ func (c *Collector) send(method string, target string, contentType string, body 
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	response, err := c.client.Do(request.WithContext(ctx))
+	// The response timer starts only once the transport has a connection and has
+	// read the body, so the time until then is bounded separately.
+	dials := &pendingDials{}
+	connectTimer := time.AfterFunc(connectTimeout, func() {
+		atomic.StoreInt32(&connectTimedOut, 1)
+		cancel()
+		dials.closeAll()
+	})
+	defer connectTimer.Stop()
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connectTimer.Stop() }}
+	requestContext := httptrace.WithClientTrace(context.WithValue(ctx, pendingDialsKey{}, dials), trace)
+	response, err := c.client.Do(request.WithContext(requestContext))
 	if err != nil {
 		if urlError, isUrlError := err.(*url.Error); isUrlError {
 			urlError.Err = timeoutError(urlError.Err)
