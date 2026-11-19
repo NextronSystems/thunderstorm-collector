@@ -259,7 +259,7 @@ Transfer volume depends on file selection; see [recurring collection](../docs/SC
 | `max-age: invalid suffix` | Use `s`, `m`, `h` or `d`, for example `--max-age 10h` |
 | `max-age: must not be negative` / `is too large` | Use a positive age; leave `max-age` empty for no cutoff |
 | `thunderstorm-server: ... is not a host name or IP address` / `must not include a port` | Give the host only; set the port with `--port` and HTTPS with `--ssl` |
-| `Nothing to do: no Thunderstorm server is configured` | Started without options and without a `config.yml` that names a server; the run exits with status 1 |
+| `Nothing to do: no Thunderstorm server is configured` | Started without options and without a `config.yml` that names a server or sets `dry-run`; the run exits with status 1 |
 | `magic header too long` | The limit is **1024 bytes** |
 | `Could not open CA file` | Check the `--ca` path and permissions |
 | `Could not add CA ... to certificate pool` | The file is not valid PEM |

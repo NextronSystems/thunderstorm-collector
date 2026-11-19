@@ -88,13 +88,18 @@ func ParseConfig() Config {
 		flags.Usage()
 		os.Exit(0)
 	}
-	// Started without arguments and without a configured server: show the usage,
-	// but as a failure. A scheduled run that does not find its config.yml must
-	// not look like a successful collection.
-	if len(os.Args) == 1 && config.Server == "" {
+	if nothingToDo(len(os.Args), config) {
 		flags.Usage()
 		fmt.Fprintln(os.Stderr, "\nNothing to do: no Thunderstorm server is configured. Set -s/--thunderstorm-server or thunderstorm-server in config.yml, or use --dry-run.")
 		os.Exit(1)
 	}
 	return config
+}
+
+// nothingToDo reports whether the collector was started without arguments and
+// without a configuration that gives it work: no server and no dry run. The
+// usage is then shown as a failure, so that a scheduled run that does not find
+// its config.yml does not look like a successful collection.
+func nothingToDo(argCount int, config Config) bool {
+	return argCount == 1 && config.Server == "" && !config.DryRun
 }
