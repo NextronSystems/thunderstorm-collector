@@ -118,6 +118,15 @@ type Collector struct {
 	throttleMutex sync.Mutex
 	lastScanTime  time.Time
 
+	// reportedGlobs holds the exclude globs whose syntax error has been logged.
+	// Only the walk uses it.
+	reportedGlobs map[string]bool
+
+	// progressStop ends the goroutine that logs progress lines; progressDone is
+	// closed once it has ended. Both are nil until StartWorkers.
+	progressStop chan struct{}
+	progressDone chan struct{}
+
 	// Timing
 	startTime time.Time
 }
@@ -270,6 +279,9 @@ func (c *Collector) StartWorkers() {
 	c.debugf("Starting %d threads for uploads", c.Threads)
 	c.workerGroup = &sync.WaitGroup{}
 	c.filesToUpload = make(chan infoWithPath)
+	c.progressStop = make(chan struct{})
+	c.progressDone = make(chan struct{})
+	go c.reportProgress()
 	for i := 0; i < c.Threads; i++ {
 		c.workerGroup.Add(1)
 		go func() {
@@ -282,6 +294,36 @@ func (c *Collector) StartWorkers() {
 			c.workerGroup.Done()
 		}()
 	}
+}
+
+// progressInterval is the time between two progress lines. Without them a long
+// run logs nothing between the start of the walk and the final statistics, and
+// cannot be told from one that hangs. A variable so tests can shorten it.
+var progressInterval = 5 * time.Minute
+
+// reportProgress logs a progress line every progressInterval until Stop.
+func (c *Collector) reportProgress() {
+	defer close(c.progressDone)
+	ticker := time.NewTicker(progressInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.progressStop:
+			return
+		case <-ticker.C:
+			c.logProgress()
+		}
+	}
+}
+
+func (c *Collector) logProgress() {
+	sent := "uploaded"
+	if c.DryRun {
+		sent = "would be sent (dry-run)"
+	}
+	c.logger.Printf("Progress after %v: %d files discovered, %d %s, %d errors",
+		time.Since(c.startTime).Round(time.Second), atomic.LoadInt64(&c.Statistics.filesDiscovered),
+		atomic.LoadInt64(&c.Statistics.uploadedFiles), sent, c.Statistics.ErrorCount())
 }
 
 func (c *Collector) CheckThunderstormUp() error {
@@ -598,11 +640,66 @@ func (c *Collector) reportWalkError(root string, path string, err error) {
 	c.logger.Printf("Could not read '%s' while walking '%s': %v", path, root, err)
 }
 
-func (c *Collector) collectPath(root string) {
+// resolveScanRoot returns the path to walk for a scan root. filepath.Walk does
+// not follow symbolic links, also not for the root itself: a root such as /tmp
+// or /var on macOS would be reported as one irregular file and nothing would be
+// collected. A root that is a symbolic link is therefore replaced by its
+// target. Links below the root are still not followed.
+func resolveScanRoot(root string) (string, error) {
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		// filepath.Walk reports a root that cannot be read.
+		return root, nil
+	}
+	return filepath.EvalSymlinks(root)
+}
+
+// excludeMatches reports whether path matches an exclude glob. doublestar.Match
+// knows only "/" as separator and reads "\" as an escape character, so with
+// another separator (Windows) the glob and the path are converted to forward
+// slashes first. A glob can then use either separator, and "\" does not escape.
+func excludeMatches(glob string, path string, separator rune) (bool, error) {
+	if separator != '/' {
+		glob = strings.Replace(glob, string(separator), "/", -1)
+		path = strings.Replace(path, string(separator), "/", -1)
+	}
+	return doublestar.Match(glob, path)
+}
+
+// reportBadGlob logs an exclude glob with a syntax error once. doublestar finds
+// such an error only when a path reaches the faulty part of the pattern, so it
+// cannot be checked at startup.
+func (c *Collector) reportBadGlob(glob string, err error) {
+	if c.reportedGlobs[glob] {
+		return
+	}
+	if c.reportedGlobs == nil {
+		c.reportedGlobs = make(map[string]bool)
+	}
+	c.reportedGlobs[glob] = true
+	c.logger.Printf("Exclude glob '%s' is not valid and may exclude nothing: %v", glob, err)
+}
+
+// decidedByName reports whether the file name alone decides the content
+// filter: extensions are configured and magic headers are not.
+func (c *Collector) decidedByName() bool {
+	return len(c.FileExtensions) > 0 && len(c.MagicHeaders) == 0
+}
+
+func (c *Collector) collectPath(scanRoot string) {
+	root, err := resolveScanRoot(scanRoot)
+	if err != nil {
+		atomic.AddInt64(&c.Statistics.rootErrors, 1)
+		c.logger.Printf("Could not read scan root '%s': %v", scanRoot, err)
+		return
+	}
+	if root != scanRoot {
+		c.logger.Printf("Scan root '%s' is a symbolic link, walking its target '%s'", scanRoot, root)
+	}
 	c.logger.Printf("Walking through '%s' to find files to upload", root)
 	walkStart := time.Now()
 	var submissionWait time.Duration
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if c.collectionStopped() {
 			return errCollectionStopped
 		}
@@ -611,7 +708,11 @@ func (c *Collector) collectPath(root string) {
 			return nil
 		}
 		for _, glob := range c.ExcludeGlobs {
-			if match, _ := doublestar.Match(glob, path); match {
+			match, err := excludeMatches(glob, path, os.PathSeparator)
+			if err != nil {
+				c.reportBadGlob(glob, err)
+			}
+			if match {
 				if info.IsDir() {
 					c.debugf("Skipping directory '%s' due to exclusion rule %s", path, glob)
 					c.Statistics.incrementSkipReason(SkipReasonDirectory)
@@ -639,9 +740,13 @@ func (c *Collector) collectPath(root string) {
 		if reason, excluded := c.quickMetadataCheck(info); excluded {
 			c.debugf("Skipping file '%s' (%s)", path, reason.String())
 			c.Statistics.incrementSkipReason(reason)
+		} else if c.decidedByName() && !c.extensionWanted(path) {
+			// Not queued, so a file that the name already rules out is never opened.
+			c.debugf("Skipping file '%s' (%s)", path, SkipReasonWrongType.String())
+			c.Statistics.incrementSkipReason(SkipReasonWrongType)
 		} else {
 			submissionStart := time.Now()
-			c.filesToUpload <- infoWithPath{info, path, 0}
+			c.filesToUpload <- infoWithPath{FileInfo: info, path: path}
 			submissionWait += time.Since(submissionStart)
 		}
 		return nil
@@ -662,6 +767,10 @@ func (c *Collector) Stop() {
 	c.debugf("Waiting for pending uploads to finish...")
 	close(c.filesToUpload)
 	c.workerGroup.Wait()
+	if c.progressStop != nil {
+		close(c.progressStop)
+		<-c.progressDone
+	}
 
 	totalDuration := time.Since(c.startTime)
 
@@ -717,6 +826,9 @@ type infoWithPath struct {
 	os.FileInfo
 	path    string
 	retries uint
+	// selected is set once the content filters accepted the file; a retry does
+	// not check them again.
+	selected bool
 }
 
 const (
@@ -753,56 +865,59 @@ func (c *Collector) throttle() {
 // uploadToThunderstorm uploads a file to the Thunderstorm server.
 // Returns true if the upload should be retried (e.g., due to transient errors or rate limiting),
 // or false if the upload completed (successfully or with a permanent error).
+// The wait before a retry happens here, after attemptUpload has closed the file.
 func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
+	redo, retryDelay := c.attemptUpload(info)
+	if redo {
+		c.retrySleep(retryDelay)
+	}
+	return redo
+}
+
+// isGatewayError reports whether the status says that a gateway or proxy in
+// front of Thunderstorm could not reach it.
+func isGatewayError(status int) bool {
+	return status == http.StatusBadGateway || status == http.StatusGatewayTimeout
+}
+
+// attemptUpload makes one attempt to select and send a file. It returns whether
+// the file should be tried again and how long to wait before that.
+//
+// The file is open only while it is checked and while it is sent, never during
+// a wait (server check, rate limit, retry delay): on Windows an open file
+// cannot be deleted or renamed by its owner.
+func (c *Collector) attemptUpload(info *infoWithPath) (redo bool, retryDelay time.Duration) {
 	if c.collectionStopped() {
 		c.countNotSent(info)
-		return false
+		return false, 0
 	}
-	readStart := time.Now()
-
-	f, err := openSelectedFile(info.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.debugf("Skipping '%s', it vanished before it could be read: %v", info.path, err)
-			return
+	if !info.selected {
+		if !c.selectFile(info) {
+			return false, 0
 		}
-		c.logger.Printf("Could not open file '%s': %v\n", info.path, err)
-		atomic.AddInt64(&c.Statistics.fileErrors, 1)
-		return
-	}
-	defer f.Close()
-
-	size, skipReason, excluded, err := c.checkOpenedFile(info, f)
-	if err != nil {
-		c.logger.Printf("Could not read file '%s': %v\n", info.path, err)
-		atomic.AddInt64(&c.Statistics.fileErrors, 1)
-		return
-	}
-	if !excluded {
-		skipReason, excluded = c.checkFileContent(info, f)
-	}
-	if excluded {
-		c.debugf("Skipping file '%s' (%s)", info.path, skipReason.String())
-		c.Statistics.incrementSkipReason(skipReason)
-		return
-	}
-
-	readDuration := time.Since(readStart)
-	atomic.AddInt64(&c.Statistics.timeReading, int64(readDuration))
-
-	// Dry-run mode: skip actual upload
-	if c.DryRun {
-		c.debugf("File '%s' would be sent (DRY-RUN)", info.path)
-		atomic.AddInt64(&c.Statistics.uploadedFiles, 1)
-		return
+		info.selected = true
+		// Dry-run mode: skip actual upload
+		if c.DryRun {
+			c.debugf("File '%s' would be sent (DRY-RUN)", info.path)
+			atomic.AddInt64(&c.Statistics.uploadedFiles, 1)
+			return false, 0
+		}
 	}
 
 	c.waitWhileThunderstormIsChecked()
 	if c.collectionStopped() {
 		c.countNotSent(info)
-		return false
+		return false, 0
 	}
 	c.throttle()
+
+	readStart := time.Now()
+	f, size, ok := c.openSelected(info)
+	if !ok {
+		return false, 0
+	}
+	defer f.Close()
+	atomic.AddInt64(&c.Statistics.timeReading, int64(time.Since(readStart)))
 
 	transmitStart := time.Now()
 	contentType, formData, readError := c.getFileContentAsFormData(f, info.path, size)
@@ -812,27 +927,33 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 		// not to blame, so this is neither retried nor counted as an outage.
 		c.logger.Printf("Could not read file '%s' while sending it: %v", info.path, fileErr)
 		atomic.AddInt64(&c.Statistics.fileErrors, 1)
-		return false
+		return false, 0
 	}
+	// No answer from Thunderstorm itself: a transport error, or a gateway that
+	// could not reach it (HTTP 502 or 504).
+	var undelivered error
 	if err != nil && response == nil {
+		undelivered = err
+	} else if isGatewayError(response.StatusCode) {
+		undelivered = fmt.Errorf("a gateway in front of Thunderstorm answered HTTP %d", response.StatusCode)
+	}
+	if undelivered != nil {
 		if info.retries < maxRetries {
-			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, err)
+			c.logger.Printf("Could not send file '%s' to thunderstorm, will try again: %v", info.path, undelivered)
 			info.retries++
-			c.retrySleep(baseRetryDelay * time.Duration(1<<(info.retries-1)))
-			return true
-		} else {
-			c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it: %v", info.path, err)
-			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
-			c.recordUndeliverable()
-			return false
+			return true, baseRetryDelay * time.Duration(1<<(info.retries-1))
 		}
+		c.logger.Printf("Could not send file '%s' to thunderstorm, canceling it: %v", info.path, undelivered)
+		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
+		c.recordUndeliverable()
+		return false, 0
 	}
 	if response.StatusCode == http.StatusServiceUnavailable {
 		if info.retries >= maxRetries {
 			c.logger.Printf("Thunderstorm has no free capacities for file '%s', canceling it after %d retries", info.path, maxRetries)
 			atomic.AddInt64(&c.Statistics.uploadErrors, 1)
 			c.recordUndeliverable()
-			return false
+			return false, 0
 		}
 		info.retries++
 		retryAfter := response.Header.Get("Retry-After")
@@ -844,19 +965,18 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 			retryTime = maxRetryAfter
 		}
 		c.logger.Printf("Thunderstorm has no free capacities for file '%s', retrying in %d seconds", info.path, retryTime)
-		c.retrySleep(time.Second * time.Duration(retryTime))
-		return true
+		return true, time.Second * time.Duration(retryTime)
 	}
 	c.recordAnswer()
 	if err != nil {
 		c.logger.Printf("Could not read response body for file '%s': %v", info.path, err)
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
-		return
+		return false, 0
 	}
 	if response.StatusCode != http.StatusOK {
 		atomic.AddInt64(&c.Statistics.uploadErrors, 1)
 		c.logger.Printf("Received error from Thunderstorm for file '%s': %d%s %v\n", info.path, response.StatusCode, redirectHint(response), string(responseBody))
-		return
+		return false, 0
 	}
 	transmitDuration := time.Since(transmitStart)
 	atomic.AddInt64(&c.Statistics.timeTransmitting, int64(transmitDuration))
@@ -867,7 +987,65 @@ func (c *Collector) uploadToThunderstorm(info *infoWithPath) (redo bool) {
 	}
 
 	c.debugf("File '%s' processed successfully", info.path)
-	return
+	return false, 0
+}
+
+// selectFile applies the content filters (extension and magic header) and
+// reports whether the file is to be sent. It opens the file only to read a
+// magic header or, in a dry run, to show that the file can be read; a skipped
+// or unreadable file is logged and counted here.
+func (c *Collector) selectFile(info *infoWithPath) bool {
+	readStart := time.Now()
+	defer func() {
+		atomic.AddInt64(&c.Statistics.timeReading, int64(time.Since(readStart)))
+	}()
+	var f *os.File
+	needsHeader := len(c.MagicHeaders) > 0 && !c.extensionWanted(info.path)
+	if needsHeader || c.DryRun {
+		var ok bool
+		if f, _, ok = c.openSelected(info); !ok {
+			return false
+		}
+		defer f.Close()
+	}
+	if skipReason, excluded := c.checkFileContent(info, f); excluded {
+		c.debugf("Skipping file '%s' (%s)", info.path, skipReason.String())
+		c.Statistics.incrementSkipReason(skipReason)
+		return false
+	}
+	return true
+}
+
+// openSelected opens a file that the walk selected and checks it against what
+// the walk saw, see checkOpenedFile. It returns the open file and the size to
+// send. Otherwise the reason is logged and counted here: a file that vanished
+// is only noted in debug output, one that grew past the size limit is skipped,
+// anything else is a file error.
+func (c *Collector) openSelected(info *infoWithPath) (*os.File, int64, bool) {
+	f, err := openSelectedFile(info.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.debugf("Skipping '%s', it vanished before it could be read: %v", info.path, err)
+			return nil, 0, false
+		}
+		c.logger.Printf("Could not open file '%s': %v\n", info.path, err)
+		atomic.AddInt64(&c.Statistics.fileErrors, 1)
+		return nil, 0, false
+	}
+	size, skipReason, excluded, err := c.checkOpenedFile(info, f)
+	if err != nil {
+		f.Close()
+		c.logger.Printf("Could not read file '%s': %v\n", info.path, err)
+		atomic.AddInt64(&c.Statistics.fileErrors, 1)
+		return nil, 0, false
+	}
+	if excluded {
+		f.Close()
+		c.debugf("Skipping file '%s' (%s)", info.path, skipReason.String())
+		c.Statistics.incrementSkipReason(skipReason)
+		return nil, 0, false
+	}
+	return f, size, true
 }
 
 // quickMetadataCheck performs a quick metadata check without opening the file.
@@ -907,16 +1085,7 @@ func (c *Collector) quickMetadataCheck(info os.FileInfo) (SkipReason, bool) {
 //   - If neither extensions nor magic headers match (and at least one is specified), exclude the file.
 //   - If no extensions or magic headers are specified, all files pass content filtering.
 func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason, bool) {
-	// Extensions are matched case-insensitively: Windows (and the default macOS
-	// filesystem) treat RUN.EXE and run.exe as the same file type.
-	var extensionWanted bool
-	lowerPath := strings.ToLower(info.path)
-	for _, extension := range c.FileExtensions {
-		if strings.HasSuffix(lowerPath, strings.ToLower(extension)) {
-			extensionWanted = true
-			break
-		}
-	}
+	extensionWanted := c.extensionWanted(info.path)
 
 	var magicHeaderWanted bool
 	// Only check magic headers if:
@@ -924,9 +1093,11 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 	// 2. Either no extensions matched, OR no extensions are configured
 	if len(c.MagicHeaders) > 0 && !extensionWanted {
 		headerBuffer := make([]byte, c.magicHeaderExtractionLength)
+		// A file shorter than the longest magic header ends the read with io.EOF;
+		// what was read can still start with a shorter header.
 		readLength, err := f.ReadAt(headerBuffer, 0)
-		if err != nil {
-			c.debugf("Could not read magic header for file '%s'", info.path)
+		if err != nil && err != io.EOF {
+			c.debugf("Could not read magic header for file '%s': %v", info.path, err)
 		} else {
 			headerBuffer = headerBuffer[:readLength]
 			for _, magicHeader := range c.MagicHeaders {
@@ -944,6 +1115,19 @@ func (c *Collector) checkFileContent(info *infoWithPath, f *os.File) (SkipReason
 	}
 
 	return 0, false
+}
+
+// extensionWanted reports whether the path ends in one of the configured
+// extensions. Extensions are matched case-insensitively: Windows (and the
+// default macOS filesystem) treat RUN.EXE and run.exe as the same file type.
+func (c *Collector) extensionWanted(path string) bool {
+	lowerPath := strings.ToLower(path)
+	for _, extension := range c.FileExtensions {
+		if strings.HasSuffix(lowerPath, strings.ToLower(extension)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Collector) thunderstormUrl() string {

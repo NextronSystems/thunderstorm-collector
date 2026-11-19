@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -54,6 +56,7 @@ func buildHttpTransport(config Config) *http.Transport {
 		tlsConfig.RootCAs = caPool
 	}
 
+	idleConnections := effectiveThreads(config.Threads) + 1
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -68,7 +71,12 @@ func buildHttpTransport(config Config) *http.Transport {
 			trackDial(ctx, wrapped)
 			return wrapped, nil
 		},
-		MaxIdleConns:          config.Threads,
+		// Every worker keeps its connection to Thunderstorm, plus one for a marker
+		// sent while the workers run. The per-host limit is the one that counts:
+		// all requests go to one host, and its default of 2 would close and reopen
+		// (with HTTPS: renegotiate) connections with more than two workers.
+		MaxIdleConns:          idleConnections,
+		MaxIdleConnsPerHost:   idleConnections,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -107,18 +115,36 @@ func (c *stallTimeoutConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-func validateConfig(config Config) (cc CollectorConfig, err error) {
-	// Handle thread count first, before assigning to cc:
-	// - Positive: use exact number
-	// - Zero: use all available CPU cores
-	// - Negative: use all cores minus the absolute value (e.g., -2 = NumCPU - 2)
-	threads := config.Threads
+// effectiveThreads returns the number of upload workers for a --threads value:
+//   - Positive: use exact number
+//   - Zero: use all available CPU cores
+//   - Negative: use all cores minus the absolute value (e.g., -2 = NumCPU - 2)
+func effectiveThreads(threads int) int {
 	if threads <= 0 {
 		threads = runtime.NumCPU() + threads // For 0: NumCPU + 0; For -2: NumCPU - 2
 	}
 	if threads < 1 {
 		threads = 1 // Minimum of 1 thread
 	}
+	return threads
+}
+
+// validateServer refuses a --thunderstorm-server value that is not a bare host
+// name or IP address. A URL or a host:port pair would otherwise fail later with
+// an error that does not name the option.
+func validateServer(server string) error {
+	if strings.Contains(server, "/") {
+		return fmt.Errorf("thunderstorm-server: '%s' is not a host name or IP address; give the host only and use --port and --ssl instead of a URL", server)
+	}
+	// An IPv6 address has more than one colon.
+	if strings.Count(server, ":") == 1 {
+		return fmt.Errorf("thunderstorm-server: '%s' must not include a port; use --port", server)
+	}
+	return nil
+}
+
+func validateConfig(config Config) (cc CollectorConfig, err error) {
+	threads := effectiveThreads(config.Threads)
 
 	cc = CollectorConfig{
 		RootPaths:      config.RootPaths,
@@ -156,6 +182,14 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		if err != nil {
 			return cc, fmt.Errorf("max-age: could not parse number from %s: %v", config.MaxAgeInDays, err)
 		}
+		// A negative age would put the cutoff into the future, and a very large
+		// one overflows time.Duration; both would skip every file as too old.
+		if number < 0 {
+			return cc, fmt.Errorf("max-age: must not be negative, got %d", number)
+		}
+		if int64(number) > math.MaxInt64/int64(multiplier) {
+			return cc, fmt.Errorf("max-age: %d is too large; leave max-age empty to collect files of any age", number)
+		}
 		cc.ThresholdTime = time.Now().Add(-1 * multiplier * time.Duration(number))
 	}
 
@@ -168,6 +202,9 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 		return cc, errors.New("thunderstorm-server: not specified (required unless using --dry-run)")
 	}
 	if !config.DryRun {
+		if err := validateServer(config.Server); err != nil {
+			return cc, err
+		}
 		var protocol string
 		if config.Ssl {
 			protocol = "https"
@@ -213,6 +250,12 @@ func validateConfig(config Config) (cc CollectorConfig, err error) {
 	return cc, nil
 }
 
+// openLogfile opens the --logfile for appending, so that a scheduled run keeps
+// the log of the run before it.
+func openLogfile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+}
+
 func main() {
 
 	fmt.Println(`   ________                __            __                `)
@@ -231,7 +274,7 @@ func main() {
 
 	collectorConfig, err := validateConfig(config)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error while parsing arguments: %v", err)
+		fmt.Fprintf(os.Stderr, "Error while parsing arguments: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -239,9 +282,9 @@ func main() {
 
 	var output io.Writer
 	if config.Logfile != "" {
-		logfile, err := os.Create(config.Logfile)
+		logfile, err := openLogfile(config.Logfile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Could not open log file %s: %v", config.Logfile, err)
+			fmt.Fprintf(os.Stderr, "Could not open log file %s: %v\n", config.Logfile, err)
 			os.Exit(1)
 		}
 		defer logfile.Close()

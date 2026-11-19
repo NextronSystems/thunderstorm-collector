@@ -9,9 +9,9 @@ import (
 
 type Config struct {
 	MaxAgeInDays     string   `yaml:"max-age" description:"Max age of collected files. Files with older modification date are ignored.\nUnit can be specified using a suffix: s for seconds, m for minutes, h for hour, d for day and defaults to days.\nExample: --max-age 10h" shorthand:"a"`
-	RootPaths        []string `yaml:"path" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
+	RootPaths        []string `yaml:"path" whole:"true" description:"Root paths from where files should be collected.\nSpecify multiple root paths by using this flag multiple times." shorthand:"p"`
 	FileExtensions   []string `yaml:"extension" description:"File extensions that should be collected. If left empty, file extensions are ignored.\nSpecify multiple extensions by using this flag multiple times.\nExample: -e .exe -e .dll" shorthand:"e"`
-	ExcludeGlobs     []string `yaml:"exclude" description:"Paths that should be excluded. Supports globbing with ?, * and **.\nSpecify multiple excludes by using this flag multiple times.\nExample: --exclude C:\\tools --exclude C:\\Users\\**\\.git\\**"`
+	ExcludeGlobs     []string `yaml:"exclude" whole:"true" description:"Paths that should be excluded. Supports globbing with ?, * and **.\nSpecify multiple excludes by using this flag multiple times.\nExample: --exclude C:\\tools --exclude C:\\Users\\**\\.git\\**"`
 	Server           string   `yaml:"thunderstorm-server" shorthand:"s" description:"FQDN or IP of the Thunderstorm Server to which files should be uploaded.\nExamples: --thunderstorm-server my.thunderstorm, --thunderstorm-server 127.0.0.1"`
 	Port             int      `yaml:"port" description:"Port on the Thunderstorm Server to which files should be uploaded."`
 	Ssl              bool     `yaml:"ssl" description:"If true, connect to the Thunderstorm Server using HTTPS instead of HTTP."`
@@ -20,9 +20,9 @@ type Config struct {
 	Threads          int      `yaml:"threads" description:"How many threads should upload files simultaneously. Set to 0 to use all available CPU cores, or use negative values to reserve cores (e.g., -2 = all cores except 2)." shorthand:"r"`
 	MaxFileSizeMB    int64    `yaml:"max-filesize" description:"Maximum file size up to which files should be uploaded (in MB)." shorthand:"m"`
 	Proxy            string   `yaml:"http-proxy" description:"Proxy that should be used for the connection to Thunderstorm.\nIf left empty, the proxy is filled from the HTTP_PROXY and HTTPS_PROXY environment variables."`
-	CAs              []string `yaml:"ca" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.\nSpecify multiple CAs by using this flag multiple times."`
+	CAs              []string `yaml:"ca" whole:"true" description:"Path to a PEM CA certificate that signed the HTTPS certificate of the Thunderstorm server.\nSpecify multiple CAs by using this flag multiple times."`
 	Insecure         bool     `yaml:"insecure" description:"Don't verify the Thunderstorm certificate if HTTPS is used."`
-	Logfile          string   `yaml:"logfile" description:"Write the log to this file as well as to the console." shorthand:"l"`
+	Logfile          string   `yaml:"logfile" description:"Append the log to this file as well as writing it to the console." shorthand:"l"`
 	Source           string   `yaml:"source" description:"Name for this device in the Thunderstorm log messages." shorthand:"o"`
 	MagicHeaders     []string `yaml:"magic" description:"Magic Header (bytes at file start) that should be collected, written as hex bytes. If left empty, magic headers are ignored.\nSpecify multiple wanted Magic Headers by using this flag multiple times.\nExample: --magic 4d5a --magic cffa"`
 	AllFilesystems   bool     `yaml:"all-filesystems" description:"Ignore filesystem types. By default, the collector doesn't collect files from network mounts or special filesystems; with this flag, files are collected regardless of the underlying filesystem type."`
@@ -84,9 +84,22 @@ func ParseConfig() Config {
 		flags.Usage()
 		os.Exit(1)
 	}
-	if config.Help || (len(os.Args) == 1 && config.Server == "") {
+	if config.Help {
 		flags.Usage()
 		os.Exit(0)
 	}
+	if nothingToDo(len(os.Args), config) {
+		flags.Usage()
+		fmt.Fprintln(os.Stderr, "\nNothing to do: no Thunderstorm server is configured. Set -s/--thunderstorm-server or thunderstorm-server in config.yml, or use --dry-run.")
+		os.Exit(1)
+	}
 	return config
+}
+
+// nothingToDo reports whether the collector was started without arguments and
+// without a configuration that gives it work: no server and no dry run. The
+// usage is then shown as a failure, so that a scheduled run that does not find
+// its config.yml does not look like a successful collection.
+func nothingToDo(argCount int, config Config) bool {
+	return argCount == 1 && config.Server == "" && !config.DryRun
 }
